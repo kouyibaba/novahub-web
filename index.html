@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0C0D10">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="icon.svg">
+<title>NovaHub · 星隅</title>
+<link rel="manifest" href="manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css?v=20261124-pro1">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+</head>
+<body>
+<!-- 顶栏 -->
+<header class="topbar">
+  <div class="logo" id="brandLogo"></div>
+  <div class="search-box">
+    <span class="search-ico" id="topSearchIco"></span>
+    <input id="searchInput" class="search" type="search" placeholder="搜索影片或演员">
+    <button id="searchBtn" class="search-submit" aria-label="搜索">搜索</button>
+  </div>
+</header>
+
+<!-- 主内容区（SPA 视图切换） -->
+<main id="view" class="view"></main>
+
+<!-- 悬浮 Mini 音乐播放条 -->
+<div id="miniBar" class="mini-bar hidden"></div>
+
+<!-- 全局三模块悬浮切换器 -->
+<div id="modeFab" class="mode-fab">
+  <div id="fabMenu" class="fab-menu hidden">
+    <button class="fab-item" data-mode="vod"></button>
+    <button class="fab-item" data-mode="music"></button>
+    <button class="fab-item" data-mode="novel"></button>
+  </div>
+  <button id="fabBtn" class="fab-btn" aria-label="切换模块"></button>
+</div>
+
+<!-- 底部 Dock（影视/音乐/小说模式动态切换） -->
+<nav id="tabbar" class="tabbar"></nav>
+
+<!-- 视频播放器全屏浮层 -->
+<div id="playerLayer" class="player-layer hidden">
+  <div class="player-head">
+    <button id="playerBack" class="btn-back"></button>
+    <span id="playerTitle" class="player-title"></span>
+    <button id="playerFav" class="btn-back"></button>
+  </div>
+  <div class="player-box">
+    <video id="video" playsinline webkit-playsinline x5-video-player-type="h5"></video>
+    <div id="playerTip" class="player-tip"></div>
+  </div>
+  <div class="player-ctrl">
+    <button id="btnPlay" aria-label="播放/暂停"></button>
+    <input id="seek" type="range" min="0" max="1000" value="0">
+    <span id="timeText">00:00 / 00:00</span>
+    <select id="rateSel" aria-label="播放倍速">
+      <option value="0.75">0.75x</option>
+      <option value="1" selected>1.0x</option>
+      <option value="1.25">1.25x</option>
+      <option value="1.5">1.5x</option>
+      <option value="2">2.0x</option>
+    </select>
+    <select id="qualitySel"><option>自动</option></select>
+    <button id="btnFs" aria-label="全屏"></button>
+  </div>
+  <div id="epList" class="ep-list"></div>
+</div>
+
+<!-- 小说沉浸阅读器全屏浮层 -->
+<div id="readerLayer" class="reader-layer hidden" data-rtheme="dark">
+  <div id="readerHead" class="reader-head">
+    <button id="readerBack" class="btn-back"></button>
+    <div class="reader-meta">
+      <div id="readerBookTitle" class="reader-book-title"></div>
+      <div id="readerChSub" class="reader-ch-sub"></div>
+    </div>
+    <button id="readerFsBtn" class="btn-back" aria-label="全屏"></button>
+    <button id="readerShelfBtn" class="btn-back"></button>
+  </div>
+
+  <div id="readerScroll" class="reader-scroll">
+    <article id="readerArticle" class="reader-article"></article>
+    <div class="reader-inline-nav" id="readerInlineNav">
+      <button id="rPrevInline" class="btn ghost">上一章</button>
+      <button id="rTocInline" class="btn ghost">目录</button>
+      <button id="rNextInline" class="btn primary">下一章</button>
+    </div>
+  </div>
+
+  <div id="readerPageHud" class="reader-page-hud hidden"></div>
+
+  <div id="readerFoot" class="reader-foot">
+    <div class="reader-cfg-row">
+      <div class="reader-font-box">
+        <button id="rFontDec" class="r-pill" aria-label="减小字号">A-</button>
+        <span id="rFontVal" class="r-font-val">18</span>
+        <button id="rFontInc" class="r-pill" aria-label="增大字号">A+</button>
+      </div>
+      <div class="reader-mode-box">
+        <button class="r-pill r-pmode" data-pmode="scroll">上下</button>
+        <button class="r-pill r-pmode" data-pmode="page">翻页</button>
+      </div>
+      <div class="reader-themes">
+        <button class="r-swatch dark" data-theme="dark" title="曜石暗夜">暗夜</button>
+        <button class="r-swatch sepia" data-theme="sepia" title="暖羊皮纸">羊皮</button>
+        <button class="r-swatch sage" data-theme="sage" title="松霜护眼">护眼</button>
+      </div>
+    </div>
+    <div class="reader-nav-row">
+      <button id="rPrevBtn" class="r-nav-btn">上一章</button>
+      <button id="rTocBtn" class="r-nav-btn"></button>
+      <button id="rTtsBtn" class="r-nav-btn"></button>
+      <button id="rNextBtn" class="r-nav-btn primary">下一章</button>
+    </div>
+  </div>
+
+  <div id="tocMask" class="toc-mask hidden">
+    <div class="toc-sheet">
+      <div class="toc-head">
+        <span id="tocTitle" class="toc-head-title">目录</span>
+        <button id="tocReverseBtn" class="btn ghost" style="padding:4px 10px;font-size:12px">倒序</button>
+      </div>
+      <div id="tocRangeChips" class="m-chips" style="padding:8px 14px 4px;margin:0"></div>
+      <div id="tocList" class="toc-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 弹窗 -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="modalTitle">标题</h3>
+    <div id="modalBody"></div>
+    <div class="modal-btns">
+      <button id="modalCancel">取消</button>
+      <button id="modalOk" class="primary">确定</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js?v=20261124-pro1"></script>
+</body>
+</html>

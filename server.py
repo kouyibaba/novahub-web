@@ -1,0 +1,836 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""NovaHub · 星隅 一体化网关服务：静态托管 + 安全防盗刷代理 + 商业化会员/同步 + 无损曲库 + 实时流式小说。"""
+
+import ast
+import collections
+import glob
+import html
+import http.server
+import ipaddress
+import json
+import os
+import re
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+
+import db
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("PORT", "8765"))
+ENGINE_PORT = int(os.environ.get("NOVEL_ENGINE_PORT", "18423"))
+ENGINE_URL = f"http://127.0.0.1:{ENGINE_PORT}"
+NOVEL_DATA_DIR = os.path.join(ROOT, "novel_engine")
+
+CTX = ssl.create_default_context()
+CTX.check_hostname = False
+CTX.verify_mode = ssl.CERT_NONE
+
+UA_DESKTOP = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+UA_MOBILE = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Mobile Safari/537.36"
+
+# 目录与章节内存缓存
+_DIR_CACHE = {}
+_DIR_LOCK = threading.Lock()
+_CH_MEM_CACHE = {}
+_CH_LOCK = threading.Lock()
+
+# 引擎守护锁与在途任务防重集合
+_ENGINE_LOCK = threading.Lock()
+_INFLIGHT_LOCK = threading.Lock()
+_PREFETCHING_BOOKS = set()
+
+# 轻量滑动窗口 IP 限流器
+_RATE_BUCKETS = collections.defaultdict(collections.deque)
+_RATE_LOCK = threading.Lock()
+
+# 禁止静态直出的敏感扩展名与路径前缀
+_FORBIDDEN_EXTS = (".py", ".pyc", ".db", ".db-wal", ".db-shm", ".log", ".yml", ".yaml", ".conf", ".exe")
+_FORBIDDEN_PREFIXES = ("/novel_engine/", "/__pycache__/")
+
+
+def _check_rate_limit(ip, bucket, limit, window_sec=60):
+    """基于客户端 IP 的轻量滑动窗口限流。"""
+    now = time.time()
+    key = (ip, bucket)
+    with _RATE_LOCK:
+        dq = _RATE_BUCKETS[key]
+        while dq and now - dq[0] > window_sec:
+            dq.popleft()
+        if len(dq) >= limit:
+            return False
+        dq.append(now)
+        return True
+
+
+def _is_safe_proxy_target(target_url):
+    """防 SSRF 校验：拒绝代理内网与环回保留地址。"""
+    try:
+        parsed = urllib.parse.urlparse(target_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return False
+        host = parsed.hostname.lower()
+        if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+        except ValueError:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def _http_get_bytes(url, headers=None, timeout=8, max_bytes=4_194_304):
+    """发起通用 HTTP/HTTPS GET 请求并返回字节流与 Content-Type（带体积上限）。"""
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": UA_DESKTOP})
+    with urllib.request.urlopen(req, timeout=timeout, context=CTX) as resp:
+        return resp.status, resp.read(max_bytes), resp.headers.get("Content-Type", "application/json; charset=utf-8")
+
+
+def _find_engine_binary():
+    """按优先级定位小说章节解密可执行文件。"""
+    exe_name = "TomatoNovelDownloader.exe" if os.name == "nt" else "TomatoNovelDownloader"
+    candidates = [
+        os.path.join(NOVEL_DATA_DIR, exe_name),
+        os.path.join(ROOT, exe_name),
+    ]
+    if os.name == "nt":
+        candidates.append(r"C:\Users\kkkyyy\.gemini\antigravity\scratch\tomato-downloader-web\TomatoNovelDownloader.exe")
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _is_engine_up():
+    try:
+        with socket.create_connection(("127.0.0.1", ENGINE_PORT), timeout=0.4):
+            return True
+    except OSError:
+        return False
+
+
+def ensure_novel_engine():
+    """守护机制：按需自动拉起后台小说解密引擎并等待就绪。"""
+    if _is_engine_up():
+        return True
+    with _ENGINE_LOCK:
+        if _is_engine_up():
+            return True
+        exe_path = _find_engine_binary()
+        if not exe_path:
+            return False
+        os.makedirs(NOVEL_DATA_DIR, exist_ok=True)
+        try:
+            subprocess.Popen(
+                [exe_path, "--server", "--data-dir", NOVEL_DATA_DIR],
+                cwd=NOVEL_DATA_DIR,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            for _ in range(30):
+                time.sleep(0.2)
+                if _is_engine_up():
+                    return True
+        except Exception:
+            return False
+    return _is_engine_up()
+
+
+def _clean_loose_artifacts():
+    for pat in ("*.txt", "*.epub"):
+        for fp in glob.glob(os.path.join(NOVEL_DATA_DIR, pat)):
+            try:
+                if os.path.isfile(fp):
+                    os.remove(fp)
+            except OSError:
+                pass
+
+
+def _start_cold_cache_cleaner(ttl_days=30):
+    """后台定时清理线程：每 24 小时淘汰超过 30 天未访问的冷门书籍缓存目录。"""
+    def _loop():
+        while True:
+            try:
+                if os.path.isdir(NOVEL_DATA_DIR):
+                    cutoff = time.time() - ttl_days * 86400
+                    for name in os.listdir(NOVEL_DATA_DIR):
+                        if not re.fullmatch(r"\d{15,22}", name):
+                            continue
+                        full = os.path.join(NOVEL_DATA_DIR, name)
+                        if os.path.isdir(full) and os.path.getmtime(full) < cutoff:
+                            shutil.rmtree(full, ignore_errors=True)
+            except Exception:
+                pass
+            time.sleep(86400)
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
+def _load_cached_chapters(book_id):
+    jl_path = os.path.join(NOVEL_DATA_DIR, str(book_id), "downloaded_chapters.jsonl")
+    if not os.path.isfile(jl_path):
+        return {}
+    try:
+        st = os.stat(jl_path)
+    except OSError:
+        return {}
+
+    with _CH_LOCK:
+        cached = _CH_MEM_CACHE.get(book_id)
+        if cached and cached["mtime"] == st.st_mtime and cached["size"] == st.st_size:
+            return cached["by_id"]
+
+        by_id = {}
+        try:
+            with open(jl_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        cid = str(obj.get("id") or "")
+                        if cid and obj.get("content"):
+                            by_id[cid] = obj
+                    except Exception:
+                        continue
+        except OSError:
+            return {}
+
+        _CH_MEM_CACHE[book_id] = {"mtime": st.st_mtime, "size": st.st_size, "by_id": by_id}
+        return by_id
+
+
+def _fetch_book_directory(book_id):
+    now = time.time()
+    with _DIR_LOCK:
+        hit = _DIR_CACHE.get(book_id)
+        if hit and now - hit["ts"] < 600:
+            return hit["chapters"]
+
+    url = f"https://fanqienovel.com/api/reader/directory/detail?bookId={urllib.parse.quote(str(book_id))}"
+    _, body, _ = _http_get_bytes(url, headers={"User-Agent": UA_DESKTOP}, timeout=8)
+    data = json.loads(body.decode("utf-8", "ignore")).get("data") or {}
+    vols = data.get("chapterListWithVolume") or []
+
+    chapters = []
+    idx = 1
+    for vol in vols:
+        if not isinstance(vol, list):
+            continue
+        for ch in vol:
+            item_id = str(ch.get("itemId") or "").strip()
+            if not item_id:
+                continue
+            chapters.append({
+                "index": idx,
+                "id": item_id,
+                "title": str(ch.get("title") or f"第{idx}章").strip(),
+                "volume": str(ch.get("volume_name") or "").strip(),
+            })
+            idx += 1
+
+    if chapters:
+        with _DIR_LOCK:
+            _DIR_CACHE[book_id] = {"ts": now, "chapters": chapters}
+    return chapters
+
+
+def _run_engine_range_job(book_id, start_idx, end_idx, timeout_sec=18):
+    if not ensure_novel_engine():
+        raise RuntimeError("章节解析引擎暂未就绪")
+
+    payload = json.dumps({
+        "book_id": str(book_id),
+        "format": "txt",
+        "range_start": int(start_idx),
+        "range_end": int(end_idx),
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        f"{ENGINE_URL}/api/jobs",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=6) as resp:
+        job_info = json.loads(resp.read().decode("utf-8", "ignore"))
+    job_id = job_info.get("id")
+    if not job_id:
+        raise RuntimeError("创建章节解析任务失败")
+
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        time.sleep(0.14)
+        try:
+            with urllib.request.urlopen(f"{ENGINE_URL}/api/jobs", timeout=4) as r:
+                jobs_data = json.loads(r.read().decode("utf-8", "ignore"))
+            items = jobs_data.get("items", jobs_data if isinstance(jobs_data, list) else [])
+            cur = next((x for x in items if x.get("id") == job_id), None)
+            if not cur:
+                break
+            state = cur.get("state") or cur.get("status")
+            if state in ("done", "completed"):
+                break
+            if state in ("failed", "cancelled"):
+                raise RuntimeError("章节实时解析失败，请稍后重试")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+
+    _clean_loose_artifacts()
+
+
+def _prefetch_next_chapters_async(book_id, chapters, from_idx, count=4):
+    total = len(chapters)
+    start_i = from_idx + 1
+    end_i = min(total, from_idx + count)
+    if start_i > total:
+        return
+
+    cached_map = _load_cached_chapters(book_id)
+    missing = [i for i in range(start_i, end_i + 1) if chapters[i - 1]["id"] not in cached_map]
+    if not missing:
+        return
+
+    with _INFLIGHT_LOCK:
+        if book_id in _PREFETCHING_BOOKS:
+            return
+        _PREFETCHING_BOOKS.add(book_id)
+
+    def _worker():
+        try:
+            _run_engine_range_job(book_id, min(missing), max(missing), timeout_sec=25)
+            _load_cached_chapters(book_id)
+        except Exception:
+            pass
+        finally:
+            with _INFLIGHT_LOCK:
+                _PREFETCHING_BOOKS.discard(book_id)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _sanitize_chapter_html(raw_html):
+    if not raw_html:
+        return ""
+    cleaned = re.sub(r"<script[\s\S]*?</script>", "", raw_html, flags=re.I)
+    if "<p" not in cleaned and "<div" not in cleaned:
+        paras = [f"<p>{html.escape(line.strip())}</p>" for line in cleaned.splitlines() if line.strip()]
+        return "\n".join(paras)
+    return cleaned
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    """统一 HTTP 处理器：静态托管 + 安全代理 + 商业化鉴权/卡密/同步 + 音乐/小说网关。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=ROOT, **kwargs)
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _client_ip(self):
+        xf = self.headers.get("X-Forwarded-For") or self.headers.get("X-Real-IP")
+        if xf:
+            return xf.split(",")[0].strip()
+        return self.client_address[0] if self.client_address else "127.0.0.1"
+
+    def _current_user(self):
+        auth = self.headers.get("Authorization") or ""
+        if auth.lower().startswith("bearer "):
+            return db.verify_token(auth[7:].strip())
+        return None
+
+    def _is_admin(self):
+        auth = self.headers.get("Authorization") or ""
+        if auth.lower().startswith("bearer "):
+            return db.verify_admin_token(auth[7:].strip())
+        return False
+
+    def _read_json_body(self, max_bytes=1_048_576):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n <= 0 or n > max_bytes:
+            return {}
+        raw = self.rfile.read(n).decode("utf-8", "ignore")
+        return json.loads(raw) if raw.strip() else {}
+
+    def _is_same_origin_request(self):
+        """校验 /proxy 请求来源是否同源，防止外部第三方站点盗链刷流量。"""
+        host = (self.headers.get("Host") or "").lower()
+        ref = (self.headers.get("Referer") or "").lower()
+        orig = (self.headers.get("Origin") or "").lower()
+        if not ref and not orig:
+            return True  # 允许本地脚本/健康探针直接调试
+        if host and ((host in ref) or (host in orig)):
+            return True
+        return False
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def send_json(self, obj, status=200):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ---------- 商业化账号 / 卡密 / 云端同步 ----------
+    def handle_auth_register(self):
+        if not _check_rate_limit(self._client_ip(), "auth", 20, 60):
+            return self.send_json({"error": "操作过于频繁，请 1 分钟后再试"}, 429)
+        try:
+            body = self._read_json_body(16384)
+            user, token = db.register_user(body.get("username"), body.get("password"))
+            self.send_json({"user": user, "token": token})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    def handle_auth_login(self):
+        if not _check_rate_limit(self._client_ip(), "auth", 20, 60):
+            return self.send_json({"error": "操作过于频繁，请 1 分钟后再试"}, 429)
+        try:
+            body = self._read_json_body(16384)
+            user, token = db.login_user(body.get("username"), body.get("password"))
+            self.send_json({"user": user, "token": token})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 401)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    def handle_auth_me(self):
+        user = self._current_user()
+        if not user:
+            return self.send_json({"user": None}, 200)
+        self.send_json({"user": user})
+
+    def handle_vip_redeem(self):
+        if not _check_rate_limit(self._client_ip(), "redeem", 15, 60):
+            return self.send_json({"error": "兑换过于频繁，请稍后再试"}, 429)
+        user = self._current_user()
+        if not user:
+            return self.send_json({"error": "请先登录账号后再兑换卡密"}, 401)
+        try:
+            body = self._read_json_body(8192)
+            updated, days = db.redeem_code(user["id"], body.get("code"))
+            self.send_json({"user": updated, "days": days})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    def handle_sync_get(self):
+        user = self._current_user()
+        if not user:
+            return self.send_json({"error": "请先登录账号"}, 401)
+        if not user["is_pro"]:
+            return self.send_json({"error": "云端多端同步为 NovaHub Pro 专属权益"}, 403)
+        snap = db.get_user_sync(user["id"])
+        self.send_json({"sync": snap})
+
+    def handle_sync_post(self):
+        user = self._current_user()
+        if not user:
+            return self.send_json({"error": "请先登录账号"}, 401)
+        if not user["is_pro"]:
+            return self.send_json({"error": "云端多端同步为 NovaHub Pro 专属权益"}, 403)
+        try:
+            body = self._read_json_body(1_048_576)
+            ts = db.save_user_sync(user["id"], body.get("data") or body)
+            self.send_json({"ok": True, "updated_at": ts})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    # ---------- 站长网页后台管理接口 ----------
+    def handle_admin_login(self):
+        if not _check_rate_limit(self._client_ip(), "admin_auth", 12, 60):
+            return self.send_json({"error": "尝试过于频繁，请 1 分钟后再试"}, 429)
+        try:
+            body = self._read_json_body(4096)
+            if not db.verify_admin_password(body.get("password")):
+                return self.send_json({"error": "管理员密码错误"}, 401)
+            self.send_json({"token": db.sign_admin_token()})
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    def handle_admin_dashboard(self):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        self.send_json(db.get_admin_dashboard(100))
+
+    def handle_admin_gen_codes(self):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        try:
+            body = self._read_json_body(8192)
+            count = max(1, min(100, int(body.get("count") or 1)))
+            days = max(1, min(36500, int(body.get("days") or 30)))
+            note = str(body.get("note") or "")[:40]
+            codes = db.generate_codes(count, days, note)
+            self.send_json({"codes": codes, "days": days})
+        except Exception as e:
+            self.send_json({"error": str(e)}, 400)
+
+    def handle_admin_config(self):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        try:
+            body = self._read_json_body(16384)
+            if "ad_enabled" in body:
+                db.set_site_config("ad_enabled", "1" if body["ad_enabled"] else "0")
+            for k in ("ad_title", "ad_desc", "ad_url", "ad_btn", "sponsor_tip"):
+                if k in body and body[k] is not None:
+                    db.set_site_config(k, str(body[k])[:300])
+            self.send_json({"ok": True, "config": db.get_public_config()})
+        except Exception as e:
+            self.send_json({"error": str(e)}, 400)
+
+    def handle_admin_password(self):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        try:
+            body = self._read_json_body(4096)
+            db.set_admin_password(body.get("old_password"), body.get("new_password"))
+            self.send_json({"ok": True})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    # ---------- 音乐曲库网关 ----------
+    def handle_kuwo(self, qs):
+        act = qs.get("act", [""])[0]
+        try:
+            if act == "search":
+                q = urllib.parse.quote(qs.get("q", [""])[0])
+                rn = int(qs.get("rn", ["40"])[0])
+                u = (
+                    f"http://search.kuwo.cn/r.s?all={q}&ft=music&newsearch=1&alflac=1"
+                    f"&itemset=web_2013&client=kt&cluster=0&pn=0&rn={rn}&vermerge=1"
+                    f"&rformat=json&encoding=utf8&show_copyright_off=1&pcmp4=1&ver=mbox&vipver=MUSIC_8.7.6.0.BCS31"
+                )
+                _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+                d = ast.literal_eval(raw_b.decode("utf-8", "ignore"))
+                out = []
+                for it in d.get("abslist", []):
+                    rid = str(it.get("MUSICRID", "")).replace("MUSIC_", "").strip()
+                    if not rid:
+                        continue
+                    pic_s = it.get("web_albumpic_short", "")
+                    pic = ("https://img2.kuwo.cn/star/albumcover/" + pic_s.replace("120/", "500/")) if pic_s else ""
+                    out.append({
+                        "id": rid,
+                        "name": html.unescape(it.get("SONGNAME") or it.get("NAME") or "").strip(),
+                        "artist": html.unescape(it.get("ARTIST") or "").replace("&", " / ").strip(),
+                        "album": html.unescape(it.get("ALBUM") or "").strip() or "单曲收录",
+                        "source": "kuwo",
+                        "pic": pic,
+                        "url": "",
+                        "lrc": "",
+                    })
+                self.send_json(out)
+                return
+
+            if act == "url":
+                rid = urllib.parse.quote(qs.get("id", [""])[0])
+                br_in = qs.get("br", ["320"])[0]
+                br_map = {"128": "128kmp3", "192": "192kmp3", "320": "320kmp3", "999": "2000kflac"}
+                br = br_map.get(br_in, "320kmp3")
+                for br_try in ([br, "320kmp3"] if br == "2000kflac" else [br]):
+                    u = f"http://nmobi.kuwo.cn/mobi.s?f=web&user=0&type=convert_url_with_sign&rid={rid}&br={br_try}&source=kwplayer_ar_5.1.0.0_B_jiakong_vh.apk"
+                    _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "okhttp/3.10.0"}, timeout=5)
+                    d = json.loads(raw_b.decode("utf-8", "ignore"))
+                    play_url = (d.get("data") or {}).get("url") or ""
+                    if play_url:
+                        self.send_json({"url": play_url, "br": (d.get("data") or {}).get("bitrate", 0)})
+                        return
+                u2 = f"https://antiserver.kuwo.cn/anti.s?type=convert_url3&rid={rid}&format=mp3"
+                _, raw_b2, _ = _http_get_bytes(u2, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+                d2 = json.loads(raw_b2.decode("utf-8", "ignore"))
+                self.send_json({"url": d2.get("url") or ""})
+                return
+
+            if act == "lrc":
+                rid = urllib.parse.quote(qs.get("id", [""])[0])
+                u = f"http://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId={rid}"
+                _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+                d = json.loads(raw_b.decode("utf-8", "ignore").strip())
+                lrclist = ((d.get("data") or {}).get("lrclist")) or []
+                lines = []
+                for item in lrclist:
+                    sec = float(item.get("time") or 0)
+                    mm = int(sec // 60)
+                    ss = sec - mm * 60
+                    txt = html.unescape(item.get("lineLyric") or "").strip()
+                    if txt:
+                        lines.append(f"[{mm:02d}:{ss:05.2f}]{txt}")
+                self.send_json({"lrc": "\n".join(lines)})
+                return
+
+            self.send_json({"error": "unknown act"}, 400)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 502)
+
+    # ---------- 小说实时在线直读网关 ----------
+    def handle_novel_search(self, qs):
+        raw_q = (qs.get("q") or [""])[0].strip()
+        if not raw_q:
+            return self.send_json({"items": []})
+
+        id_match = re.search(r"(?:fanqienovel\.com/(?:page|reader)/|^)(\d{18,20})(?:\D|$)", raw_q)
+        if id_match and ensure_novel_engine():
+            bid = id_match.group(1)
+            try:
+                _, pb, _ = _http_get_bytes(f"{ENGINE_URL}/api/preview/{bid}", timeout=6)
+                info = json.loads(pb.decode("utf-8", "ignore"))
+                if info.get("book_id") or info.get("book_name"):
+                    return self.send_json({
+                        "items": [{
+                            "book_id": str(info.get("book_id") or bid),
+                            "title": info.get("book_name") or f"书籍 {bid}",
+                            "author": info.get("author") or "未知作者",
+                            "cover": "",
+                            "category": info.get("category") or "精选",
+                            "score": str(info.get("score") or ""),
+                            "status": "已完结" if info.get("finished") else "连载中",
+                            "abstract": info.get("description") or "",
+                        }]
+                    })
+            except Exception:
+                pass
+
+        try:
+            q_enc = urllib.parse.quote(raw_q)
+            u = f"https://novel.snssdk.com/api/novel/channel/homepage/search/search/v1/?aid=1967&q={q_enc}"
+            _, body, _ = _http_get_bytes(u, headers={"User-Agent": UA_MOBILE}, timeout=8)
+            d = json.loads(body.decode("utf-8", "ignore"))
+            ret_list = (d.get("data") or {}).get("ret_data") or []
+            items = []
+            seen = set()
+            for it in ret_list:
+                bid = str(it.get("book_id") or "").strip()
+                if not bid or bid in seen:
+                    continue
+                title = re.sub(r"<[^>]+>", "", str(it.get("title") or "")).strip()
+                if not title:
+                    continue
+                seen.add(bid)
+                c_status = str(it.get("creation_status") or "")
+                items.append({
+                    "book_id": bid,
+                    "title": html.unescape(title),
+                    "author": html.unescape(re.sub(r"<[^>]+>", "", str(it.get("author") or "未知作者")).strip()),
+                    "cover": str(it.get("thumb_url") or "").strip(),
+                    "category": str(it.get("category") or "精选").strip(),
+                    "score": str(it.get("score") or "").strip(),
+                    "status": "已完结" if c_status == "0" else ("连载中" if c_status == "1" else ""),
+                    "abstract": html.unescape(str(it.get("abstract") or "").strip()),
+                })
+            self.send_json({"items": items})
+        except Exception as e:
+            self.send_json({"items": [], "error": f"搜索请求失败: {e}"}, 502)
+
+    def handle_novel_book(self, qs):
+        book_id = (qs.get("book_id") or [""])[0].strip()
+        if not re.fullmatch(r"\d{15,22}", book_id):
+            return self.send_json({"error": "无效的 book_id"}, 400)
+        try:
+            chapters = _fetch_book_directory(book_id)
+            self.send_json({
+                "book_id": book_id,
+                "total": len(chapters),
+                "chapters": chapters,
+            })
+        except Exception as e:
+            self.send_json({"error": f"获取章节目录失败: {e}"}, 502)
+
+    def handle_novel_chapter(self, qs):
+        book_id = (qs.get("book_id") or [""])[0].strip()
+        try:
+            index = int((qs.get("index") or ["1"])[0])
+        except ValueError:
+            index = 1
+
+        if not re.fullmatch(r"\d{15,22}", book_id) or index < 1:
+            return self.send_json({"error": "参数错误"}, 400)
+
+        try:
+            chapters = _fetch_book_directory(book_id)
+            if not chapters:
+                return self.send_json({"error": "未获取到该书章节列表"}, 404)
+            if index > len(chapters):
+                index = len(chapters)
+
+            target = chapters[index - 1]
+            item_id = target["id"]
+
+            cached_map = _load_cached_chapters(book_id)
+            ch_obj = cached_map.get(item_id)
+            was_cached = ch_obj is not None
+
+            if not ch_obj:
+                _run_engine_range_job(book_id, index, index, timeout_sec=18)
+                cached_map = _load_cached_chapters(book_id)
+                ch_obj = cached_map.get(item_id)
+
+            if not ch_obj or not ch_obj.get("content"):
+                return self.send_json({"error": "章节内容解析为空，请重试"}, 502)
+
+            _prefetch_next_chapters_async(book_id, chapters, index, count=4)
+
+            self.send_json({
+                "book_id": book_id,
+                "index": index,
+                "total": len(chapters),
+                "id": item_id,
+                "title": ch_obj.get("title") or target["title"],
+                "volume": target.get("volume") or "",
+                "content": _sanitize_chapter_html(ch_obj.get("content", "")),
+                "cached": was_cached,
+            })
+        except Exception as e:
+            self.send_json({"error": str(e)}, 502)
+
+    # ---------- HTTP 路由入口 ----------
+    def do_POST(self):
+        p = urllib.parse.urlparse(self.path).path
+        if p == "/api/auth/register":
+            return self.handle_auth_register()
+        if p == "/api/auth/login":
+            return self.handle_auth_login()
+        if p == "/api/vip/redeem":
+            return self.handle_vip_redeem()
+        if p == "/api/sync":
+            return self.handle_sync_post()
+        if p == "/api/admin/login":
+            return self.handle_admin_login()
+        if p == "/api/admin/codes":
+            return self.handle_admin_gen_codes()
+        if p == "/api/admin/config":
+            return self.handle_admin_config()
+        if p == "/api/admin/password":
+            return self.handle_admin_password()
+        self.send_json({"error": "Not found"}, 404)
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        p = parsed.path
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        if p == "/api/config":
+            return self.send_json(db.get_public_config())
+        if p == "/api/auth/me":
+            return self.handle_auth_me()
+        if p == "/api/sync":
+            return self.handle_sync_get()
+        if p == "/api/admin/dashboard":
+            return self.handle_admin_dashboard()
+        if p == "/kw":
+            return self.handle_kuwo(qs)
+        if p == "/api/novel/search":
+            return self.handle_novel_search(qs)
+        if p == "/api/novel/book":
+            return self.handle_novel_book(qs)
+        if p == "/api/novel/chapter":
+            return self.handle_novel_chapter(qs)
+
+        if p == "/proxy":
+            if not self._is_same_origin_request():
+                return self.send_json({"error": "Forbidden origin"}, 403)
+            if not _check_rate_limit(self._client_ip(), "proxy", 90, 60):
+                return self.send_json({"error": "请求过于频繁"}, 429)
+            target = qs.get("url", [""])[0]
+            if not _is_safe_proxy_target(target):
+                return self.send_json({"error": "Invalid target url"}, 400)
+            try:
+                status, data, ctype = _http_get_bytes(target, headers={"User-Agent": UA_MOBILE}, timeout=12)
+                self.send_response(status)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as e:
+                self.send_json({"error": str(e)}, 502)
+            return
+
+        # 拦截对后端源码、SQLite 数据库与引擎目录的静态访问
+        low_p = p.lower()
+        if low_p.endswith(_FORBIDDEN_EXTS) or any(low_p.startswith(pre) for pre in _FORBIDDEN_PREFIXES):
+            return self.send_json({"error": "Forbidden"}, 403)
+
+        super().do_GET()
+
+    def do_PUT(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/proxy":
+            return self.send_json({"error": "Not found"}, 404)
+        if not self._is_same_origin_request():
+            return self.send_json({"error": "Forbidden origin"}, 403)
+        qs = urllib.parse.parse_qs(parsed.query)
+        target = qs.get("url", [""])[0]
+        if not _is_safe_proxy_target(target):
+            return self.send_json({"error": "Invalid target url"}, 400)
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n) if n else b""
+        try:
+            req = urllib.request.Request(
+                target,
+                data=body,
+                method="PUT",
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Content-Type": self.headers.get("Content-Type", "application/json"),
+                    "Authorization": self.headers.get("Authorization", ""),
+                },
+            )
+            with urllib.request.urlopen(req, timeout=20, context=CTX) as r:
+                resp_body = r.read(100000)
+                self.send_response(r.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp_body)))
+                self.end_headers()
+                self.wfile.write(resp_body)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 502)
+
+
+class ThreadedHTTPServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+if __name__ == "__main__":
+    db.init_db()
+    _start_cold_cache_cleaner(ttl_days=30)
+    threading.Thread(target=ensure_novel_engine, daemon=True).start()
+    print(f"NovaHub Gateway listening on http://0.0.0.0:{PORT}")
+    ThreadedHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.exe
+backup/
+zy-player-standalone.html
+nginx-novahub.conf
+novel_engine/logs/
+novel_engine/7*/
+novel_engine/*.txt
+novel_engine/*.epub
