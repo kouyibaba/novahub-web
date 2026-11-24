@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>NovaHub · 星隅 — 正在进入</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: radial-gradient(circle at top, #1d1a14 0%, #0d0d0f 65%); color: #f3ead8; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif; padding: 24px; }
+    .card { width: 100%; max-width: 380px; background: rgba(24, 24, 28, 0.88); border: 1px solid rgba(212, 175, 55, 0.25); border-radius: 16px; padding: 32px 24px; text-align: center; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55); }
+    .logo { width: 52px; height: 52px; margin: 0 auto 16px; border-radius: 14px; background: linear-gradient(135deg, #e7c66b, #a67c23); display: flex; align-items: center; justify-content: center; color: #111; font-size: 26px; font-weight: 700; }
+    h1 { font-size: 20px; letter-spacing: 1px; margin-bottom: 8px; color: #f7e6b7; }
+    p { font-size: 13px; color: #9e9aa6; line-height: 1.6; margin-bottom: 20px; }
+    .spinner { width: 28px; height: 28px; margin: 0 auto 12px; border: 3px solid rgba(212, 175, 55, 0.2); border-top-color: #d4af37; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .btn { display: none; margin-top: 12px; padding: 10px 22px; border: none; border-radius: 10px; background: linear-gradient(135deg, #e7c66b, #b68928); color: #121212; font-size: 14px; font-weight: 600; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">✦</div>
+    <h1>NovaHub · 星隅</h1>
+    <div class="spinner" id="spinner"></div>
+    <p id="status">正在连接最新节点，请稍候...</p>
+    <button class="btn" id="retryBtn" onclick="connect()">重新连接</button>
+  </div>
+  <script>
+    async function connect() {
+      const statusEl = document.getElementById('status');
+      const spinnerEl = document.getElementById('spinner');
+      const retryBtn = document.getElementById('retryBtn');
+      spinnerEl.style.display = 'block';
+      retryBtn.style.display = 'none';
+      statusEl.textContent = '正在连接最新节点，请稍候...';
+      try {
+        const res = await fetch('./endpoint.json?t=' + Date.now(), { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (!data.url || !/^https?:\/\//.test(data.url)) throw new Error('无效的节点地址');
+        window.location.replace(data.url.replace(/\/+$/, '') + window.location.search + window.location.hash);
+      } catch (err) {
+        spinnerEl.style.display = 'none';
+        statusEl.textContent = '节点暂未就绪，请稍后重试（' + (err.message || '网络异常') + '）';
+        retryBtn.style.display = 'inline-block';
+      }
+    }
+    connect();
+  </script>
+</body>
+</html>
