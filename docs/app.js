@@ -692,7 +692,8 @@ async function changeBr(newBr) {
     const token = ++mPlayToken;
     const pos = audioEl.currentTime || 0;
     const wasPlaying = !audioEl.paused;
-    const playUrl = await resolveSongUrl(curSong);
+    curSong._tried128 = false;
+    const playUrl = ensureHttpsAudio(await resolveSongUrl(curSong));
     if (token !== mPlayToken || !playUrl) return;
     audioEl.src = playUrl;
     audioEl.load();
@@ -705,54 +706,74 @@ async function changeBr(newBr) {
   }
 }
 
-function isSameSongMeta(target, cand) {
+/** 确保在 HTTPS 页面及 App 内核中音频直链升级为 HTTPS，防止混合内容拦截 */
+function ensureHttpsAudio(u) {
+  const s = String(u || "").trim();
+  if (!s) return "";
+  if (location.protocol === "https:" && s.startsWith("http://")) return "https://" + s.slice(7);
+  return s;
+}
+
+function isSameSongMeta(target, cand, loose = false) {
   const norm = (s) => String(s || "").toLowerCase().replace(/\s*\([^)]*\)|\s*\[[^\]]*\]|\s*（[^）]*）|[^\u4e00-\u9fa5a-z0-9]/g, "");
   const tn = norm(target.name), cn = norm(cand.name);
-  if (!tn || tn !== cn) return false;
+  if (!tn || !cn) return false;
+  if (loose ? !(cn.includes(tn) || tn.includes(cn)) : tn !== cn) return false;
   const ta = String(target.artist || "").split(/[\/,&、\s]+/).map(norm).filter(Boolean);
   const ca = norm(cand.artist);
   return !ta.length || ta.some((a) => ca.includes(a));
 }
 
-async function matchExactKuwo(song) {
-  try {
-    const r = await fetch(`/kw?act=search&q=${encodeURIComponent(song.name + " " + (song.artist || ""))}&rn=8`);
-    if (!r.ok) return null;
-    const list = await r.json();
-    const hit = (list || []).find((cand) => !isFakeCoverTrack(cand.name, song.name) && isSameSongMeta(song, cand));
-    if (!hit) return null;
-    const uRes = await fetch(`/kw?act=url&id=${encodeURIComponent(hit.id)}&br=${encodeURIComponent(mBr)}`);
-    const uJson = uRes.ok ? await uRes.json() : null;
-    if (uJson?.url) {
-      song._kwRid = hit.id;
-      if (!song.pic && hit.pic) song.pic = hit.pic;
-      return uJson.url;
-    }
-  } catch {}
+/** 优先精确、其次宽松匹配酷我曲库，必要时回退仅按歌名再查一次 */
+async function matchExactKuwo(song, brOverride = null) {
+  const br = brOverride || mBr;
+  const queries = [String(song.name || "") + (song.artist ? " " + song.artist : "")];
+  if (song.artist) queries.push(String(song.name || ""));
+  for (const qStr of queries) {
+    if (!qStr.trim()) continue;
+    try {
+      const r = await fetch(`/kw?act=search&q=${encodeURIComponent(qStr.trim())}&rn=10`);
+      if (!r.ok) continue;
+      const list = await r.json();
+      const valid = (list || []).filter((c) => !isFakeCoverTrack(c.name, song.name));
+      const hit = valid.find((c) => isSameSongMeta(song, c, false)) || valid.find((c) => isSameSongMeta(song, c, true));
+      if (!hit) continue;
+      const uRes = await fetch(`/kw?act=url&id=${encodeURIComponent(hit.id)}&br=${encodeURIComponent(br)}`);
+      const uJson = uRes.ok ? await uRes.json() : null;
+      const safeUrl = ensureHttpsAudio(uJson?.url);
+      if (safeUrl) {
+        song._kwRid = hit.id;
+        if (!song.pic && hit.pic) song.pic = hit.pic;
+        return safeUrl;
+      }
+    } catch {}
+  }
   return null;
 }
 
-async function resolveSongUrl(song) {
+async function resolveSongUrl(song, brOverride = null) {
+  const br = brOverride || mBr;
   if (song.source === "kuwo" && song.id) {
     try {
-      const r = await fetch(`/kw?act=url&id=${encodeURIComponent(song.id)}&br=${encodeURIComponent(mBr)}`);
+      const r = await fetch(`/kw?act=url&id=${encodeURIComponent(song.id)}&br=${encodeURIComponent(br)}`);
       const d = r.ok ? await r.json() : null;
-      if (d?.url) return d.url;
+      const u = ensureHttpsAudio(d?.url);
+      if (u) return u;
     } catch {}
     return "";
   }
-  if (song.source === "tencent") {
-    return (await matchExactKuwo(song)) || "";
-  }
+  // 榜单与老收藏曲目优先直连酷我高可用 HTTPS 曲库，大幅降低超时与受限率
+  const kwUrl = await matchExactKuwo(song, br);
+  if (kwUrl) return kwUrl;
+  if (song.source === "tencent") return "";
   if (song.id) {
     try {
-      const r = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=url&source=netease&id=${song.id}&br=${mBr}`, 5000);
-      if (r && r.url && !r.url.includes("null")) return r.url;
+      const r = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=url&source=netease&id=${song.id}&br=${br}`, 3500);
+      const u = ensureHttpsAudio(r?.url);
+      if (u && !u.includes("null")) return u;
     } catch {}
-    const kwUrl = await matchExactKuwo(song);
-    if (kwUrl) return kwUrl;
   }
-  return song.url || "";
+  return ensureHttpsAudio(song.url);
 }
 
 async function loadSongLyrics(song, token) {
@@ -809,6 +830,7 @@ async function playSongFromList(list, idx, openPlayerView = false) {
   musicQueue = list;
   curSongIdx = idx;
   curSong = song;
+  song._tried128 = false;
   addMusicHist(song);
   curLyrics = []; activeLrcIdx = -1;
 
@@ -825,7 +847,7 @@ async function playSongFromList(list, idx, openPlayerView = false) {
   }
   const prevKwRid = song._kwRid;
   loadSongLyrics(song, token);
-  const playUrl = await resolveSongUrl(song);
+  const playUrl = ensureHttpsAudio(await resolveSongUrl(song));
   if (token !== mPlayToken) return;
   if (!playUrl) { handleMusicError(); return; }
   if (song._kwRid && song._kwRid !== prevKwRid) loadSongLyrics(song, token);
@@ -853,9 +875,23 @@ function handleMusicError() {
   const ni = nextMusicIdx(1);
   if (ni >= 0 && ni !== curSongIdx) playSongFromList(musicQueue, ni, currentRoute === "m_player");
 }
-audioEl.onerror = () => {
+audioEl.onerror = async () => {
   if (mSwitching || !audioEl.getAttribute("src")) return;
-  if (curSong) handleMusicError();
+  if (!curSong) return;
+  // 高码率或 FLAC 流若偶发解码/加载失败，先降级尝试 128k MP3 再决定切歌
+  if (!curSong._tried128 && mBr !== "128") {
+    curSong._tried128 = true;
+    const token = mPlayToken;
+    const fbUrl = ensureHttpsAudio(await resolveSongUrl(curSong, "128"));
+    if (token !== mPlayToken) return;
+    if (fbUrl && fbUrl !== audioEl.src) {
+      audioEl.src = fbUrl;
+      audioEl.load();
+      audioEl.play().catch(() => {});
+      return;
+    }
+  }
+  handleMusicError();
 };
 audioEl.onloadedmetadata = () => {
   if (currentRoute === "m_player") {
@@ -1884,7 +1920,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.3</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.4</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>

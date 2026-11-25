@@ -551,11 +551,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         continue
                     pic_s = it.get("web_albumpic_short", "")
                     pic = ("https://img2.kuwo.cn/star/albumcover/" + pic_s.replace("120/", "500/")) if pic_s else ""
+                    clean = lambda s: html.unescape(s or "").replace("\u00a0", " ").strip()
                     out.append({
                         "id": rid,
-                        "name": html.unescape(it.get("SONGNAME") or it.get("NAME") or "").strip(),
-                        "artist": html.unescape(it.get("ARTIST") or "").replace("&", " / ").strip(),
-                        "album": html.unescape(it.get("ALBUM") or "").strip() or "单曲收录",
+                        "name": clean(it.get("SONGNAME") or it.get("NAME")),
+                        "artist": clean(it.get("ARTIST")).replace("\\u0026", " / ").replace("&", " / ").strip(),
+                        "album": clean(it.get("ALBUM")) or "单曲收录",
                         "source": "kuwo",
                         "pic": pic,
                         "url": "",
@@ -567,20 +568,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if act == "url":
                 rid = urllib.parse.quote(qs.get("id", [""])[0])
                 br_in = qs.get("br", ["320"])[0]
-                br_map = {"128": "128kmp3", "192": "192kmp3", "320": "320kmp3", "999": "2000kflac"}
-                br = br_map.get(br_in, "320kmp3")
-                for br_try in ([br, "320kmp3"] if br == "2000kflac" else [br]):
-                    u = f"http://nmobi.kuwo.cn/mobi.s?f=web&user=0&type=convert_url_with_sign&rid={rid}&br={br_try}&source=kwplayer_ar_5.1.0.0_B_jiakong_vh.apk"
-                    _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "okhttp/3.10.0"}, timeout=5)
-                    d = json.loads(raw_b.decode("utf-8", "ignore"))
-                    play_url = (d.get("data") or {}).get("url") or ""
-                    if play_url:
-                        self.send_json({"url": play_url, "br": (d.get("data") or {}).get("bitrate", 0)})
-                        return
+                # 高码率逐级降级至 128kmp3，并统一升级 HTTPS 避免浏览器混合内容拦截
+                br_chains = {
+                    "999": ["2000kflac", "320kmp3", "192kmp3", "128kmp3"],
+                    "320": ["320kmp3", "192kmp3", "128kmp3"],
+                    "192": ["192kmp3", "128kmp3"],
+                    "128": ["128kmp3"],
+                }
+                to_https = lambda u: ("https://" + u[7:]) if str(u).startswith("http://") else str(u)
+                for br_try in br_chains.get(br_in, ["320kmp3", "128kmp3"]):
+                    try:
+                        u = f"http://nmobi.kuwo.cn/mobi.s?f=web&user=0&type=convert_url_with_sign&rid={rid}&br={br_try}&source=kwplayer_ar_5.1.0.0_B_jiakong_vh.apk"
+                        _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "okhttp/3.10.0"}, timeout=5)
+                        d = json.loads(raw_b.decode("utf-8", "ignore"))
+                        play_url = (d.get("data") or {}).get("url") or ""
+                        if play_url:
+                            self.send_json({"url": to_https(play_url), "br": (d.get("data") or {}).get("bitrate", 0)})
+                            return
+                    except Exception:
+                        continue
                 u2 = f"https://antiserver.kuwo.cn/anti.s?type=convert_url3&rid={rid}&format=mp3"
                 _, raw_b2, _ = _http_get_bytes(u2, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
                 d2 = json.loads(raw_b2.decode("utf-8", "ignore"))
-                self.send_json({"url": d2.get("url") or ""})
+                self.send_json({"url": to_https(d2.get("url") or "")})
                 return
 
             if act == "lrc":
