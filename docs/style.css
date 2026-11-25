@@ -820,3 +820,25 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .m-tool-btn.active { background: var(--accent-soft); border-color: rgba(229, 184, 105, 0.45); color: var(--accent); }
 .r-nav-btn.speaking { background: var(--r-accent); color: var(--r-accent-ink); border-color: transparent; }
+
+/* ============ Modern Web Guidance 现代样式增强 ============ */
+:root {
+  --scrollbar-thumb: rgba(212, 175, 55, 0.36);
+  --scrollbar-track: transparent;
+}
+html, body, #epList, #lrcBox, .modal-box, .n-drawer-list {
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: thin;
+}
+@supports not (scrollbar-color: auto) {
+  html, body, #epList, #lrcBox, .modal-box, .n-drawer-list { scrollbar-width: auto; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 999px; }
+  ::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+}
+.modal, .modal-box, .player-layer, .n-reader {
+  overscroll-behavior: contain;
+}
+.n-reader, .m-player-page {
+  min-height: 100dvh;
+}
