@@ -9,7 +9,7 @@ const K = {
 };
 const _mem = {};
 const get = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? (k in _mem ? _mem[k] : d) : JSON.parse(v); } catch { return k in _mem ? _mem[k] : d; } };
-const SYNC_WATCH = new Set(["like", "history", "music_fav", "music_fav_groups", "music_hist", "novel_shelf", "novel_hist", "novel_prog"]);
+const SYNC_WATCH = new Set(["like", "history", "music_favs", "music_fav_groups", "music_hist", "novel_shelf", "novel_hist", "novel_prog"]);
 let _syncPushTimer = null;
 const set = (k, v) => {
   _mem[k] = v;
@@ -378,10 +378,24 @@ function toggleMusicFav(song) {
   let favs = getMusicFavs();
   const key = songKey(song);
   const idx = favs.findIndex((x) => songKey(x) === key);
-  if (idx >= 0) { favs.splice(idx, 1); toast("已取消收藏"); }
-  else { favs.unshift({ ...song, url: song.url || "" }); toast("已加入音乐收藏"); }
-  set("music_favs", favs);
-  if (currentRoute.startsWith("m_")) routes[currentRoute]();
+  if (idx >= 0) {
+    favs.splice(idx, 1);
+    set("music_favs", favs);
+    toast("已取消收藏");
+    if (currentRoute.startsWith("m_")) routes[currentRoute]();
+    return;
+  }
+  const defGrp = (typeof curMusicFavGroup !== "undefined" && curMusicFavGroup !== "全部") ? curMusicFavGroup : "我喜欢的音乐";
+  nhPrompt("收藏到歌单分组", defGrp, (grp) => {
+    const g = grp === "全部" ? "我喜欢的音乐" : grp;
+    const custom = get("music_fav_groups", []);
+    if (!custom.includes(g) && g !== "我喜欢的音乐") { custom.push(g); set("music_fav_groups", custom); }
+    favs.unshift({ ...song, url: song.url || "", group: g });
+    set("music_favs", favs);
+    toast(`已收藏到「${g}」`);
+    if (currentRoute.startsWith("m_")) routes[currentRoute]();
+  });
+  return;
 }
 function addMusicHist(song) {
   if (!song) return;
@@ -1038,7 +1052,7 @@ function renderMusicFav() {
   if (delBtn) delBtn.onclick = () => {
     const g = curMusicFavGroup;
     set("music_fav_groups", get("music_fav_groups", []).filter((x) => x !== g));
-    set("music_fav", getMusicFavs().map((x) => x.group === g ? { ...x, group: "我喜欢的音乐" } : x));
+    set("music_favs", getMusicFavs().map((x) => x.group === g ? { ...x, group: "我喜欢的音乐" } : x));
     curMusicFavGroup = "全部";
     renderMusicFav();
     toast(`已删除分组「${g}」，歌曲已移回默认分组`);
@@ -1058,7 +1072,7 @@ function renderMusicFav() {
           const custom = get("music_fav_groups", []);
           if (!custom.includes(target) && target !== "我喜欢的音乐") { custom.push(target); set("music_fav_groups", custom); }
           const k = songKey(shown[idx]);
-          set("music_fav", getMusicFavs().map((x) => songKey(x) === k ? { ...x, group: target } : x));
+          set("music_favs", getMusicFavs().map((x) => songKey(x) === k ? { ...x, group: target } : x));
           renderMusicFav();
           toast(`已移入「${target}」`);
         });
@@ -1594,7 +1608,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.2.0</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.2.1</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -2512,7 +2526,7 @@ async function openRedeemModal() {
 
 async function cloudSyncPush(silent = false) {
   if (!NH.user) { if (!silent) toast("请先登录账号"); return; }
-  const keys = [K.SOURCE, K.LIKE, K.HISTORY, "channels", "music_fav", "music_fav_groups", "music_hist", "progress", "novel_shelf", "novel_hist", "novel_prog", "novel_cfg"];
+  const keys = [K.SOURCE, K.LIKE, K.HISTORY, "channels", "music_favs", "music_fav_groups", "music_hist", "progress", "novel_shelf", "novel_hist", "novel_prog", "novel_cfg"];
   const data = Object.fromEntries(keys.map((k) => [k, get(k, null)]));
   try {
     await nhApi("/api/sync", "POST", { data });

@@ -905,3 +905,16 @@ html, body, #epList, #lrcBox, .modal-box, .n-drawer-list {
   border-color: transparent;
   box-shadow: 0 4px 14px rgba(212, 175, 55, 0.28);
 }
+
+/* ============ 彻底消除音乐黑胶播放页外层滚动条 ============ */
+.m-player-page {
+  height: calc(100dvh - 185px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.m-lrc {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
