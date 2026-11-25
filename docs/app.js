@@ -413,6 +413,24 @@ function isFakeCoverTrack(name, q) {
   return fakeRe.test(name) && !fakeRe.test(ql);
 }
 
+/**
+ * 按精确匹配程度对搜索结果稳定排序（完全匹配 > 前缀匹配 > 包含关键词 > 副标题匹配 > 其余）。
+ */
+function sortByExactMatch(list, query, getTitle, getSub) {
+  const kw = String(query || "").trim().toLowerCase();
+  if (!kw || !Array.isArray(list) || list.length < 2) return list;
+  const score = (item) => {
+    const title = String(getTitle(item) || "").trim().toLowerCase();
+    const sub = getSub ? String(getSub(item) || "").trim().toLowerCase() : "";
+    if (title === kw) return 0;
+    if (title.startsWith(kw)) return 1;
+    if (title.includes(kw)) return 2;
+    if (sub && (sub === kw || sub.includes(kw))) return 3;
+    return 4;
+  };
+  return list.sort((a, b) => score(a) - score(b));
+}
+
 async function searchMusic(q) {
   if (!q) return;
   toast("正在检索正版曲库…");
@@ -440,7 +458,7 @@ async function searchMusic(q) {
       });
     }),
   ]);
-  const list = kwList.concat(neList);
+  const list = sortByExactMatch(kwList.concat(neList), q, (x) => x.name, (x) => x.artist);
   if (list.length) {
     discoverList = list;
     musicQueue = list;
@@ -1092,6 +1110,7 @@ async function doSearch(q, _fromBack) {
     })
   );
   if (!results.length) { $("#view").innerHTML = `${backBar("搜索：" + q)}<div class="empty">未检索到「${esc(q)}」<br>请尝试更换关键词</div>`; return; }
+  sortByExactMatch(results, q, (x) => x.name);
   $("#view").innerHTML = `${backBar(`检索结果 (${results.length})`)}<div class="grid" id="sGrid"></div>`;
   paintGrid($("#sGrid"), results);
 }
@@ -1681,7 +1700,7 @@ async function searchNovel(q) {
   try {
     const r = await fetch(`/api/novel/search?q=${encodeURIComponent(q)}`);
     const d = await r.json();
-    novelStoreList = Array.isArray(d.items) ? d.items : [];
+    novelStoreList = sortByExactMatch(Array.isArray(d.items) ? d.items : [], q, (x) => x.title || x.name, (x) => x.author);
     renderNovelStore();
   } catch (e) {
     $("#view").innerHTML = `<div class="empty">检索失败：${esc(e.message)}</div>`;
