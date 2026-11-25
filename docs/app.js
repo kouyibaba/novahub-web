@@ -1104,6 +1104,7 @@ async function doSearch(q, _fromBack) {
         const kw = q.toLowerCase();
         return name.includes(kw) || kw.split(/\s+/).some((w) => w.length > 1 && name.includes(w));
       });
+      sortByExactMatch(hits, q, (v) => v.vod_name);
       hits.slice(0, 12).forEach((v) => results.push({
         id: String(v.vod_id), name: v.vod_name, pic: v.vod_pic, remark: v.vod_remark || "", srcId: s.id, from: s.name,
       }));
