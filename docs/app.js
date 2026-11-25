@@ -269,17 +269,23 @@ function renderTabbar() {
     pills = document.createElement("div");
     pills.id = "nhModePills";
     pills.className = "mode-pills";
-    $(".topbar").insertAdjacentElement("afterend", pills);
-  }
-  if (pills) {
-    pills.innerHTML = [
-      { m: "video", label: "影视" },
+    pills.innerHTML = `<span class="mode-pill-slider" aria-hidden="true"></span>` + [
+      { m: "vod", label: "影视" },
       { m: "music", label: "音乐" },
       { m: "novel", label: "小说" },
-    ].map((x) => `<button class="mode-pill ${appMode === x.m ? "active" : ""}" data-m="${x.m}">${x.label}</button>`).join("");
+    ].map((x) => `<button class="mode-pill" data-m="${x.m}">${x.label}</button>`).join("");
     pills.querySelectorAll(".mode-pill").forEach((b) => {
       b.onclick = () => switchMode(b.dataset.m);
     });
+    const anchor = $("#searchHistPop") || $(".topbar");
+    anchor.insertAdjacentElement("afterend", pills);
+  }
+  if (pills) {
+    const order = ["vod", "music", "novel"];
+    const idx = Math.max(0, order.indexOf(appMode));
+    pills.querySelectorAll(".mode-pill").forEach((b) => b.classList.toggle("active", b.dataset.m === appMode));
+    const slider = pills.querySelector(".mode-pill-slider");
+    if (slider) slider.style.transform = `translateX(calc(${idx} * (100% + 6px)))`;
   }
   tb.innerHTML = tabs.map((t) => {
     const on = currentRoute === t.route;
@@ -308,19 +314,87 @@ function switchMode(mode, targetRoute) {
   go(targetRoute || defRoute);
 }
 
+let _bootDone = false;
 function go(route) {
-  currentRoute = route;
-  viewStack.length = 0;
-  renderTabbar();
-  (routes[route] || renderHome)();
-  updateMiniBar();
-  window.scrollTo(0, 0);
+  const applyRoute = () => {
+    currentRoute = route;
+    viewStack.length = 0;
+    renderTabbar();
+    (routes[route] || renderHome)();
+    updateMiniBar();
+    window.scrollTo(0, 0);
+  };
+  if (_bootDone && typeof document.startViewTransition === "function") {
+    const t = document.startViewTransition(applyRoute);
+    t.finished.finally(() => {
+      const v = $("#view");
+      if (v) { v.setAttribute("tabindex", "-1"); v.focus({ preventScroll: true }); }
+    });
+  } else {
+    applyRoute();
+  }
+}
+
+/* ============ 搜索动效、分模块历史与阶梯交错辅助 ============ */
+const _searchHistKey = () => "nh_shist_" + appMode;
+const getSearchHist = () => get(_searchHistKey(), []);
+function addSearchHist(q) {
+  if (!q) return;
+  const list = [q, ...getSearchHist().filter((x) => x !== q)].slice(0, 8);
+  set(_searchHistKey(), list);
+}
+function hideSearchHistPop() {
+  const pop = $("#searchHistPop");
+  if (pop) pop.classList.add("hidden");
+}
+function renderSearchHistPop() {
+  const pop = $("#searchHistPop");
+  if (!pop) return;
+  const list = getSearchHist();
+  if (!list.length) { pop.classList.add("hidden"); return; }
+  pop.innerHTML = `
+    <div class="sh-head"><span>最近搜索</span><button class="sh-clear" id="shClearAll" type="button">清空历史</button></div>
+    <div class="sh-chips">${list.map((w) => `<button class="sh-chip" type="button" data-kw="${esc(w)}">${esc(w)}</button>`).join("")}</div>`;
+  pop.classList.remove("hidden");
+  pop.querySelector("#shClearAll").onclick = (e) => { e.stopPropagation(); set(_searchHistKey(), []); hideSearchHistPop(); };
+  pop.querySelectorAll(".sh-chip").forEach((c) => {
+    c.onclick = (e) => {
+      e.stopPropagation();
+      $("#searchInput").value = c.dataset.kw;
+      syncSearchClear();
+      triggerSearch();
+    };
+  });
+}
+function syncSearchClear() {
+  const inp = $("#searchInput"), clr = $("#searchClear");
+  if (inp && clr) clr.classList.toggle("hidden", !inp.value.trim());
+}
+function setSearchLoading(on) {
+  const bar = $("#topProgress"), btn = $("#searchBtn");
+  if (bar) bar.classList.toggle("hidden", !on);
+  if (btn) btn.innerHTML = on ? `<progress aria-label="检索中" class="loading-spinner"></progress>` : "搜索";
+}
+function renderSkeletonHtml(type = "grid", count = 6) {
+  if (type === "list") {
+    return `<div class="sk-list">${Array.from({ length: count }, () => `<div class="sk-row"></div>`).join("")}</div>`;
+  }
+  return `<div class="sk-grid">${Array.from({ length: count }, () => `<div class="sk-card"><div class="sk-poster"></div><div class="sk-line"></div></div>`).join("")}</div>`;
+}
+function applyStagger(container) {
+  if (!container) return;
+  container.classList.add("nh-stagger");
+  if (!CSS.supports("animation-delay: calc(sibling-index() * 0.1s)")) {
+    [...container.children].slice(0, 12).forEach((el, idx) => el.style.setProperty("--sibling-index", idx));
+  }
 }
 
 /* ============ 影视 & 音乐 & 小说统一搜索入口 ============ */
 const triggerSearch = () => {
   const q = $("#searchInput").value.trim();
   $("#searchInput").blur();
+  hideSearchHistPop();
+  if (q) addSearchHist(q);
   if (appMode === "music") {
     if (q) searchMusic(q); else go("m_discover");
   } else if (appMode === "novel") {
@@ -332,6 +406,19 @@ const triggerSearch = () => {
 $("#searchBtn").addEventListener("click", triggerSearch);
 $("#searchInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); triggerSearch(); }
+});
+$("#searchInput").addEventListener("input", syncSearchClear);
+$("#searchInput").addEventListener("focus", renderSearchHistPop);
+if ($("#searchClear")) {
+  $("#searchClear").addEventListener("click", () => {
+    $("#searchInput").value = "";
+    syncSearchClear();
+    $("#searchInput").focus();
+    renderSearchHistPop();
+  });
+}
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".search-box") && !e.target.closest("#searchHistPop")) hideSearchHistPop();
 });
 
 /* ============ 现代音乐模块（榜单 / 双源搜歌 / 专辑视图 / 动态歌词 / 收藏 / Mini 条） ============ */
@@ -488,31 +575,39 @@ function sortByExactMatch(list, query, getTitle, getSub) {
 
 async function searchMusic(q) {
   if (!q) return;
-  toast("正在检索正版曲库…");
+  setSearchLoading(true);
+  if (currentRoute === "m_discover") {
+    const view = $("#view");
+    if (view) view.innerHTML = `<div class="section-title">${ico("search")} 正在检索「${esc(q)}」…</div>${renderSkeletonHtml("list", 6)}`;
+  }
   const kwList = [], neList = [];
-  await Promise.allSettled([
-    fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`).then((r) => r.ok ? r.json() : []).then((res) => {
-      if (Array.isArray(res)) res.forEach((x) => {
-        if (!isFakeCoverTrack(x.name || "", q)) kwList.push(x);
-      });
-    }),
-    fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=45&pages=1`, 7000).then((res) => {
-      if (Array.isArray(res)) res.forEach((x) => {
-        const nm = x.name || "未知歌曲";
-        if (isFakeCoverTrack(nm, q)) return;
-        neList.push({
-          id: String(x.id || ""),
-          name: nm,
-          artist: Array.isArray(x.artist) ? x.artist.join(" / ") : (x.artist || "未知歌手"),
-          album: x.album || "单曲收录",
-          source: "netease",
-          pic: x.pic_id ? `https://api.injahow.cn/meting/?server=netease&type=pic&id=${x.pic_id}` : "",
-          url: "",
-          lrc: `https://api.injahow.cn/meting/?server=netease&type=lrc&id=${x.id}`,
+  try {
+    await Promise.allSettled([
+      fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`).then((r) => r.ok ? r.json() : []).then((res) => {
+        if (Array.isArray(res)) res.forEach((x) => {
+          if (!isFakeCoverTrack(x.name || "", q)) kwList.push(x);
         });
-      });
-    }),
-  ]);
+      }),
+      fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=45&pages=1`, 7000).then((res) => {
+        if (Array.isArray(res)) res.forEach((x) => {
+          const nm = x.name || "未知歌曲";
+          if (isFakeCoverTrack(nm, q)) return;
+          neList.push({
+            id: String(x.id || ""),
+            name: nm,
+            artist: Array.isArray(x.artist) ? x.artist.join(" / ") : (x.artist || "未知歌手"),
+            album: x.album || "单曲收录",
+            source: "netease",
+            pic: x.pic_id ? `https://api.injahow.cn/meting/?server=netease&type=pic&id=${x.pic_id}` : "",
+            url: "",
+            lrc: `https://api.injahow.cn/meting/?server=netease&type=lrc&id=${x.id}`,
+          });
+        });
+      }),
+    ]);
+  } finally {
+    setSearchLoading(false);
+  }
   const list = sortByExactMatch(kwList.concat(neList), q, (x) => x.name, (x) => x.artist);
   if (list.length) {
     discoverList = list;
@@ -803,7 +898,7 @@ function updateMiniBar() {
   const cls = "mini-cov" + (audioEl.paused ? "" : " playing");
   bar.innerHTML = `
     ${curSong.pic ? `<img class="${cls}" src="${esc(curSong.pic)}" onerror="_imgPh(this,'disc','${cls}')">` : `<div class="${cls}">${ico("disc")}</div>`}
-    <div class="mini-info"><div class="mini-title">${esc(curSong.name)}</div><div class="mini-sub">${esc(lrcLine)}</div></div>
+    <div class="mini-info"><div class="mini-title">${esc(curSong.name)}${audioEl.paused ? "" : `<span class="eq-bars" aria-hidden="true"><i></i><i></i><i></i></span>`}</div><div class="mini-sub">${esc(lrcLine)}</div></div>
     <button id="miniPlay" aria-label="播放暂停">${ico(audioEl.paused ? "play" : "pause")}</button>
     <button id="miniNext" aria-label="下一曲">${ico("next")}</button>`;
   bar.onclick = (e) => { if (!e.target.closest("button")) switchMode("music", "m_player"); };
@@ -828,11 +923,20 @@ function paintMusicList(container, list) {
       </div>
       <button class="m-fav ${fav ? "on" : ""}" aria-label="收藏">${ico(fav ? "heartFill" : "heart")}</button>`;
     row.onclick = (e) => {
-      if (e.target.closest(".m-fav")) { e.stopPropagation(); toggleMusicFav(m); return; }
+      const favBtn = e.target.closest(".m-fav");
+      if (favBtn) {
+        e.stopPropagation();
+        favBtn.classList.remove("fav-pop");
+        void favBtn.offsetWidth;
+        favBtn.classList.add("fav-pop");
+        toggleMusicFav(m);
+        return;
+      }
       playSongFromList(list, i, true);
     };
     container.appendChild(row);
   });
+  applyStagger(container);
 }
 
 function paintAlbumList(container, list) {
@@ -1142,6 +1246,7 @@ function paintGrid(el, items) {
   el.querySelectorAll(".card").forEach((c, i) => {
     c.onclick = () => openDetail(items[i]);
   });
+  applyStagger(el);
 }
 
 /* 打开数据源：拉首页列表（MacCMS ac=detail） */
@@ -1251,23 +1356,28 @@ function getProgress(vodKey) {
 /* ============ 搜索（MacCMS ac=detail，多源并发） ============ */
 async function doSearch(q, _fromBack) {
   if (!_fromBack) pushView(() => doSearch(q, true));
-  $("#view").innerHTML = `${backBar("搜索：" + q)}<div class="empty">正在并发检索「${esc(q)}」…</div>`;
+  setSearchLoading(true);
+  $("#view").innerHTML = `${backBar("搜索：" + q)}${renderSkeletonHtml("grid", 6)}`;
   const results = [];
-  await Promise.allSettled(
-    sources.filter((x) => x.enabled).map(async (s) => {
-      const url = buildVodUrl(s.api, `ac=detail&wd=${encodeURIComponent(q)}&pg=1`);
-      const j = await fetchJson(url, 6000);
-      const hits = (j.list || []).filter((v) => {
-        const name = (v.vod_name || "").toLowerCase();
-        const kw = q.toLowerCase();
-        return name.includes(kw) || kw.split(/\s+/).some((w) => w.length > 1 && name.includes(w));
-      });
-      sortByExactMatch(hits, q, (v) => v.vod_name);
-      hits.slice(0, 12).forEach((v) => results.push({
-        id: String(v.vod_id), name: v.vod_name, pic: v.vod_pic, remark: v.vod_remark || "", srcId: s.id, from: s.name,
-      }));
-    })
-  );
+  try {
+    await Promise.allSettled(
+      sources.filter((x) => x.enabled).map(async (s) => {
+        const url = buildVodUrl(s.api, `ac=detail&wd=${encodeURIComponent(q)}&pg=1`);
+        const j = await fetchJson(url, 12000);
+        const hits = (j.list || []).filter((v) => {
+          const name = (v.vod_name || "").toLowerCase();
+          const kw = q.toLowerCase();
+          return name.includes(kw) || kw.split(/\s+/).some((w) => w.length > 1 && name.includes(w));
+        });
+        sortByExactMatch(hits, q, (v) => v.vod_name);
+        hits.slice(0, 12).forEach((v) => results.push({
+          id: String(v.vod_id), name: v.vod_name, pic: v.vod_pic, remark: v.vod_remark || "", srcId: s.id, from: s.name,
+        }));
+      })
+    );
+  } finally {
+    setSearchLoading(false);
+  }
   if (!results.length) { $("#view").innerHTML = `${backBar("搜索：" + q)}<div class="empty">未检索到「${esc(q)}」<br>请尝试更换关键词</div>`; return; }
   sortByExactMatch(results, q, (x) => x.name);
   $("#view").innerHTML = `${backBar(`检索结果 (${results.length})`)}<div class="grid" id="sGrid"></div>`;
@@ -1615,16 +1725,26 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.2.3</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.0</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
       </div>
-      <div class="vip-perks">
-        <span class="vip-perk">全局免广告</span>
-        <span class="vip-perk">云端多端同步</span>
-        <span class="vip-perk">FLAC 无损音质</span>
-        <span class="vip-perk">高速预加载</span>
+      <div class="vip-compare">
+        <div class="vc-col">
+          <div class="vc-head">标准免费版</div>
+          <div>• 基础影视与书城</div>
+          <div>• 标准 128k / 192k</div>
+          <div>• 包含原生赞助位</div>
+          <div>• 账号云同步收藏</div>
+        </div>
+        <div class="vc-col pro">
+          <div class="vc-head">${ico("crown")} Pro 尊享版</div>
+          <div>• 全局纯净零广告</div>
+          <div>• 320k / FLAC 无损</div>
+          <div>• 全站极速源与听书</div>
+          <div>• 多端云同步专属徽章</div>
+        </div>
       </div>
       <div class="vip-actions">
         ${u ? `
@@ -1634,9 +1754,16 @@ function renderMe() {
           <button class="btn ghost" id="btnLogout" style="flex:0 0 auto">退出</button>
         ` : `
           <button class="btn primary" id="btnLoginOpen">登录 / 注册账号</button>
-          <button class="btn ghost" id="btnSponsorInfo">${ico("crown")} 赞助获取 Pro</button>
+          <button class="btn ghost" id="btnSponsorInfo">${ico("crown")} 卡密激活 Pro</button>
         `}
       </div>
+    </div>
+
+    <div class="node-status" id="nodeStatusBox">
+      <span class="node-dot" id="nodeDot"></span>
+      <span id="nodeLatency">正在探测节点…</span>
+      <span class="node-url" id="nodeUrlText"></span>
+      <button class="node-refresh" id="btnNodeRefresh" type="button">刷新节点</button>
     </div>
 
     <div class="section-title" id="srcManager">${ico("database")} 影视源管理 (${sources.length})</div>
@@ -1671,6 +1798,37 @@ function renderMe() {
       renderMe(); toast("已退出登录");
     };
   }
+
+  const probeNode = async () => {
+    const dot = $("#nodeDot"), lat = $("#nodeLatency"), urlEl = $("#nodeUrlText");
+    if (!dot || !lat) return;
+    dot.className = "node-dot";
+    lat.textContent = "测速中…";
+    const base = window.__NH_API_BASE__ || location.origin;
+    if (urlEl) urlEl.textContent = base.replace(/^https?:\/\//, "");
+    const t0 = performance.now();
+    try {
+      const r = await fetch("/api/config?ping=" + Date.now());
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      dot.className = "node-dot ok";
+      lat.textContent = `节点在线 ${Math.round(performance.now() - t0)}ms`;
+    } catch {
+      dot.className = "node-dot err";
+      lat.textContent = "节点连接异常";
+    }
+  };
+  probeNode();
+  const refBtn = $("#btnNodeRefresh");
+  if (refBtn) refBtn.onclick = async () => {
+    refBtn.disabled = true;
+    try {
+      if (typeof window.__NH_REFRESH_ENDPOINT__ === "function") await window.__NH_REFRESH_ENDPOINT__();
+      await probeNode();
+      toast("已刷新服务节点");
+    } finally {
+      refBtn.disabled = false;
+    }
+  };
 
   const rows = $("#srcRows");
   rows.innerHTML = sources.length ? "" : `<div class="row" style="cursor:default"><div class="r-main"><div class="r-sub">暂无数据源</div></div></div>`;
@@ -1827,6 +1985,7 @@ function paintNovelList(container, list, opts = {}) {
       openNovelDetail(b);
     };
   });
+  applyStagger(container);
 }
 
 async function loadNovelCategory(cat = curNovelCat) {
@@ -1862,7 +2021,8 @@ async function searchNovel(q) {
     viewStack.length = 0;
     renderTabbar();
   }
-  $("#view").innerHTML = `<div class="section-title">${ico("search")} 正在检索「${esc(q)}」…</div><div class="empty">正在实时检索书库…</div>`;
+  setSearchLoading(true);
+  $("#view").innerHTML = `<div class="section-title">${ico("search")} 正在检索「${esc(q)}」…</div>${renderSkeletonHtml("list", 6)}`;
   try {
     const r = await fetch(`/api/novel/search?q=${encodeURIComponent(q)}`);
     const d = await r.json();
@@ -1870,6 +2030,8 @@ async function searchNovel(q) {
     renderNovelStore();
   } catch (e) {
     $("#view").innerHTML = `<div class="empty">检索失败：${esc(e.message)}</div>`;
+  } finally {
+    setSearchLoading(false);
   }
 }
 
@@ -2723,14 +2885,34 @@ function toggleNovelTts() {
   speakNext();
 }
 
+async function dismissSplash(bootAt) {
+  const el = $("#nhSplash");
+  if (!el) return;
+  const elapsed = performance.now() - bootAt;
+  if (elapsed < 450) await new Promise((r) => setTimeout(r, 450 - elapsed));
+  el.classList.add("leaving");
+  const anims = el.getAnimations ? el.getAnimations() : [];
+  if (anims.length > 0) {
+    await Promise.race([
+      Promise.allSettled(anims.map((a) => a.finished)),
+      new Promise((r) => setTimeout(r, 500)),
+    ]);
+  }
+  el.remove();
+}
+
 /* ============ 初始化固定控件矢量图标与启动 ============ */
+const _bootAt = performance.now();
 $("#topSearchIco").innerHTML = ico("search");
 $("#playerBack").innerHTML = `${ico("back")} 返回`;
 $("#playerFav").innerHTML = `${ico("heart")} 记录`;
 $("#btnPlay").innerHTML = ico("play");
 $("#btnFs").innerHTML = ico("fullscreen");
 updateTopbar();
+syncSearchClear();
 syncModeFab();
 go(appMode === "music" ? "m_discover" : appMode === "novel" ? "n_store" : "home");
+_bootDone = true;
+dismissSplash(_bootAt);
 loadSiteConfig();
 refreshAuthUser();
