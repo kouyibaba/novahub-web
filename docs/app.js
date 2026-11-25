@@ -386,6 +386,7 @@ function toggleMusicFav(song) {
     return;
   }
   const defGrp = (typeof curMusicFavGroup !== "undefined" && curMusicFavGroup !== "全部") ? curMusicFavGroup : "我喜欢的音乐";
+  const groups = (typeof getMusicFavGroups === "function" ? getMusicFavGroups() : ["我喜欢的音乐"]).filter((g) => g !== "全部");
   nhPrompt("收藏到歌单分组", defGrp, (grp) => {
     const g = grp === "全部" ? "我喜欢的音乐" : grp;
     const custom = get("music_fav_groups", []);
@@ -394,7 +395,7 @@ function toggleMusicFav(song) {
     set("music_favs", favs);
     toast(`已收藏到「${g}」`);
     if (currentRoute.startsWith("m_")) routes[currentRoute]();
-  });
+  }, groups);
   return;
 }
 function addMusicHist(song) {
@@ -991,15 +992,19 @@ function getMusicFavGroups() {
   return ["全部", "我喜欢的音乐", ...new Set([...custom, ...fromFavs].filter((g) => g && g !== "全部" && g !== "我喜欢的音乐"))];
 }
 
-function nhPrompt(title, defVal, onOk) {
+function nhPrompt(title, defVal, onOk, options = null) {
   const old = document.getElementById("nhPromptMask");
   if (old) old.remove();
   const mask = document.getElementById("nhPromptMask") || document.createElement("div");
   mask.id = "nhPromptMask";
   mask.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.68);display:flex;align-items:center;justify-content:center;padding:24px;backdrop-filter:blur(4px)";
+  const selHtml = Array.isArray(options) && options.length
+    ? `<select id="nhPromptSel" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;border:1px solid rgba(212,175,55,.35);background:#0c0d11;color:#f3ead8;font-size:14px;outline:none;margin-bottom:10px">${options.map((o) => `<option value="${esc(o)}" ${o === defVal ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`
+    : "";
   mask.innerHTML = `<div style="width:100%;max-width:340px;background:#14151a;border:1px solid rgba(212,175,55,.35);border-radius:14px;padding:18px;box-shadow:0 16px 40px rgba(0,0,0,.6)">
     <div style="font-size:15px;font-weight:600;color:#f3ead8;margin-bottom:12px">${esc(title)}</div>
-    <input id="nhPromptInp" type="text" value="${esc(defVal || "")}" placeholder="请输入内容" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.14);background:#0c0d11;color:#fff;font-size:14px;outline:none;margin-bottom:14px" />
+    ${selHtml}
+    <input id="nhPromptInp" type="text" value="${esc(defVal || "")}" placeholder="或输入新分组名称" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.14);background:#0c0d11;color:#fff;font-size:14px;outline:none;margin-bottom:14px" />
     <div style="display:flex;gap:10px;justify-content:flex-end">
       <button id="nhPromptCancel" class="btn ghost sm" style="padding:7px 14px">取消</button>
       <button id="nhPromptOk" class="btn sm" style="padding:7px 16px;background:linear-gradient(135deg,#e7c66b,#b68928);color:#111;border:none;border-radius:8px;font-weight:600">确定</button>
@@ -1007,6 +1012,8 @@ function nhPrompt(title, defVal, onOk) {
   </div>`;
   document.body.appendChild(mask);
   const inp = mask.querySelector("#nhPromptInp");
+  const sel = mask.querySelector("#nhPromptSel");
+  if (sel) sel.onchange = () => { inp.value = sel.value; };
   inp.focus();
   const close = () => mask.remove();
   mask.querySelector("#nhPromptCancel").onclick = close;
@@ -1608,7 +1615,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.2.1</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.2.2</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
