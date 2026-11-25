@@ -213,6 +213,7 @@ function pushView(fn) {
   history.pushState({ depth: viewStack.length }, "");
 }
 function closePlayer() {
+  if (typeof setPlayerFullscreen === "function") setPlayerFullscreen(false);
   destroyPlayers();
   $("#playerLayer").classList.add("hidden");
   document.body.style.overflow = "";
@@ -1508,21 +1509,52 @@ $("#qualitySel").addEventListener("change", (e) => {
 $("#playerBack").onclick = closePlayer;
 $("#playerFav").onclick = () => toast("已记录至观看历史");
 $("#btnPlay").onclick = () => { const v = $("#video"); v.paused ? v.play() : v.pause(); };
-$("#btnFs").onclick = async () => {
-  const v = $("#video"), box = $(".player-box");
-  if (document.fullscreenElement || document.webkitFullscreenElement) {
-    (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
-    try { screen.orientation?.unlock?.(); } catch {}
-    return;
-  }
-  if (box.requestFullscreen || box.webkitRequestFullscreen) {
-    try {
-      await (box.requestFullscreen || box.webkitRequestFullscreen).call(box);
-      await screen.orientation?.lock?.("landscape").catch(() => {});
+async function setPlayerFullscreen(enter) {
+  const layer = $("#playerLayer"), v = $("#video");
+  if (!layer) return;
+  if (enter) {
+    layer.classList.add("is-fs");
+    if (window.NovaNative && typeof window.NovaNative.setFullscreen === "function") {
+      try { window.NovaNative.setFullscreen(true); } catch {}
       return;
-    } catch {}
+    }
+    const reqFs = layer.requestFullscreen || layer.webkitRequestFullscreen;
+    if (reqFs) {
+      try {
+        await reqFs.call(layer);
+        await screen.orientation?.lock?.("landscape").catch(() => {});
+        return;
+      } catch {}
+    }
+    if (v && v.webkitEnterFullscreen) {
+      try { v.webkitEnterFullscreen(); } catch {}
+    }
+  } else {
+    layer.classList.remove("is-fs");
+    if (window.NovaNative && typeof window.NovaNative.setFullscreen === "function") {
+      try { window.NovaNative.setFullscreen(false); } catch {}
+    }
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      try { (document.exitFullscreen || document.webkitExitFullscreen)?.call(document); } catch {}
+    }
+    try { screen.orientation?.unlock?.(); } catch {}
   }
-  if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
+}
+window.__nhExitFs = () => setPlayerFullscreen(false);
+["fullscreenchange", "webkitfullscreenchange"].forEach((ev) => {
+  document.addEventListener(ev, () => {
+    const nativeFs = !!(window.NovaNative && typeof window.NovaNative.setFullscreen === "function");
+    if (!nativeFs && !document.fullscreenElement && !document.webkitFullscreenElement) {
+      $("#playerLayer")?.classList.remove("is-fs");
+      try { screen.orientation?.unlock?.(); } catch {}
+    }
+  });
+});
+
+$("#btnFs").onclick = () => {
+  const layer = $("#playerLayer");
+  const isFs = !!(layer && layer.classList.contains("is-fs")) || !!(document.fullscreenElement || document.webkitFullscreenElement);
+  setPlayerFullscreen(!isFs);
 };
 $("#seek").addEventListener("input", (e) => { const v = $("#video"); if (v.duration) v.currentTime = (e.target.value / 1000) * v.duration; });
 let _lastPaused = null;
@@ -1725,7 +1757,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.0</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.1</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
