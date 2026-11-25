@@ -842,3 +842,36 @@ html, body, #epList, #lrcBox, .modal-box, .n-drawer-list {
 .n-reader, .m-player-page {
   min-height: 100dvh;
 }
+
+/* ============ NovaHub 2.0 整体视觉改版 ============ */
+.topbar {
+  background: rgba(12, 13, 18, 0.78) !important;
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border-bottom: 1px solid rgba(212, 175, 55, 0.16) !important;
+}
+.tabbar {
+  margin: 0 12px 10px !important;
+  border-radius: 20px !important;
+  background: rgba(18, 19, 26, 0.88) !important;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(212, 175, 55, 0.2) !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+}
+.card {
+  border-radius: 16px !important;
+  background: linear-gradient(160deg, rgba(28, 30, 38, 0.92), rgba(16, 17, 22, 0.96)) !important;
+  border: 1px solid rgba(212, 175, 55, 0.14) !important;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(231, 198, 107, 0.45) !important;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+.m-item, .group, .ad-card {
+  border-radius: 16px !important;
+  border: 1px solid rgba(212, 175, 55, 0.14) !important;
+  background: rgba(20, 21, 28, 0.86) !important;
+}
