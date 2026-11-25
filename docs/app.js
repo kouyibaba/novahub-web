@@ -959,6 +959,30 @@ function getMusicFavGroups() {
   return ["全部", "我喜欢的音乐", ...new Set([...custom, ...fromFavs].filter((g) => g && g !== "全部" && g !== "我喜欢的音乐"))];
 }
 
+function nhPrompt(title, defVal, onOk) {
+  const old = document.getElementById("nhPromptMask");
+  if (old) old.remove();
+  const mask = document.getElementById("nhPromptMask") || document.createElement("div");
+  mask.id = "nhPromptMask";
+  mask.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.68);display:flex;align-items:center;justify-content:center;padding:24px;backdrop-filter:blur(4px)";
+  mask.innerHTML = `<div style="width:100%;max-width:340px;background:#14151a;border:1px solid rgba(212,175,55,.35);border-radius:14px;padding:18px;box-shadow:0 16px 40px rgba(0,0,0,.6)">
+    <div style="font-size:15px;font-weight:600;color:#f3ead8;margin-bottom:12px">${esc(title)}</div>
+    <input id="nhPromptInp" type="text" value="${esc(defVal || "")}" placeholder="请输入内容" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.14);background:#0c0d11;color:#fff;font-size:14px;outline:none;margin-bottom:14px" />
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button id="nhPromptCancel" class="btn ghost sm" style="padding:7px 14px">取消</button>
+      <button id="nhPromptOk" class="btn sm" style="padding:7px 16px;background:linear-gradient(135deg,#e7c66b,#b68928);color:#111;border:none;border-radius:8px;font-weight:600">确定</button>
+    </div>
+  </div>`;
+  document.body.appendChild(mask);
+  const inp = mask.querySelector("#nhPromptInp");
+  inp.focus();
+  const close = () => mask.remove();
+  mask.querySelector("#nhPromptCancel").onclick = close;
+  mask.onclick = (e) => { if (e.target === mask) close(); };
+  mask.querySelector("#nhPromptOk").onclick = () => { const v = inp.value.trim(); close(); if (v) onOk(v); };
+  inp.onkeydown = (e) => { if (e.key === "Enter") mask.querySelector("#nhPromptOk").click(); };
+}
+
 function renderMusicFav() {
   const favs = getMusicFavs().map((x) => ({ ...x, group: x.group || "我喜欢的音乐" }));
   const groups = getMusicFavGroups();
@@ -981,15 +1005,16 @@ function renderMusicFav() {
     el.onclick = () => { curMusicFavGroup = el.dataset.fg; renderMusicFav(); };
   });
   $("#addFavGroupBtn").onclick = () => {
-    const name = (prompt("输入新歌单分组名称：", "") || "").trim();
-    if (!name || name === "全部") return;
-    const custom = get("music_fav_groups", []);
-    if (!custom.includes(name) && name !== "我喜欢的音乐") {
-      custom.push(name);
-      set("music_fav_groups", custom);
-    }
-    curMusicFavGroup = name;
-    renderMusicFav();
+    nhPrompt("新建歌单分组", "", (name) => {
+      if (name === "全部") return;
+      const custom = get("music_fav_groups", []);
+      if (!custom.includes(name) && name !== "我喜欢的音乐") {
+        custom.push(name);
+        set("music_fav_groups", custom);
+      }
+      curMusicFavGroup = name;
+      renderMusicFav();
+    });
   };
   const delBtn = $("#delFavGroupBtn");
   if (delBtn) delBtn.onclick = () => {
@@ -1010,14 +1035,15 @@ function renderMusicFav() {
       btn.style.cssText = "font-size:11px;padding:2px 6px;border-radius:6px;border:1px solid var(--line);color:var(--text-2);margin-right:4px";
       btn.onclick = (e) => {
         e.stopPropagation();
-        const target = (prompt(`将「${shown[idx].name}」移动到分组：`, shown[idx].group) || "").trim();
-        if (!target || target === "全部") return;
-        const custom = get("music_fav_groups", []);
-        if (!custom.includes(target) && target !== "我喜欢的音乐") { custom.push(target); set("music_fav_groups", custom); }
-        const k = songKey(shown[idx]);
-        set("music_fav", getMusicFavs().map((x) => songKey(x) === k ? { ...x, group: target } : x));
-        renderMusicFav();
-        toast(`已移入「${target}」`);
+        nhPrompt(`将「${shown[idx].name}」移动到分组`, shown[idx].group, (target) => {
+          if (target === "全部") return;
+          const custom = get("music_fav_groups", []);
+          if (!custom.includes(target) && target !== "我喜欢的音乐") { custom.push(target); set("music_fav_groups", custom); }
+          const k = songKey(shown[idx]);
+          set("music_fav", getMusicFavs().map((x) => songKey(x) === k ? { ...x, group: target } : x));
+          renderMusicFav();
+          toast(`已移入「${target}」`);
+        });
       };
       row.insertBefore(btn, row.lastElementChild);
     });
