@@ -1622,8 +1622,8 @@ function renderMe() {
     $("#btnSponsorInfo").onclick = () => modal("赞助获取 NovaHub Pro", `<div class="hint" style="font-size:13px;line-height:1.7">${esc(NH.cfg.sponsor_tip || "请联系站长获取兑换卡密，登录后即可一键激活 Pro 会员。")}</div>`);
   } else {
     $("#btnRedeem").onclick = openRedeemModal;
-    $("#btnCloudPush").onclick = cloudSyncPush;
-    $("#btnCloudPull").onclick = cloudSyncPull;
+    $("#btnCloudPush").onclick = () => cloudSyncPush(false);
+    $("#btnCloudPull").onclick = () => cloudSyncPull(false);
     $("#btnLogout").onclick = () => {
       NH.token = ""; NH.user = null;
       set("nh_token", ""); set("nh_user", null);
