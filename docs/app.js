@@ -1575,6 +1575,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.1.0</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
