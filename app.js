@@ -9,7 +9,24 @@ const K = {
 };
 const _mem = {};
 const get = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? (k in _mem ? _mem[k] : d) : JSON.parse(v); } catch { return k in _mem ? _mem[k] : d; } };
-const set = (k, v) => { _mem[k] = v; try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+const SYNC_KEYS = [
+  K.SOURCE, K.LIKE, K.HISTORY, "channels", "music_favs", "music_fav_groups",
+  "music_hist", "m_br", "progress", "novel_shelf", "novel_hist", "novel_prog",
+  "novel_cfg", "nh_shist_vod", "nh_shist_music", "nh_shist_novel",
+];
+const SYNC_WATCH = new Set(SYNC_KEYS);
+let _syncPushTimer = null;
+let _isRestoring = false;
+let _syncDirty = false;
+const set = (k, v) => {
+  _mem[k] = v;
+  try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
+  if (!_isRestoring && SYNC_WATCH.has(k) && typeof cloudSyncPush === "function" && typeof NH !== "undefined" && NH.user) {
+    _syncDirty = true;
+    clearTimeout(_syncPushTimer);
+    _syncPushTimer = setTimeout(() => cloudSyncPush(true), 2000);
+  }
+};
 
 function ensureLocalAuth() {
   set(K.VIP, true);
@@ -105,6 +122,19 @@ if (!sources || !sources.length || get("src_ver", "") !== SRC_VER) {
   set("src_ver", SRC_VER);
 }
 const saveSources = () => set(K.SOURCE, sources);
+(async function syncLiveSources() {
+  try {
+    const r = await fetch("/api/sources/live");
+    if (!r.ok) return;
+    const d = await r.json();
+    if (Array.isArray(d.items) && d.items.length) {
+      const liveIds = new Set(d.items.map((x) => x.id));
+      const custom = (sources || []).filter((s) => !liveIds.has(s.id) && !DEFAULT_SOURCES.some((b) => b.id === s.id));
+      sources = d.items.concat(custom);
+      saveSources();
+    }
+  } catch {}
+})();
 
 /* ============ 工具 ============ */
 const $ = (s) => document.querySelector(s);
@@ -124,7 +154,7 @@ function modal(title, bodyHtml) {
   });
 }
 const CORS_PROXIES = [
-  (u) => (location.protocol.startsWith("http") ? "/proxy?url=" + encodeURIComponent(u) : null),
+  (u) => (location.protocol.startsWith("http") ? (window.__NH_API_BASE__ || "") + "/proxy?url=" + encodeURIComponent(u) : null),
   (u) => "https://corsproxy.io/?url=" + encodeURIComponent(u),
   (u) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
 ];
@@ -132,7 +162,7 @@ function buildVodUrl(api, query) {
   const base = api.replace(/\/$/, "");
   return (base.includes("/api.php") ? base : base + "/api.php/provide/vod") + "/?" + query;
 }
-async function fetchJson(url, timeout = 5000) {
+async function fetchJson(url, timeout = 12000) {
   const tryFetch = async (target) => {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), timeout);
@@ -190,11 +220,21 @@ function pushView(fn) {
   viewStack.push(fn);
   history.pushState({ depth: viewStack.length }, "");
 }
-function closePlayer() {
+let _playerPushed = false;
+let _skipNextPop = false;
+function closePlayer(fromPop = false) {
+  if (typeof setPlayerFullscreen === "function") setPlayerFullscreen(false);
   destroyPlayers();
   $("#playerLayer").classList.add("hidden");
   document.body.style.overflow = "";
   syncModeFab();
+  if (_playerPushed) {
+    _playerPushed = false;
+    if (!fromPop) {
+      _skipNextPop = true;
+      history.back();
+    }
+  }
 }
 function closeReader() {
   stopNovelTts();
@@ -205,10 +245,10 @@ function closeReader() {
   document.body.style.overflow = "";
   syncModeFab();
 }
-function goBack() {
+function goBack(fromPop = false) {
   if (!$("#tocMask").classList.contains("hidden")) { $("#tocMask").classList.add("hidden"); return; }
   if (!$("#readerLayer").classList.contains("hidden")) { closeReader(); return; }
-  if (!$("#playerLayer").classList.contains("hidden")) { closePlayer(); return; }
+  if (!$("#playerLayer").classList.contains("hidden")) { closePlayer(fromPop); return; }
   if (viewStack.length > 0) {
     viewStack.pop();
     const prev = viewStack[viewStack.length - 1];
@@ -219,7 +259,10 @@ function goBack() {
     routes[currentRoute]();
   }
 }
-window.addEventListener("popstate", () => goBack());
+window.addEventListener("popstate", () => {
+  if (_skipNextPop) { _skipNextPop = false; return; }
+  goBack(true);
+});
 const backBar = (title) => `<div class="back-bar"><button class="btn ghost" onclick="history.back()" style="padding:5px 11px;font-size:13px">${ico("back")} 返回</button><span class="back-bar-title">${esc(title)}</span></div>`;
 
 function renderTabbar() {
@@ -229,18 +272,42 @@ function renderTabbar() {
         { route: "m_discover", icon: "disc", text: "曲库" },
         { route: "m_player", icon: "headphones", text: "播放器" },
         { route: "m_fav", icon: "heart", activeIcon: "heartFill", text: "收藏" },
+        { route: "me", icon: "user", text: "我的" },
       ]
     : appMode === "novel"
     ? [
         { route: "n_store", icon: "book", text: "书城" },
         { route: "n_shelf", icon: "bookmark", activeIcon: "bookmarkFill", text: "书架" },
+        { route: "me", icon: "user", text: "我的" },
       ]
     : [
         { route: "home", icon: "film", text: "影视" },
-        { route: "live", icon: "tv", text: "直播" },
-        { route: "webdav", icon: "cloud", text: "备份" },
+        { route: "live", icon: "tv", text: "电视" },
         { route: "me", icon: "user", text: "我的" },
       ];
+  let pills = $("#nhModePills");
+  if (!pills && $(".topbar")) {
+    pills = document.createElement("div");
+    pills.id = "nhModePills";
+    pills.className = "mode-pills";
+    pills.innerHTML = `<span class="mode-pill-slider" aria-hidden="true"></span>` + [
+      { m: "vod", label: "影视" },
+      { m: "music", label: "音乐" },
+      { m: "novel", label: "小说" },
+    ].map((x) => `<button class="mode-pill" data-m="${x.m}">${x.label}</button>`).join("");
+    pills.querySelectorAll(".mode-pill").forEach((b) => {
+      b.onclick = () => switchMode(b.dataset.m);
+    });
+    const anchor = $("#searchHistPop") || $(".topbar");
+    anchor.insertAdjacentElement("afterend", pills);
+  }
+  if (pills) {
+    const order = ["vod", "music", "novel"];
+    const idx = Math.max(0, order.indexOf(appMode));
+    pills.querySelectorAll(".mode-pill").forEach((b) => b.classList.toggle("active", b.dataset.m === appMode));
+    const slider = pills.querySelector(".mode-pill-slider");
+    if (slider) slider.style.transform = `translateX(calc(${idx} * (100% + 6px)))`;
+  }
   tb.innerHTML = tabs.map((t) => {
     const on = currentRoute === t.route;
     return `<a href="#" class="tab ${on ? "active" : ""}" data-route="${t.route}"><span class="ico">${ico(on && t.activeIcon ? t.activeIcon : t.icon)}</span>${t.text}</a>`;
@@ -268,19 +335,91 @@ function switchMode(mode, targetRoute) {
   go(targetRoute || defRoute);
 }
 
+let _bootDone = false;
 function go(route) {
-  currentRoute = route;
-  viewStack.length = 0;
-  renderTabbar();
-  (routes[route] || renderHome)();
-  updateMiniBar();
-  window.scrollTo(0, 0);
+  const applyRoute = () => {
+    currentRoute = route;
+    viewStack.length = 0;
+    const isMp = route === "m_player" && !!curSong;
+    const vEl = $("#view");
+    if (vEl) vEl.classList.toggle("view-mplayer", isMp);
+    document.body.classList.toggle("in-mplayer", isMp);
+    renderTabbar();
+    (routes[route] || renderHome)();
+    updateMiniBar();
+    window.scrollTo(0, 0);
+  };
+  if (_bootDone && typeof document.startViewTransition === "function") {
+    const t = document.startViewTransition(applyRoute);
+    t.finished.finally(() => {
+      const v = $("#view");
+      if (v) { v.setAttribute("tabindex", "-1"); v.focus({ preventScroll: true }); }
+    });
+  } else {
+    applyRoute();
+  }
+}
+
+/* ============ 搜索动效、分模块历史与阶梯交错辅助 ============ */
+const _searchHistKey = () => "nh_shist_" + appMode;
+const getSearchHist = () => get(_searchHistKey(), []);
+function addSearchHist(q) {
+  if (!q) return;
+  const list = [q, ...getSearchHist().filter((x) => x !== q)].slice(0, 8);
+  set(_searchHistKey(), list);
+}
+function hideSearchHistPop() {
+  const pop = $("#searchHistPop");
+  if (pop) pop.classList.add("hidden");
+}
+function renderSearchHistPop() {
+  const pop = $("#searchHistPop");
+  if (!pop) return;
+  const list = getSearchHist();
+  if (!list.length) { pop.classList.add("hidden"); return; }
+  pop.innerHTML = `
+    <div class="sh-head"><span>最近搜索</span><button class="sh-clear" id="shClearAll" type="button">清空历史</button></div>
+    <div class="sh-chips">${list.map((w) => `<button class="sh-chip" type="button" data-kw="${esc(w)}">${esc(w)}</button>`).join("")}</div>`;
+  pop.classList.remove("hidden");
+  pop.querySelector("#shClearAll").onclick = (e) => { e.stopPropagation(); set(_searchHistKey(), []); hideSearchHistPop(); };
+  pop.querySelectorAll(".sh-chip").forEach((c) => {
+    c.onclick = (e) => {
+      e.stopPropagation();
+      $("#searchInput").value = c.dataset.kw;
+      syncSearchClear();
+      triggerSearch();
+    };
+  });
+}
+function syncSearchClear() {
+  const inp = $("#searchInput"), clr = $("#searchClear");
+  if (inp && clr) clr.classList.toggle("hidden", !inp.value.trim());
+}
+function setSearchLoading(on) {
+  const bar = $("#topProgress"), btn = $("#searchBtn");
+  if (bar) bar.classList.toggle("hidden", !on);
+  if (btn) btn.innerHTML = on ? `<progress aria-label="检索中" class="loading-spinner"></progress>` : "搜索";
+}
+function renderSkeletonHtml(type = "grid", count = 6) {
+  if (type === "list") {
+    return `<div class="sk-list">${Array.from({ length: count }, () => `<div class="sk-row"></div>`).join("")}</div>`;
+  }
+  return `<div class="sk-grid">${Array.from({ length: count }, () => `<div class="sk-card"><div class="sk-poster"></div><div class="sk-line"></div></div>`).join("")}</div>`;
+}
+function applyStagger(container) {
+  if (!container) return;
+  container.classList.add("nh-stagger");
+  if (!CSS.supports("animation-delay: calc(sibling-index() * 0.1s)")) {
+    [...container.children].slice(0, 12).forEach((el, idx) => el.style.setProperty("--sibling-index", idx));
+  }
 }
 
 /* ============ 影视 & 音乐 & 小说统一搜索入口 ============ */
 const triggerSearch = () => {
   const q = $("#searchInput").value.trim();
   $("#searchInput").blur();
+  hideSearchHistPop();
+  if (q) addSearchHist(q);
   if (appMode === "music") {
     if (q) searchMusic(q); else go("m_discover");
   } else if (appMode === "novel") {
@@ -292,6 +431,19 @@ const triggerSearch = () => {
 $("#searchBtn").addEventListener("click", triggerSearch);
 $("#searchInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); triggerSearch(); }
+});
+$("#searchInput").addEventListener("input", syncSearchClear);
+$("#searchInput").addEventListener("focus", renderSearchHistPop);
+if ($("#searchClear")) {
+  $("#searchClear").addEventListener("click", () => {
+    $("#searchInput").value = "";
+    syncSearchClear();
+    $("#searchInput").focus();
+    renderSearchHistPop();
+  });
+}
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".search-box") && !e.target.closest("#searchHistPop")) hideSearchHistPop();
 });
 
 /* ============ 现代音乐模块（榜单 / 双源搜歌 / 专辑视图 / 动态歌词 / 收藏 / Mini 条） ============ */
@@ -338,10 +490,25 @@ function toggleMusicFav(song) {
   let favs = getMusicFavs();
   const key = songKey(song);
   const idx = favs.findIndex((x) => songKey(x) === key);
-  if (idx >= 0) { favs.splice(idx, 1); toast("已取消收藏"); }
-  else { favs.unshift({ ...song, url: song.url || "" }); toast("已加入音乐收藏"); }
-  set("music_favs", favs);
-  if (currentRoute.startsWith("m_")) routes[currentRoute]();
+  if (idx >= 0) {
+    favs.splice(idx, 1);
+    set("music_favs", favs);
+    toast("已取消收藏");
+    if (currentRoute.startsWith("m_")) routes[currentRoute]();
+    return;
+  }
+  const defGrp = (typeof curMusicFavGroup !== "undefined" && curMusicFavGroup !== "全部") ? curMusicFavGroup : "我喜欢的音乐";
+  const groups = (typeof getMusicFavGroups === "function" ? getMusicFavGroups() : ["我喜欢的音乐"]).filter((g) => g !== "全部");
+  nhPrompt("收藏到歌单分组", defGrp, (grp) => {
+    const g = grp === "全部" ? "我喜欢的音乐" : grp;
+    const custom = get("music_fav_groups", []);
+    if (!custom.includes(g) && g !== "我喜欢的音乐") { custom.push(g); set("music_fav_groups", custom); }
+    favs.unshift({ ...song, url: song.url || "", group: g });
+    set("music_favs", favs);
+    toast(`已收藏到「${g}」`);
+    if (currentRoute.startsWith("m_")) routes[currentRoute]();
+  }, groups);
+  return;
 }
 function addMusicHist(song) {
   if (!song) return;
@@ -408,39 +575,88 @@ async function loadChart(chartId = curChart) {
 }
 
 function isFakeCoverTrack(name, q) {
-  const ql = q.toLowerCase();
-  const fakeRe = /原唱|翻唱|伴奏|纯音乐|八音盒|铃声|cover|instrumental|karaoke/i;
-  return fakeRe.test(name) && !fakeRe.test(ql);
+  const ql = String(q || "").toLowerCase();
+  const fakeRe = /原唱|翻唱|伴奏|纯音乐|八音盒|铃声|童声|儿歌|DJ|慢摇|remix|cover|instrumental|karaoke|3d环绕|吉他版|钢琴版|古筝|二胡|萨克斯|唢呐|戏腔|朗诵|变调/i;
+  return fakeRe.test(String(name || "")) && !fakeRe.test(ql);
+}
+
+/**
+ * 按精确匹配程度对搜索结果稳定排序（完全匹配 > 前缀匹配 > 包含关键词 > 副标题匹配 > 其余）。
+ */
+function sortByExactMatch(list, query, getTitle, getSub) {
+  const kw = String(query || "").trim().toLowerCase();
+  if (!kw || !Array.isArray(list) || list.length < 2) return list;
+  const score = (item) => {
+    const title = String(getTitle(item) || "").trim().toLowerCase();
+    const sub = getSub ? String(getSub(item) || "").trim().toLowerCase() : "";
+    if (title === kw) return 0;
+    if (title.startsWith(kw)) return 1;
+    if (title.includes(kw)) return 2;
+    if (sub && (sub === kw || sub.includes(kw))) return 3;
+    return 4;
+  };
+  return list.sort((a, b) => score(a) - score(b));
 }
 
 async function searchMusic(q) {
   if (!q) return;
-  toast("正在检索正版曲库…");
+  setSearchLoading(true);
+  if (currentRoute === "m_discover") {
+    const view = $("#view");
+    if (view) view.innerHTML = `<div class="section-title">${ico("search")} 正在检索「${esc(q)}」…</div>${renderSkeletonHtml("list", 6)}`;
+  }
   const kwList = [], neList = [];
-  await Promise.allSettled([
-    fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`).then((r) => r.ok ? r.json() : []).then((res) => {
-      if (Array.isArray(res)) res.forEach((x) => {
-        if (!isFakeCoverTrack(x.name || "", q)) kwList.push(x);
-      });
-    }),
-    fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=45&pages=1`, 7000).then((res) => {
-      if (Array.isArray(res)) res.forEach((x) => {
-        const nm = x.name || "未知歌曲";
-        if (isFakeCoverTrack(nm, q)) return;
-        neList.push({
-          id: String(x.id || ""),
+  const normTrackKey = (nm, ar) => {
+    const c = (s) => String(s || "").toLowerCase().replace(/\s*\([^)]*\)|\s*\[[^\]]*\]|\s*（[^）]*）|[^\u4e00-\u9fa5a-z0-9]/g, "");
+    return c(nm) + "|" + c(ar);
+  };
+  try {
+    // 优先检索高可播率酷我曲库，并清理歌手转义分隔符
+    const kwRes = await fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`).then((r) => r.ok ? r.json() : []).catch(() => []);
+    if (Array.isArray(kwRes)) {
+      kwRes.forEach((x) => {
+        const nm = String(x.name || "").replace(/\u00a0/g, " ").trim();
+        if (!nm || isFakeCoverTrack(nm, q)) return;
+        kwList.push({
+          ...x,
           name: nm,
-          artist: Array.isArray(x.artist) ? x.artist.join(" / ") : (x.artist || "未知歌手"),
-          album: x.album || "单曲收录",
-          source: "netease",
-          pic: x.pic_id ? `https://api.injahow.cn/meting/?server=netease&type=pic&id=${x.pic_id}` : "",
-          url: "",
-          lrc: `https://api.injahow.cn/meting/?server=netease&type=lrc&id=${x.id}`,
+          artist: String(x.artist || "未知歌手").replace(/\\u0026|&/g, " / ").replace(/\u00a0/g, " ").trim(),
+          album: String(x.album || "单曲收录").replace(/\u00a0/g, " ").trim() || "单曲收录",
         });
       });
-    }),
-  ]);
-  const list = kwList.concat(neList);
+    }
+    // 仅当酷我有效结果不足 5 首时才回退补充网易云曲库，减少不可播杂曲
+    if (kwList.length < 5) {
+      const neRes = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=30&pages=1`, 7000).catch(() => []);
+      if (Array.isArray(neRes)) {
+        neRes.forEach((x) => {
+          const nm = String(x.name || "").trim() || "未知歌曲";
+          if (isFakeCoverTrack(nm, q)) return;
+          neList.push({
+            id: String(x.id || ""),
+            name: nm,
+            artist: Array.isArray(x.artist) ? x.artist.join(" / ") : (x.artist || "未知歌手"),
+            album: x.album || "单曲收录",
+            source: "netease",
+            pic: x.pic_id ? `https://api.injahow.cn/meting/?server=netease&type=pic&id=${x.pic_id}` : "",
+            url: "",
+            lrc: `https://api.injahow.cn/meting/?server=netease&type=lrc&id=${x.id}`,
+          });
+        });
+      }
+    }
+  } finally {
+    setSearchLoading(false);
+  }
+  const seen = new Set();
+  const merged = [];
+  kwList.concat(neList).forEach((item) => {
+    const k = normTrackKey(item.name, item.artist);
+    if (seen.has(k)) return;
+    seen.add(k);
+    merged.push(item);
+  });
+  const list = sortByExactMatch(merged, q, (x) => x.name, (x) => x.artist);
   if (list.length) {
     discoverList = list;
     musicQueue = list;
@@ -465,6 +681,10 @@ const M_BR_OPTS = [
 let mBr = get("m_br", "320");
 const brSelectHtml = () => `<select id="mBrSel" class="ui-select">${M_BR_OPTS.map((o) => `<option value="${o.v}" ${mBr === o.v ? "selected" : ""}>${o.label}</option>`).join("")}</select>`;
 async function changeBr(newBr) {
+  if ((newBr === "320" || newBr === "999") && !NH.user?.is_pro) {
+    toast("极高 320k / 无损 FLAC 为 Pro 会员专属权益，请兑换卡密解锁");
+    return;
+  }
   mBr = newBr;
   set("m_br", mBr);
   toast("已切换音质：" + (M_BR_OPTS.find((o) => o.v === mBr)?.label || mBr));
@@ -578,6 +798,11 @@ async function loadSongLyrics(song, token) {
 }
 
 async function playSongFromList(list, idx, openPlayerView = false) {
+  if (!NH.user) {
+    toast("请先登录账号后收听（5 秒免费注册）");
+    if (typeof openAuthModal === "function") openAuthModal("login");
+    return;
+  }
   const song = list[idx];
   if (!song) return;
   const token = ++mPlayToken;
@@ -721,7 +946,7 @@ function updateMiniBar() {
   const cls = "mini-cov" + (audioEl.paused ? "" : " playing");
   bar.innerHTML = `
     ${curSong.pic ? `<img class="${cls}" src="${esc(curSong.pic)}" onerror="_imgPh(this,'disc','${cls}')">` : `<div class="${cls}">${ico("disc")}</div>`}
-    <div class="mini-info"><div class="mini-title">${esc(curSong.name)}</div><div class="mini-sub">${esc(lrcLine)}</div></div>
+    <div class="mini-info"><div class="mini-title">${esc(curSong.name)}${audioEl.paused ? "" : `<span class="eq-bars" aria-hidden="true"><i></i><i></i><i></i></span>`}</div><div class="mini-sub">${esc(lrcLine)}</div></div>
     <button id="miniPlay" aria-label="播放暂停">${ico(audioEl.paused ? "play" : "pause")}</button>
     <button id="miniNext" aria-label="下一曲">${ico("next")}</button>`;
   bar.onclick = (e) => { if (!e.target.closest("button")) switchMode("music", "m_player"); };
@@ -746,11 +971,20 @@ function paintMusicList(container, list) {
       </div>
       <button class="m-fav ${fav ? "on" : ""}" aria-label="收藏">${ico(fav ? "heartFill" : "heart")}</button>`;
     row.onclick = (e) => {
-      if (e.target.closest(".m-fav")) { e.stopPropagation(); toggleMusicFav(m); return; }
+      const favBtn = e.target.closest(".m-fav");
+      if (favBtn) {
+        e.stopPropagation();
+        favBtn.classList.remove("fav-pop");
+        void favBtn.offsetWidth;
+        favBtn.classList.add("fav-pop");
+        toggleMusicFav(m);
+        return;
+      }
       playSongFromList(list, i, true);
     };
     container.appendChild(row);
   });
+  applyStagger(container);
 }
 
 function paintAlbumList(container, list) {
@@ -815,7 +1049,8 @@ function renderMusicDiscover() {
 function renderLyricsBox() {
   const box = $("#lrcBox");
   if (!box) return;
-  if (!curLyrics.length) { box.innerHTML = `<div class="lrc-line active">纯音乐或暂无歌词</div>`; return; }
+  const isInstrumental = !curLyrics.length || (curLyrics.length <= 2 && /纯音乐|没有填词|请欣赏/.test(curLyrics.map((l) => l.text).join("")));
+  if (isInstrumental) { box.innerHTML = `<div class="lrc-line active" style="margin-top:24px">🎵 纯音乐 · 沉浸伴奏聆听</div>`; return; }
   box.innerHTML = curLyrics.map((l, i) => `<div class="lrc-line ${i === activeLrcIdx ? "active" : ""}" data-i="${i}">${esc(l.text).replace(/\n/g, "<br>")}</div>`).join("");
   box.querySelectorAll(".lrc-line").forEach((el) => el.onclick = () => {
     const l = curLyrics[+el.dataset.i];
@@ -837,6 +1072,10 @@ function syncPlayerUi() {
 }
 
 function renderMusicPlayer() {
+  const vEl = $("#view");
+  const isMp = currentRoute === "m_player" && !!curSong;
+  if (vEl) vEl.classList.toggle("view-mplayer", isMp);
+  document.body.classList.toggle("in-mplayer", isMp);
   if (!curSong) {
     $("#view").innerHTML = `<div class="empty">尚未选择播放曲目<br><br><button class="btn primary" onclick="go('m_discover')">前往曲库选歌</button></div>`;
     return;
@@ -845,23 +1084,23 @@ function renderMusicPlayer() {
   const dur = isFinite(audioEl.duration) && audioEl.duration > 0 ? audioEl.duration : 0;
   $("#view").innerHTML = `
     <div class="m-player">
-      <div style="width:100%;display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;gap:6px">
-        <button class="btn ghost" onclick="go('m_discover')" style="padding:5px 10px;font-size:12.5px">${ico("back")} 曲库</button>
-        <div style="flex:1;min-width:0;padding:0 4px">
-          <div style="font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(curSong.name)}</div>
-          <div class="hint" style="margin:2px 0 0">${esc(curSong.artist || "")}</div>
+      <div class="m-player-head">
+        <button class="btn ghost" onclick="go('m_discover')" style="padding:5px 10px;font-size:12.5px;flex-shrink:0">${ico("back")} 曲库</button>
+        <div class="m-player-meta">
+          <div class="m-player-title">${esc(curSong.name)}</div>
+          <div class="m-player-artist">${esc(curSong.artist || "")}</div>
         </div>
-        ${brSelectHtml()}
-        <button id="mPlayerFav" class="m-fav ${fav ? "on" : ""}" style="font-size:20px" aria-label="收藏">${ico(fav ? "heartFill" : "heart")}</button>
+        <button id="mPlayerFav" class="m-fav ${fav ? "on" : ""}" style="font-size:20px;flex-shrink:0" aria-label="收藏">${ico(fav ? "heartFill" : "heart")}</button>
       </div>
       <div id="mDisc" class="m-disc ${audioEl.paused ? "" : "playing"}">
         ${curSong.pic ? `<img src="${esc(curSong.pic)}" onerror="_imgPh(this,'disc','m-disc-ph')">` : `<div class="m-disc-ph">${ico("disc")}</div>`}
       </div>
+      <div id="lrcBox" class="lrc-box"></div>
       <div class="m-tools">
         <button id="mSleepBtn" class="m-tool-btn ${mSleepMode ? "active" : ""}">${ico("clock")} <span id="mSleepTxt">${sleepLabel()}</span></button>
         <button id="mPipBtn" class="m-tool-btn ${pipActive ? "active" : ""}">${ico("pip")} 悬浮歌词</button>
+        ${brSelectHtml()}
       </div>
-      <div id="lrcBox" class="lrc-box"></div>
       <div class="m-prog">
         <span id="mCurTime">${fmt(audioEl.currentTime || 0)}</span>
         <input id="mSeek" type="range" min="0" max="1000" value="${dur ? Math.round((audioEl.currentTime / dur) * 1000) : 0}">
@@ -902,15 +1141,108 @@ function renderMusicPlayer() {
   sk.onchange = () => { sk._dragging = false; if (isFinite(audioEl.duration) && audioEl.duration > 0) audioEl.currentTime = (sk.value / 1000) * audioEl.duration; };
 }
 
+let curMusicFavGroup = "全部";
+function getMusicFavGroups() {
+  const custom = get("music_fav_groups", []);
+  const fromFavs = getMusicFavs().map((x) => x.group).filter(Boolean);
+  return ["全部", "我喜欢的音乐", ...new Set([...custom, ...fromFavs].filter((g) => g && g !== "全部" && g !== "我喜欢的音乐"))];
+}
+
+function nhPrompt(title, defVal, onOk, options = null) {
+  const old = document.getElementById("nhPromptMask");
+  if (old) old.remove();
+  const mask = document.getElementById("nhPromptMask") || document.createElement("div");
+  mask.id = "nhPromptMask";
+  mask.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.68);display:flex;align-items:center;justify-content:center;padding:24px;backdrop-filter:blur(4px)";
+  const selHtml = Array.isArray(options) && options.length
+    ? `<select id="nhPromptSel" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;border:1px solid rgba(212,175,55,.35);background:#0c0d11;color:#f3ead8;font-size:14px;outline:none;margin-bottom:10px">${options.map((o) => `<option value="${esc(o)}" ${o === defVal ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`
+    : "";
+  mask.innerHTML = `<div style="width:100%;max-width:340px;background:#14151a;border:1px solid rgba(212,175,55,.35);border-radius:14px;padding:18px;box-shadow:0 16px 40px rgba(0,0,0,.6)">
+    <div style="font-size:15px;font-weight:600;color:#f3ead8;margin-bottom:12px">${esc(title)}</div>
+    ${selHtml}
+    <input id="nhPromptInp" type="text" value="${esc(defVal || "")}" placeholder="或输入新分组名称" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.14);background:#0c0d11;color:#fff;font-size:14px;outline:none;margin-bottom:14px" />
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button id="nhPromptCancel" class="btn ghost sm" style="padding:7px 14px">取消</button>
+      <button id="nhPromptOk" class="btn sm" style="padding:7px 16px;background:linear-gradient(135deg,#e7c66b,#b68928);color:#111;border:none;border-radius:8px;font-weight:600">确定</button>
+    </div>
+  </div>`;
+  document.body.appendChild(mask);
+  const inp = mask.querySelector("#nhPromptInp");
+  const sel = mask.querySelector("#nhPromptSel");
+  if (sel) sel.onchange = () => { inp.value = sel.value; };
+  inp.focus();
+  const close = () => mask.remove();
+  mask.querySelector("#nhPromptCancel").onclick = close;
+  mask.onclick = (e) => { if (e.target === mask) close(); };
+  mask.querySelector("#nhPromptOk").onclick = () => { const v = inp.value.trim(); close(); if (v) onOk(v); };
+  inp.onkeydown = (e) => { if (e.key === "Enter") mask.querySelector("#nhPromptOk").click(); };
+}
+
 function renderMusicFav() {
-  const favs = getMusicFavs();
+  const favs = getMusicFavs().map((x) => ({ ...x, group: x.group || "我喜欢的音乐" }));
+  const groups = getMusicFavGroups();
+  if (!groups.includes(curMusicFavGroup)) curMusicFavGroup = "全部";
+  const shown = curMusicFavGroup === "全部" ? favs : favs.filter((x) => x.group === curMusicFavGroup);
   const hist = get("music_hist", []);
   $("#view").innerHTML = `
-    <div class="section-title">${ico("heartFill")} 收藏曲目 (${favs.length})</div>
+    <div class="m-chips" id="mFavGroups">
+      ${groups.map((g) => `<button class="m-chip ${curMusicFavGroup === g ? "active" : ""}" data-fg="${esc(g)}">${esc(g)}</button>`).join("")}
+      <button class="m-chip" id="addFavGroupBtn">+ 新建分组</button>
+    </div>
+    <div class="section-title" style="justify-content:space-between">
+      <span>${ico("heartFill")} ${esc(curMusicFavGroup)} (${shown.length})</span>
+      ${curMusicFavGroup !== "全部" && curMusicFavGroup !== "我喜欢的音乐" ? `<button class="btn ghost sm" id="delFavGroupBtn">删除分组</button>` : ""}
+    </div>
     <div class="group" id="mFavList"></div>
     <div class="section-title">${ico("clock")} 最近播放 (${hist.length})</div>
     <div class="group" id="mHistList"></div>`;
-  paintMusicList($("#mFavList"), favs);
+  $("#mFavGroups").querySelectorAll("[data-fg]").forEach((el) => {
+    el.onclick = () => { curMusicFavGroup = el.dataset.fg; renderMusicFav(); };
+  });
+  $("#addFavGroupBtn").onclick = () => {
+    nhPrompt("新建歌单分组", "", (name) => {
+      if (name === "全部") return;
+      const custom = get("music_fav_groups", []);
+      if (!custom.includes(name) && name !== "我喜欢的音乐") {
+        custom.push(name);
+        set("music_fav_groups", custom);
+      }
+      curMusicFavGroup = name;
+      renderMusicFav();
+    });
+  };
+  const delBtn = $("#delFavGroupBtn");
+  if (delBtn) delBtn.onclick = () => {
+    const g = curMusicFavGroup;
+    set("music_fav_groups", get("music_fav_groups", []).filter((x) => x !== g));
+    set("music_favs", getMusicFavs().map((x) => x.group === g ? { ...x, group: "我喜欢的音乐" } : x));
+    curMusicFavGroup = "全部";
+    renderMusicFav();
+    toast(`已删除分组「${g}」，歌曲已移回默认分组`);
+  };
+  paintMusicList($("#mFavList"), shown);
+  if (shown.length) {
+    $("#mFavList").querySelectorAll(".m-item").forEach((row, idx) => {
+      const btn = document.createElement("button");
+      btn.className = "m-act";
+      btn.title = "移动分组";
+      btn.textContent = shown[idx].group === "我喜欢的音乐" ? "分组" : shown[idx].group;
+      btn.style.cssText = "font-size:11px;padding:2px 6px;border-radius:6px;border:1px solid var(--line);color:var(--text-2);margin-right:4px";
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        nhPrompt(`将「${shown[idx].name}」移动到分组`, shown[idx].group, (target) => {
+          if (target === "全部") return;
+          const custom = get("music_fav_groups", []);
+          if (!custom.includes(target) && target !== "我喜欢的音乐") { custom.push(target); set("music_fav_groups", custom); }
+          const k = songKey(shown[idx]);
+          set("music_favs", getMusicFavs().map((x) => songKey(x) === k ? { ...x, group: target } : x));
+          renderMusicFav();
+          toast(`已移入「${target}」`);
+        });
+      };
+      row.insertBefore(btn, row.lastElementChild);
+    });
+  }
   paintMusicList($("#mHistList"), hist);
 }
 
@@ -966,6 +1298,7 @@ function paintGrid(el, items) {
   el.querySelectorAll(".card").forEach((c, i) => {
     c.onclick = () => openDetail(items[i]);
   });
+  applyStagger(el);
 }
 
 /* 打开数据源：拉首页列表（MacCMS ac=detail） */
@@ -1072,37 +1405,109 @@ function getProgress(vodKey) {
   return vodKey ? (get("progress", {})[vodKey] || null) : null;
 }
 
-/* ============ 搜索（MacCMS ac=detail，多源并发） ============ */
+/* ============ 搜索（MacCMS ac=detail，多源并发 + 缓存 + 分类筛选） ============ */
+const _searchCache = new Map();
+const VOD_CATS = ["全部", "电影", "电视剧", "动漫", "综艺", "其他"];
+function classifyVodItem(typeName, remark) {
+  const t = String(typeName || "").trim();
+  const r = String(remark || "").trim();
+  if (/动漫|番剧|国漫|日漫|美漫|少儿/.test(t)) return "动漫";
+  if (/综艺|真人秀|脱口秀|晚会|演唱会/.test(t)) return "综艺";
+  if (/剧|连续剧|连续|series/i.test(t) || /全\d+集|更新至\s*\d+|第\s*\d+\s*集|连载中|集全/.test(r)) return "电视剧";
+  if (/电影|影|片$/.test(t) || /正片|HD|BD|抢先|1080P|4K/i.test(r)) return "电影";
+  return "其他";
+}
+function renderSearchResults(q) {
+  const entry = _searchCache.get(q);
+  if (!entry || !entry.results.length) {
+    $("#view").innerHTML = `${backBar("搜索：" + q)}<div class="empty">未检索到「${esc(q)}」<br>请尝试更换关键词</div>`;
+    return;
+  }
+  const { results } = entry;
+  const counts = {};
+  results.forEach((item) => {
+    const c = classifyVodItem(item.typeName, item.remark);
+    counts[c] = (counts[c] || 0) + 1;
+  });
+  const activeCat = entry.activeCat && (entry.activeCat === "全部" || counts[entry.activeCat]) ? entry.activeCat : "全部";
+  entry.activeCat = activeCat;
+  const shown = activeCat === "全部" ? results : results.filter((x) => classifyVodItem(x.typeName, x.remark) === activeCat);
+  const catsHtml = VOD_CATS.filter((c) => c === "全部" || counts[c] > 0).map((c) => {
+    const cnt = c === "全部" ? results.length : counts[c];
+    return `<button class="m-chip ${activeCat === c ? "active" : ""}" data-vcat="${c}" type="button">${c} (${cnt})</button>`;
+  }).join("");
+  $("#view").innerHTML = `${backBar(`检索结果 (${shown.length})`)}<div class="vod-cat-bar" id="vodCatBar">${catsHtml}</div><div class="grid" id="sGrid"></div>`;
+  paintGrid($("#sGrid"), shown);
+  $("#vodCatBar")?.querySelectorAll(".m-chip").forEach((btn) => {
+    btn.onclick = () => {
+      entry.activeCat = btn.dataset.vcat || "全部";
+      renderSearchResults(q);
+    };
+  });
+}
+
 async function doSearch(q, _fromBack) {
   if (!_fromBack) pushView(() => doSearch(q, true));
-  $("#view").innerHTML = `${backBar("搜索：" + q)}<div class="empty">正在并发检索「${esc(q)}」…</div>`;
+  if (_fromBack && _searchCache.has(q)) {
+    setSearchLoading(false);
+    renderSearchResults(q);
+    return;
+  }
+  setSearchLoading(true);
+  $("#view").innerHTML = `${backBar("搜索：" + q)}${renderSkeletonHtml("grid", 6)}`;
   const results = [];
-  await Promise.allSettled(
-    sources.filter((x) => x.enabled).map(async (s) => {
-      const url = buildVodUrl(s.api, `ac=detail&wd=${encodeURIComponent(q)}&pg=1`);
-      const j = await fetchJson(url, 6000);
-      const hits = (j.list || []).filter((v) => {
-        const name = (v.vod_name || "").toLowerCase();
-        const kw = q.toLowerCase();
-        return name.includes(kw) || kw.split(/\s+/).some((w) => w.length > 1 && name.includes(w));
-      });
-      hits.slice(0, 12).forEach((v) => results.push({
-        id: String(v.vod_id), name: v.vod_name, pic: v.vod_pic, remark: v.vod_remark || "", srcId: s.id, from: s.name,
-      }));
-    })
-  );
-  if (!results.length) { $("#view").innerHTML = `${backBar("搜索：" + q)}<div class="empty">未检索到「${esc(q)}」<br>请尝试更换关键词</div>`; return; }
-  $("#view").innerHTML = `${backBar(`检索结果 (${results.length})`)}<div class="grid" id="sGrid"></div>`;
-  paintGrid($("#sGrid"), results);
+  try {
+    await Promise.allSettled(
+      sources.filter((x) => x.enabled).map(async (s) => {
+        const url = buildVodUrl(s.api, `ac=detail&wd=${encodeURIComponent(q)}&pg=1`);
+        const j = await fetchJson(url, 12000);
+        const hits = (j.list || []).filter((v) => {
+          const name = (v.vod_name || "").toLowerCase();
+          const kw = q.toLowerCase();
+          return name.includes(kw) || kw.split(/\s+/).some((w) => w.length > 1 && name.includes(w));
+        });
+        sortByExactMatch(hits, q, (v) => v.vod_name);
+        hits.slice(0, 12).forEach((v) => results.push({
+          id: String(v.vod_id),
+          name: v.vod_name,
+          pic: v.vod_pic,
+          remark: v.vod_remark || "",
+          typeName: v.type_name || v.vod_class || "",
+          srcId: s.id,
+          from: s.name,
+        }));
+      })
+    );
+  } finally {
+    setSearchLoading(false);
+  }
+  sortByExactMatch(results, q, (x) => x.name);
+  if (_searchCache.size >= 20) {
+    const firstKey = _searchCache.keys().next().value;
+    if (firstKey !== undefined) _searchCache.delete(firstKey);
+  }
+  _searchCache.set(q, { ts: Date.now(), results, activeCat: "全部" });
+  renderSearchResults(q);
 }
 
 /* ============ 视频播放器 ============ */
 const P = { hls: null, flv: null, eps: [], idx: 0, title: "", vodKey: "" };
 function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0) {
+  if (!NH.user) {
+    toast("请先登录账号后观看（5 秒免费注册）");
+    if (typeof openAuthModal === "function") openAuthModal("login");
+    return;
+  }
+  const layer = $("#playerLayer");
+  const wasHidden = layer.classList.contains("hidden");
   P.title = title; P.eps = eps; P.idx = idx; P.vodKey = vodKey;
   $("#playerTitle").textContent = title;
-  $("#playerLayer").classList.remove("hidden");
+  layer.classList.remove("hidden");
   document.body.style.overflow = "hidden";
+  if (wasHidden) {
+    _playerPushed = true;
+    history.pushState({ player: true }, "");
+  }
   syncModeFab();
   renderEpisodes();
   mountSource(url, seekTime);
@@ -1212,24 +1617,66 @@ $("#rateSel").addEventListener("change", (e) => {
 $("#qualitySel").addEventListener("change", (e) => {
   if (P.hls) { const i = +e.target.value; P.hls.currentLevel = i; P.hls.nextLevel = i; }
 });
-$("#playerBack").onclick = closePlayer;
+$("#playerBack").onclick = () => closePlayer(false);
 $("#playerFav").onclick = () => toast("已记录至观看历史");
 $("#btnPlay").onclick = () => { const v = $("#video"); v.paused ? v.play() : v.pause(); };
-$("#btnFs").onclick = async () => {
-  const v = $("#video"), box = $(".player-box");
-  if (document.fullscreenElement || document.webkitFullscreenElement) {
-    (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
-    try { screen.orientation?.unlock?.(); } catch {}
-    return;
+function syncFsButtons(isFs) {
+  const b = $("#btnFs");
+  if (b) b.innerHTML = `${ico("fullscreen")} ${isFs ? "退出" : "全屏"}`;
+  const bf = $("#btnBoxFs");
+  if (bf) {
+    bf.innerHTML = ico("fullscreen");
+    bf.setAttribute("aria-label", isFs ? "退出全屏" : "全屏播放");
   }
-  if (box.requestFullscreen || box.webkitRequestFullscreen) {
-    try {
-      await (box.requestFullscreen || box.webkitRequestFullscreen).call(box);
-      await screen.orientation?.lock?.("landscape").catch(() => {});
+}
+async function setPlayerFullscreen(enter) {
+  const layer = $("#playerLayer"), v = $("#video");
+  if (!layer) return;
+  syncFsButtons(!!enter);
+  if (enter) {
+    layer.classList.add("is-fs");
+    if (window.NovaNative && typeof window.NovaNative.setFullscreen === "function") {
+      try { window.NovaNative.setFullscreen(true); } catch {}
       return;
-    } catch {}
+    }
+    const reqFs = layer.requestFullscreen || layer.webkitRequestFullscreen;
+    if (reqFs) {
+      try {
+        await reqFs.call(layer);
+        await screen.orientation?.lock?.("landscape").catch(() => {});
+        return;
+      } catch {}
+    }
+    if (v && v.webkitEnterFullscreen) {
+      try { v.webkitEnterFullscreen(); } catch {}
+    }
+  } else {
+    layer.classList.remove("is-fs");
+    if (window.NovaNative && typeof window.NovaNative.setFullscreen === "function") {
+      try { window.NovaNative.setFullscreen(false); } catch {}
+    }
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      try { (document.exitFullscreen || document.webkitExitFullscreen)?.call(document); } catch {}
+    }
+    try { screen.orientation?.unlock?.(); } catch {}
   }
-  if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
+}
+window.__nhExitFs = () => setPlayerFullscreen(false);
+["fullscreenchange", "webkitfullscreenchange"].forEach((ev) => {
+  document.addEventListener(ev, () => {
+    const nativeFs = !!(window.NovaNative && typeof window.NovaNative.setFullscreen === "function");
+    if (!nativeFs && !document.fullscreenElement && !document.webkitFullscreenElement) {
+      $("#playerLayer")?.classList.remove("is-fs");
+      syncFsButtons(false);
+      try { screen.orientation?.unlock?.(); } catch {}
+    }
+  });
+});
+
+$("#btnFs").onclick = () => {
+  const layer = $("#playerLayer");
+  const isFs = !!(layer && layer.classList.contains("is-fs")) || !!(document.fullscreenElement || document.webkitFullscreenElement);
+  setPlayerFullscreen(!isFs);
 };
 $("#seek").addEventListener("input", (e) => { const v = $("#video"); if (v.duration) v.currentTime = (e.target.value / 1000) * v.duration; });
 let _lastPaused = null;
@@ -1411,8 +1858,14 @@ function renderWebdav() {
 }
 function restore(obj) {
   const d = obj.data || obj;
-  Object.entries(d).forEach(([k, v]) => { if (v !== null && v !== undefined) set(k, v); });
-  ensureLocalAuth();
+  try {
+    _isRestoring = true;
+    Object.entries(d).forEach(([k, v]) => { if (v !== null && v !== undefined) set(k, v); });
+    if (d.music_fav && !d.music_favs) set("music_favs", d.music_fav);
+    ensureLocalAuth();
+  } finally {
+    _isRestoring = false;
+  }
 }
 
 /* ============ 我的（NovaHub Pro 会员中心 + 源管理 + 数据设置） ============ */
@@ -1431,15 +1884,26 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.3</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
       </div>
-      <div class="vip-perks">
-        <span class="vip-perk">全局免广告</span>
-        <span class="vip-perk">云端多端同步</span>
-        <span class="vip-perk">FLAC 无损音质</span>
-        <span class="vip-perk">高速预加载</span>
+      <div class="vip-compare">
+        <div class="vc-col">
+          <div class="vc-head">标准免费版</div>
+          <div>• 基础影视与书城</div>
+          <div>• 标准 128k / 192k</div>
+          <div>• 包含原生赞助位</div>
+          <div>• 账号云同步收藏</div>
+        </div>
+        <div class="vc-col pro">
+          <div class="vc-head">${ico("crown")} Pro 尊享版</div>
+          <div>• 全局纯净零广告</div>
+          <div>• 320k / FLAC 无损</div>
+          <div>• 全站极速源与听书</div>
+          <div>• 多端云同步专属徽章</div>
+        </div>
       </div>
       <div class="vip-actions">
         ${u ? `
@@ -1449,9 +1913,16 @@ function renderMe() {
           <button class="btn ghost" id="btnLogout" style="flex:0 0 auto">退出</button>
         ` : `
           <button class="btn primary" id="btnLoginOpen">登录 / 注册账号</button>
-          <button class="btn ghost" id="btnSponsorInfo">${ico("crown")} 赞助获取 Pro</button>
+          <button class="btn ghost" id="btnSponsorInfo">${ico("crown")} 卡密激活 Pro</button>
         `}
       </div>
+    </div>
+
+    <div class="node-status" id="nodeStatusBox">
+      <span class="node-dot" id="nodeDot"></span>
+      <span id="nodeLatency">正在探测节点…</span>
+      <span class="node-url" id="nodeUrlText"></span>
+      <button class="node-refresh" id="btnNodeRefresh" type="button">刷新节点</button>
     </div>
 
     <div class="section-title" id="srcManager">${ico("database")} 影视源管理 (${sources.length})</div>
@@ -1478,14 +1949,45 @@ function renderMe() {
     $("#btnSponsorInfo").onclick = () => modal("赞助获取 NovaHub Pro", `<div class="hint" style="font-size:13px;line-height:1.7">${esc(NH.cfg.sponsor_tip || "请联系站长获取兑换卡密，登录后即可一键激活 Pro 会员。")}</div>`);
   } else {
     $("#btnRedeem").onclick = openRedeemModal;
-    $("#btnCloudPush").onclick = cloudSyncPush;
-    $("#btnCloudPull").onclick = cloudSyncPull;
+    $("#btnCloudPush").onclick = () => cloudSyncPush(false);
+    $("#btnCloudPull").onclick = () => cloudSyncPull(false);
     $("#btnLogout").onclick = () => {
       NH.token = ""; NH.user = null;
       set("nh_token", ""); set("nh_user", null);
       renderMe(); toast("已退出登录");
     };
   }
+
+  const probeNode = async () => {
+    const dot = $("#nodeDot"), lat = $("#nodeLatency"), urlEl = $("#nodeUrlText");
+    if (!dot || !lat) return;
+    dot.className = "node-dot";
+    lat.textContent = "测速中…";
+    const base = window.__NH_API_BASE__ || location.origin;
+    if (urlEl) urlEl.textContent = base.replace(/^https?:\/\//, "");
+    const t0 = performance.now();
+    try {
+      const r = await fetch("/api/config?ping=" + Date.now());
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      dot.className = "node-dot ok";
+      lat.textContent = `节点在线 ${Math.round(performance.now() - t0)}ms`;
+    } catch {
+      dot.className = "node-dot err";
+      lat.textContent = "节点连接异常";
+    }
+  };
+  probeNode();
+  const refBtn = $("#btnNodeRefresh");
+  if (refBtn) refBtn.onclick = async () => {
+    refBtn.disabled = true;
+    try {
+      if (typeof window.__NH_REFRESH_ENDPOINT__ === "function") await window.__NH_REFRESH_ENDPOINT__();
+      await probeNode();
+      toast("已刷新服务节点");
+    } finally {
+      refBtn.disabled = false;
+    }
+  };
 
   const rows = $("#srcRows");
   rows.innerHTML = sources.length ? "" : `<div class="row" style="cursor:default"><div class="r-main"><div class="r-sub">暂无数据源</div></div></div>`;
@@ -1642,6 +2144,7 @@ function paintNovelList(container, list, opts = {}) {
       openNovelDetail(b);
     };
   });
+  applyStagger(container);
 }
 
 async function loadNovelCategory(cat = curNovelCat) {
@@ -1677,14 +2180,17 @@ async function searchNovel(q) {
     viewStack.length = 0;
     renderTabbar();
   }
-  $("#view").innerHTML = `<div class="section-title">${ico("search")} 正在检索「${esc(q)}」…</div><div class="empty">正在实时检索书库…</div>`;
+  setSearchLoading(true);
+  $("#view").innerHTML = `<div class="section-title">${ico("search")} 正在检索「${esc(q)}」…</div>${renderSkeletonHtml("list", 6)}`;
   try {
     const r = await fetch(`/api/novel/search?q=${encodeURIComponent(q)}`);
     const d = await r.json();
-    novelStoreList = Array.isArray(d.items) ? d.items : [];
+    novelStoreList = sortByExactMatch(Array.isArray(d.items) ? d.items : [], q, (x) => x.title || x.name, (x) => x.author);
     renderNovelStore();
   } catch (e) {
     $("#view").innerHTML = `<div class="empty">检索失败：${esc(e.message)}</div>`;
+  } finally {
+    setSearchLoading(false);
   }
 }
 
@@ -2272,7 +2778,8 @@ async function refreshAuthUser() {
     NH.user = d.user || null;
     if (!NH.user) { NH.token = ""; set("nh_token", ""); }
     set("nh_user", NH.user);
-    if (currentRoute === "me" || currentRoute === "home" || currentRoute === "n_store") routes[currentRoute]();
+    if (NH.user) await cloudSyncPull(true);
+    if (currentRoute === "me" || currentRoute === "home" || currentRoute === "n_store" || currentRoute === "m_fav" || currentRoute === "n_shelf") routes[currentRoute]();
   } catch {}
 }
 
@@ -2315,8 +2822,10 @@ async function openAuthModal() {
     const d = await nhApi(isReg ? "/api/auth/register" : "/api/auth/login", "POST", { username, password });
     NH.token = d.token; NH.user = d.user;
     set("nh_token", d.token); set("nh_user", d.user);
+    if (isReg) await cloudSyncPush(true);
+    else await cloudSyncPull(true);
     toast(isReg ? "注册并登录成功" : "登录成功");
-    renderMe();
+    if (routes[currentRoute]) routes[currentRoute](); else renderMe();
   } catch (e) {
     toast(e.message, 2400);
   }
@@ -2343,32 +2852,63 @@ async function openRedeemModal() {
   }
 }
 
-async function cloudSyncPush() {
-  if (!isProUser()) return toast("云端多端同步为 NovaHub Pro 专属权益");
-  const keys = [K.SOURCE, K.LIKE, K.HISTORY, "channels", "music_favs", "music_hist", "progress", "novel_shelf", "novel_hist", "novel_prog", "novel_cfg"];
-  const data = Object.fromEntries(keys.map((k) => [k, get(k, null)]));
+async function cloudSyncPush(silent = false, useKeepalive = false) {
+  if (!NH.user) { if (!silent) toast("请先登录账号"); return; }
+  clearTimeout(_syncPushTimer);
+  _syncDirty = false;
+  const data = Object.fromEntries(SYNC_KEYS.map((k) => [k, get(k, null)]));
+  if (useKeepalive) {
+    try {
+      const headers = { "Content-Type": "application/json" };
+      if (NH.token) headers["Authorization"] = "Bearer " + NH.token;
+      fetch("/api/sync", { method: "POST", keepalive: true, headers, body: JSON.stringify({ data }) }).catch(() => {});
+    } catch {}
+    return;
+  }
   try {
     await nhApi("/api/sync", "POST", { data });
-    toast("全站片单、书架与进度已同步至云端");
+    if (!silent) toast("全站片单、书架与进度已同步至云端");
   } catch (e) {
-    toast("同步失败：" + e.message, 2400);
+    _syncDirty = true;
+    if (!silent) toast("同步失败：" + e.message, 2400);
   }
 }
 
-async function cloudSyncPull() {
-  if (!isProUser()) return toast("云端多端同步为 NovaHub Pro 专属权益");
+async function cloudSyncPull(silent = false) {
+  if (!NH.user) { if (!silent) toast("请先登录账号"); return; }
   try {
     const d = await nhApi("/api/sync", "GET");
-    if (!d.sync || !d.sync.data) return toast("云端暂无历史备份");
+    if (!d.sync || !d.sync.data) {
+      if (silent) {
+        const hasLocal = [K.LIKE, K.HISTORY, "music_favs", "novel_shelf", "novel_hist"].some((k) => {
+          const val = get(k, null);
+          return Array.isArray(val) && val.length > 0;
+        });
+        if (hasLocal) await cloudSyncPush(true);
+      } else {
+        toast("云端暂无历史备份");
+      }
+      return;
+    }
     restore(d.sync.data);
     sources = get(K.SOURCE, DEFAULT_SOURCES);
     channels = get("channels", DEFAULT_CHANNELS);
-    toast("已从云端恢复全部片单、书架与阅读进度");
-    renderMe();
+    mBr = get("m_br", "320");
+    if (!silent) {
+      toast("已从云端恢复全部片单、书架与阅读进度");
+      renderMe();
+    }
   } catch (e) {
-    toast("恢复失败：" + e.message, 2400);
+    if (!silent) toast("恢复失败：" + e.message, 2400);
   }
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && _syncDirty && NH.user) cloudSyncPush(true, true);
+});
+window.addEventListener("pagehide", () => {
+  if (_syncDirty && NH.user) cloudSyncPush(true, true);
+});
 
 /* ============ 音乐睡眠定时关闭 & 画中画悬浮歌词窗 ============ */
 let mSleepMode = ""; // "" | "15" | "30" | "60" | "track"
@@ -2533,14 +3073,35 @@ function toggleNovelTts() {
   speakNext();
 }
 
+async function dismissSplash(bootAt) {
+  const el = $("#nhSplash");
+  if (!el) return;
+  const elapsed = performance.now() - bootAt;
+  if (elapsed < 450) await new Promise((r) => setTimeout(r, 450 - elapsed));
+  el.classList.add("leaving");
+  const anims = el.getAnimations ? el.getAnimations() : [];
+  if (anims.length > 0) {
+    await Promise.race([
+      Promise.allSettled(anims.map((a) => a.finished)),
+      new Promise((r) => setTimeout(r, 500)),
+    ]);
+  }
+  el.remove();
+}
+
 /* ============ 初始化固定控件矢量图标与启动 ============ */
+const _bootAt = performance.now();
 $("#topSearchIco").innerHTML = ico("search");
 $("#playerBack").innerHTML = `${ico("back")} 返回`;
 $("#playerFav").innerHTML = `${ico("heart")} 记录`;
 $("#btnPlay").innerHTML = ico("play");
-$("#btnFs").innerHTML = ico("fullscreen");
+syncFsButtons(false);
+if ($("#btnBoxFs")) $("#btnBoxFs").onclick = $("#btnFs").onclick;
 updateTopbar();
+syncSearchClear();
 syncModeFab();
 go(appMode === "music" ? "m_discover" : appMode === "novel" ? "n_store" : "home");
+_bootDone = true;
+dismissSplash(_bootAt);
 loadSiteConfig();
 refreshAuthUser();

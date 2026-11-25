@@ -264,14 +264,43 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .player-tip button { pointer-events: auto; }
 .player-ctrl {
-  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
-  background: #090A0D; border-bottom: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 8px; padding: 8px 14px 10px;
+  background: #090A0D; border-bottom: 1px solid var(--line); flex-shrink: 0;
+}
+.player-ctrl-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+}
+.player-ctrl-tools {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;
+}
+.player-ctrl-left {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
 }
 .player-ctrl button {
   background: none; border: none; color: var(--text); font-size: 19px;
-  cursor: pointer; padding: 4px; display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; padding: 4px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
-.player-ctrl input[type="range"] { flex: 1; }
+.player-ctrl .player-fs-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 11px; border-radius: 999px;
+  background: rgba(229, 184, 105, 0.14);
+  border: 1px solid rgba(229, 184, 105, 0.36);
+  color: var(--accent); font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.player-box-fs {
+  position: absolute; right: 10px; bottom: 10px; z-index: 4;
+  width: 36px; height: 36px; border-radius: 50%;
+  background: rgba(12, 13, 18, 0.72); border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #fff; font-size: 17px;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+.player-layer:fullscreen .player-box-fs,
+.player-layer:-webkit-full-screen .player-box-fs,
+.player-layer.is-fs .player-box-fs {
+  display: none;
+}
+.player-ctrl input[type="range"] { flex: 1; min-width: 0; }
 .player-ctrl select, .ui-select {
   background: var(--surface-2); color: var(--text-2);
   border: 1px solid var(--line-strong); border-radius: 7px;
@@ -924,19 +953,6 @@ html, body, #epList, #lrcBox, .modal-box, .n-drawer-list {
   box-shadow: none;
 }
 
-/* ============ 彻底消除音乐黑胶播放页外层滚动条 ============ */
-.m-player-page {
-  height: calc(100dvh - 185px);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-.m-lrc {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-
 /* ============ NovaHub v2.3.0 全链路现代动效与新组件 ============ */
 :root {
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -1339,3 +1355,101 @@ progress.loading-spinner:indeterminate {
   background: rgba(9, 10, 13, 0.88);
   padding-bottom: max(10px, env(safe-area-inset-bottom));
 }
+
+/* ============ v2.3.3 音乐黑胶播放页单屏零滚动布局 ============ */
+body.in-mplayer {
+  overflow: hidden;
+  padding-bottom: 0;
+}
+#view.view-mplayer {
+  height: calc(100dvh - 104px - env(safe-area-inset-top));
+  min-height: 0;
+  padding: 6px 14px calc(80px + env(safe-area-inset-bottom));
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+#view.view-mplayer .m-player {
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  justify-content: space-between;
+}
+.m-player-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-bottom: 2px;
+}
+.m-player-meta {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+.m-player-title {
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.m-player-artist {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#view.view-mplayer .m-disc {
+  width: clamp(128px, 21dvh, 174px);
+  height: clamp(128px, 21dvh, 174px);
+  padding: 13px;
+  margin: 4px auto;
+  flex-shrink: 0;
+}
+#view.view-mplayer .lrc-box {
+  flex: 1 1 auto;
+  min-height: 76px;
+  height: auto;
+  margin: 2px 0 4px;
+  padding: 26px 14px;
+}
+#view.view-mplayer .m-tools {
+  flex-shrink: 0;
+  margin: 2px 0 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+#view.view-mplayer .m-tools .ui-select {
+  font-size: 11.5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+#view.view-mplayer .m-prog {
+  flex-shrink: 0;
+  margin-bottom: 6px;
+}
+#view.view-mplayer .m-ctrl {
+  flex-shrink: 0;
+  padding: 2px 4px 2px;
+}
+
+/* ============ v2.3.3 影视搜索分类筛选条 ============ */
+.vod-cat-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0 10px;
+  margin-bottom: 4px;
+}
+.vod-cat-bar::-webkit-scrollbar { display: none; }
+.vod-cat-bar .m-chip { flex-shrink: 0; }

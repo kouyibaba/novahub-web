@@ -375,6 +375,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         orig = (self.headers.get("Origin") or "").lower()
         if not ref and not orig:
             return True  # 允许本地脚本/健康探针直接调试
+        if ("kouyibaba.github.io" in ref) or ("kouyibaba.github.io" in orig):
+            return True
         if host and ((host in ref) or (host in orig)):
             return True
         return False
@@ -450,8 +452,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         user = self._current_user()
         if not user:
             return self.send_json({"error": "请先登录账号"}, 401)
-        if not user["is_pro"]:
-            return self.send_json({"error": "云端多端同步为 NovaHub Pro 专属权益"}, 403)
         snap = db.get_user_sync(user["id"])
         self.send_json({"sync": snap})
 
@@ -459,8 +459,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         user = self._current_user()
         if not user:
             return self.send_json({"error": "请先登录账号"}, 401)
-        if not user["is_pro"]:
-            return self.send_json({"error": "云端多端同步为 NovaHub Pro 专属权益"}, 403)
         try:
             body = self._read_json_body(1_048_576)
             ts = db.save_user_sync(user["id"], body.get("data") or body)
@@ -533,15 +531,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if act == "search":
                 q = urllib.parse.quote(qs.get("q", [""])[0])
                 rn = int(qs.get("rn", ["40"])[0])
+                # show_copyright_off=0 仅请求在架可播曲目，减少无版权或下架杂曲返回
                 u = (
                     f"http://search.kuwo.cn/r.s?all={q}&ft=music&newsearch=1&alflac=1"
                     f"&itemset=web_2013&client=kt&cluster=0&pn=0&rn={rn}&vermerge=1"
-                    f"&rformat=json&encoding=utf8&show_copyright_off=1&pcmp4=1&ver=mbox&vipver=MUSIC_8.7.6.0.BCS31"
+                    f"&rformat=json&encoding=utf8&show_copyright_off=0&pcmp4=1&ver=mbox&vipver=MUSIC_8.7.6.0.BCS31"
                 )
                 _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
                 d = ast.literal_eval(raw_b.decode("utf-8", "ignore"))
                 out = []
                 for it in d.get("abslist", []):
+                    # 过滤已下架或无音质流信息的不可播曲目
+                    if str(it.get("ONLINE", "1")) == "0":
+                        continue
+                    if not str(it.get("N_MINFO", "")).strip():
+                        continue
                     rid = str(it.get("MUSICRID", "")).replace("MUSIC_", "").strip()
                     if not rid:
                         continue

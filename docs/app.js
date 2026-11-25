@@ -220,12 +220,21 @@ function pushView(fn) {
   viewStack.push(fn);
   history.pushState({ depth: viewStack.length }, "");
 }
-function closePlayer() {
+let _playerPushed = false;
+let _skipNextPop = false;
+function closePlayer(fromPop = false) {
   if (typeof setPlayerFullscreen === "function") setPlayerFullscreen(false);
   destroyPlayers();
   $("#playerLayer").classList.add("hidden");
   document.body.style.overflow = "";
   syncModeFab();
+  if (_playerPushed) {
+    _playerPushed = false;
+    if (!fromPop) {
+      _skipNextPop = true;
+      history.back();
+    }
+  }
 }
 function closeReader() {
   stopNovelTts();
@@ -236,10 +245,10 @@ function closeReader() {
   document.body.style.overflow = "";
   syncModeFab();
 }
-function goBack() {
+function goBack(fromPop = false) {
   if (!$("#tocMask").classList.contains("hidden")) { $("#tocMask").classList.add("hidden"); return; }
   if (!$("#readerLayer").classList.contains("hidden")) { closeReader(); return; }
-  if (!$("#playerLayer").classList.contains("hidden")) { closePlayer(); return; }
+  if (!$("#playerLayer").classList.contains("hidden")) { closePlayer(fromPop); return; }
   if (viewStack.length > 0) {
     viewStack.pop();
     const prev = viewStack[viewStack.length - 1];
@@ -250,7 +259,10 @@ function goBack() {
     routes[currentRoute]();
   }
 }
-window.addEventListener("popstate", () => goBack());
+window.addEventListener("popstate", () => {
+  if (_skipNextPop) { _skipNextPop = false; return; }
+  goBack(true);
+});
 const backBar = (title) => `<div class="back-bar"><button class="btn ghost" onclick="history.back()" style="padding:5px 11px;font-size:13px">${ico("back")} 返回</button><span class="back-bar-title">${esc(title)}</span></div>`;
 
 function renderTabbar() {
@@ -328,6 +340,10 @@ function go(route) {
   const applyRoute = () => {
     currentRoute = route;
     viewStack.length = 0;
+    const isMp = route === "m_player" && !!curSong;
+    const vEl = $("#view");
+    if (vEl) vEl.classList.toggle("view-mplayer", isMp);
+    document.body.classList.toggle("in-mplayer", isMp);
     renderTabbar();
     (routes[route] || renderHome)();
     updateMiniBar();
@@ -559,9 +575,9 @@ async function loadChart(chartId = curChart) {
 }
 
 function isFakeCoverTrack(name, q) {
-  const ql = q.toLowerCase();
-  const fakeRe = /原唱|翻唱|伴奏|纯音乐|八音盒|铃声|cover|instrumental|karaoke/i;
-  return fakeRe.test(name) && !fakeRe.test(ql);
+  const ql = String(q || "").toLowerCase();
+  const fakeRe = /原唱|翻唱|伴奏|纯音乐|八音盒|铃声|童声|儿歌|DJ|慢摇|remix|cover|instrumental|karaoke|3d环绕|吉他版|钢琴版|古筝|二胡|萨克斯|唢呐|戏腔|朗诵|变调/i;
+  return fakeRe.test(String(name || "")) && !fakeRe.test(ql);
 }
 
 /**
@@ -590,16 +606,31 @@ async function searchMusic(q) {
     if (view) view.innerHTML = `<div class="section-title">${ico("search")} 正在检索「${esc(q)}」…</div>${renderSkeletonHtml("list", 6)}`;
   }
   const kwList = [], neList = [];
+  const normTrackKey = (nm, ar) => {
+    const c = (s) => String(s || "").toLowerCase().replace(/\s*\([^)]*\)|\s*\[[^\]]*\]|\s*（[^）]*）|[^\u4e00-\u9fa5a-z0-9]/g, "");
+    return c(nm) + "|" + c(ar);
+  };
   try {
-    await Promise.allSettled([
-      fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`).then((r) => r.ok ? r.json() : []).then((res) => {
-        if (Array.isArray(res)) res.forEach((x) => {
-          if (!isFakeCoverTrack(x.name || "", q)) kwList.push(x);
+    // 优先检索高可播率酷我曲库，并清理歌手转义分隔符
+    const kwRes = await fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`).then((r) => r.ok ? r.json() : []).catch(() => []);
+    if (Array.isArray(kwRes)) {
+      kwRes.forEach((x) => {
+        const nm = String(x.name || "").replace(/\u00a0/g, " ").trim();
+        if (!nm || isFakeCoverTrack(nm, q)) return;
+        kwList.push({
+          ...x,
+          name: nm,
+          artist: String(x.artist || "未知歌手").replace(/\\u0026|&/g, " / ").replace(/\u00a0/g, " ").trim(),
+          album: String(x.album || "单曲收录").replace(/\u00a0/g, " ").trim() || "单曲收录",
         });
-      }),
-      fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=45&pages=1`, 7000).then((res) => {
-        if (Array.isArray(res)) res.forEach((x) => {
-          const nm = x.name || "未知歌曲";
+      });
+    }
+    // 仅当酷我有效结果不足 5 首时才回退补充网易云曲库，减少不可播杂曲
+    if (kwList.length < 5) {
+      const neRes = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=30&pages=1`, 7000).catch(() => []);
+      if (Array.isArray(neRes)) {
+        neRes.forEach((x) => {
+          const nm = String(x.name || "").trim() || "未知歌曲";
           if (isFakeCoverTrack(nm, q)) return;
           neList.push({
             id: String(x.id || ""),
@@ -612,12 +643,20 @@ async function searchMusic(q) {
             lrc: `https://api.injahow.cn/meting/?server=netease&type=lrc&id=${x.id}`,
           });
         });
-      }),
-    ]);
+      }
+    }
   } finally {
     setSearchLoading(false);
   }
-  const list = sortByExactMatch(kwList.concat(neList), q, (x) => x.name, (x) => x.artist);
+  const seen = new Set();
+  const merged = [];
+  kwList.concat(neList).forEach((item) => {
+    const k = normTrackKey(item.name, item.artist);
+    if (seen.has(k)) return;
+    seen.add(k);
+    merged.push(item);
+  });
+  const list = sortByExactMatch(merged, q, (x) => x.name, (x) => x.artist);
   if (list.length) {
     discoverList = list;
     musicQueue = list;
@@ -1033,6 +1072,10 @@ function syncPlayerUi() {
 }
 
 function renderMusicPlayer() {
+  const vEl = $("#view");
+  const isMp = currentRoute === "m_player" && !!curSong;
+  if (vEl) vEl.classList.toggle("view-mplayer", isMp);
+  document.body.classList.toggle("in-mplayer", isMp);
   if (!curSong) {
     $("#view").innerHTML = `<div class="empty">尚未选择播放曲目<br><br><button class="btn primary" onclick="go('m_discover')">前往曲库选歌</button></div>`;
     return;
@@ -1041,23 +1084,23 @@ function renderMusicPlayer() {
   const dur = isFinite(audioEl.duration) && audioEl.duration > 0 ? audioEl.duration : 0;
   $("#view").innerHTML = `
     <div class="m-player">
-      <div style="width:100%;display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;gap:6px">
-        <button class="btn ghost" onclick="go('m_discover')" style="padding:5px 10px;font-size:12.5px">${ico("back")} 曲库</button>
-        <div style="flex:1;min-width:0;padding:0 4px">
-          <div style="font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(curSong.name)}</div>
-          <div class="hint" style="margin:2px 0 0">${esc(curSong.artist || "")}</div>
+      <div class="m-player-head">
+        <button class="btn ghost" onclick="go('m_discover')" style="padding:5px 10px;font-size:12.5px;flex-shrink:0">${ico("back")} 曲库</button>
+        <div class="m-player-meta">
+          <div class="m-player-title">${esc(curSong.name)}</div>
+          <div class="m-player-artist">${esc(curSong.artist || "")}</div>
         </div>
-        ${brSelectHtml()}
-        <button id="mPlayerFav" class="m-fav ${fav ? "on" : ""}" style="font-size:20px" aria-label="收藏">${ico(fav ? "heartFill" : "heart")}</button>
+        <button id="mPlayerFav" class="m-fav ${fav ? "on" : ""}" style="font-size:20px;flex-shrink:0" aria-label="收藏">${ico(fav ? "heartFill" : "heart")}</button>
       </div>
       <div id="mDisc" class="m-disc ${audioEl.paused ? "" : "playing"}">
         ${curSong.pic ? `<img src="${esc(curSong.pic)}" onerror="_imgPh(this,'disc','m-disc-ph')">` : `<div class="m-disc-ph">${ico("disc")}</div>`}
       </div>
+      <div id="lrcBox" class="lrc-box"></div>
       <div class="m-tools">
         <button id="mSleepBtn" class="m-tool-btn ${mSleepMode ? "active" : ""}">${ico("clock")} <span id="mSleepTxt">${sleepLabel()}</span></button>
         <button id="mPipBtn" class="m-tool-btn ${pipActive ? "active" : ""}">${ico("pip")} 悬浮歌词</button>
+        ${brSelectHtml()}
       </div>
-      <div id="lrcBox" class="lrc-box"></div>
       <div class="m-prog">
         <span id="mCurTime">${fmt(audioEl.currentTime || 0)}</span>
         <input id="mSeek" type="range" min="0" max="1000" value="${dur ? Math.round((audioEl.currentTime / dur) * 1000) : 0}">
@@ -1362,9 +1405,54 @@ function getProgress(vodKey) {
   return vodKey ? (get("progress", {})[vodKey] || null) : null;
 }
 
-/* ============ 搜索（MacCMS ac=detail，多源并发） ============ */
+/* ============ 搜索（MacCMS ac=detail，多源并发 + 缓存 + 分类筛选） ============ */
+const _searchCache = new Map();
+const VOD_CATS = ["全部", "电影", "电视剧", "动漫", "综艺", "其他"];
+function classifyVodItem(typeName, remark) {
+  const t = String(typeName || "").trim();
+  const r = String(remark || "").trim();
+  if (/动漫|番剧|国漫|日漫|美漫|少儿/.test(t)) return "动漫";
+  if (/综艺|真人秀|脱口秀|晚会|演唱会/.test(t)) return "综艺";
+  if (/剧|连续剧|连续|series/i.test(t) || /全\d+集|更新至\s*\d+|第\s*\d+\s*集|连载中|集全/.test(r)) return "电视剧";
+  if (/电影|影|片$/.test(t) || /正片|HD|BD|抢先|1080P|4K/i.test(r)) return "电影";
+  return "其他";
+}
+function renderSearchResults(q) {
+  const entry = _searchCache.get(q);
+  if (!entry || !entry.results.length) {
+    $("#view").innerHTML = `${backBar("搜索：" + q)}<div class="empty">未检索到「${esc(q)}」<br>请尝试更换关键词</div>`;
+    return;
+  }
+  const { results } = entry;
+  const counts = {};
+  results.forEach((item) => {
+    const c = classifyVodItem(item.typeName, item.remark);
+    counts[c] = (counts[c] || 0) + 1;
+  });
+  const activeCat = entry.activeCat && (entry.activeCat === "全部" || counts[entry.activeCat]) ? entry.activeCat : "全部";
+  entry.activeCat = activeCat;
+  const shown = activeCat === "全部" ? results : results.filter((x) => classifyVodItem(x.typeName, x.remark) === activeCat);
+  const catsHtml = VOD_CATS.filter((c) => c === "全部" || counts[c] > 0).map((c) => {
+    const cnt = c === "全部" ? results.length : counts[c];
+    return `<button class="m-chip ${activeCat === c ? "active" : ""}" data-vcat="${c}" type="button">${c} (${cnt})</button>`;
+  }).join("");
+  $("#view").innerHTML = `${backBar(`检索结果 (${shown.length})`)}<div class="vod-cat-bar" id="vodCatBar">${catsHtml}</div><div class="grid" id="sGrid"></div>`;
+  paintGrid($("#sGrid"), shown);
+  $("#vodCatBar")?.querySelectorAll(".m-chip").forEach((btn) => {
+    btn.onclick = () => {
+      entry.activeCat = btn.dataset.vcat || "全部";
+      renderSearchResults(q);
+    };
+  });
+}
+
 async function doSearch(q, _fromBack) {
   if (!_fromBack) pushView(() => doSearch(q, true));
+  if (_fromBack && _searchCache.has(q)) {
+    setSearchLoading(false);
+    renderSearchResults(q);
+    return;
+  }
   setSearchLoading(true);
   $("#view").innerHTML = `${backBar("搜索：" + q)}${renderSkeletonHtml("grid", 6)}`;
   const results = [];
@@ -1380,17 +1468,26 @@ async function doSearch(q, _fromBack) {
         });
         sortByExactMatch(hits, q, (v) => v.vod_name);
         hits.slice(0, 12).forEach((v) => results.push({
-          id: String(v.vod_id), name: v.vod_name, pic: v.vod_pic, remark: v.vod_remark || "", srcId: s.id, from: s.name,
+          id: String(v.vod_id),
+          name: v.vod_name,
+          pic: v.vod_pic,
+          remark: v.vod_remark || "",
+          typeName: v.type_name || v.vod_class || "",
+          srcId: s.id,
+          from: s.name,
         }));
       })
     );
   } finally {
     setSearchLoading(false);
   }
-  if (!results.length) { $("#view").innerHTML = `${backBar("搜索：" + q)}<div class="empty">未检索到「${esc(q)}」<br>请尝试更换关键词</div>`; return; }
   sortByExactMatch(results, q, (x) => x.name);
-  $("#view").innerHTML = `${backBar(`检索结果 (${results.length})`)}<div class="grid" id="sGrid"></div>`;
-  paintGrid($("#sGrid"), results);
+  if (_searchCache.size >= 20) {
+    const firstKey = _searchCache.keys().next().value;
+    if (firstKey !== undefined) _searchCache.delete(firstKey);
+  }
+  _searchCache.set(q, { ts: Date.now(), results, activeCat: "全部" });
+  renderSearchResults(q);
 }
 
 /* ============ 视频播放器 ============ */
@@ -1401,10 +1498,16 @@ function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0) {
     if (typeof openAuthModal === "function") openAuthModal("login");
     return;
   }
+  const layer = $("#playerLayer");
+  const wasHidden = layer.classList.contains("hidden");
   P.title = title; P.eps = eps; P.idx = idx; P.vodKey = vodKey;
   $("#playerTitle").textContent = title;
-  $("#playerLayer").classList.remove("hidden");
+  layer.classList.remove("hidden");
   document.body.style.overflow = "hidden";
+  if (wasHidden) {
+    _playerPushed = true;
+    history.pushState({ player: true }, "");
+  }
   syncModeFab();
   renderEpisodes();
   mountSource(url, seekTime);
@@ -1514,12 +1617,22 @@ $("#rateSel").addEventListener("change", (e) => {
 $("#qualitySel").addEventListener("change", (e) => {
   if (P.hls) { const i = +e.target.value; P.hls.currentLevel = i; P.hls.nextLevel = i; }
 });
-$("#playerBack").onclick = closePlayer;
+$("#playerBack").onclick = () => closePlayer(false);
 $("#playerFav").onclick = () => toast("已记录至观看历史");
 $("#btnPlay").onclick = () => { const v = $("#video"); v.paused ? v.play() : v.pause(); };
+function syncFsButtons(isFs) {
+  const b = $("#btnFs");
+  if (b) b.innerHTML = `${ico("fullscreen")} ${isFs ? "退出" : "全屏"}`;
+  const bf = $("#btnBoxFs");
+  if (bf) {
+    bf.innerHTML = ico("fullscreen");
+    bf.setAttribute("aria-label", isFs ? "退出全屏" : "全屏播放");
+  }
+}
 async function setPlayerFullscreen(enter) {
   const layer = $("#playerLayer"), v = $("#video");
   if (!layer) return;
+  syncFsButtons(!!enter);
   if (enter) {
     layer.classList.add("is-fs");
     if (window.NovaNative && typeof window.NovaNative.setFullscreen === "function") {
@@ -1554,6 +1667,7 @@ window.__nhExitFs = () => setPlayerFullscreen(false);
     const nativeFs = !!(window.NovaNative && typeof window.NovaNative.setFullscreen === "function");
     if (!nativeFs && !document.fullscreenElement && !document.webkitFullscreenElement) {
       $("#playerLayer")?.classList.remove("is-fs");
+      syncFsButtons(false);
       try { screen.orientation?.unlock?.(); } catch {}
     }
   });
@@ -1770,7 +1884,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.2</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.3</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -2981,7 +3095,8 @@ $("#topSearchIco").innerHTML = ico("search");
 $("#playerBack").innerHTML = `${ico("back")} 返回`;
 $("#playerFav").innerHTML = `${ico("heart")} 记录`;
 $("#btnPlay").innerHTML = ico("play");
-$("#btnFs").innerHTML = ico("fullscreen");
+syncFsButtons(false);
+if ($("#btnBoxFs")) $("#btnBoxFs").onclick = $("#btnFs").onclick;
 updateTopbar();
 syncSearchClear();
 syncModeFab();

@@ -57,7 +57,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261125-v232">
+<link rel="stylesheet" href="style.css?v=20261125-v233">
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
 <style>
@@ -134,20 +134,27 @@
   <div class="player-box">
     <video id="video" playsinline webkit-playsinline x5-video-player-type="h5"></video>
     <div id="playerTip" class="player-tip"></div>
+    <button id="btnBoxFs" class="player-box-fs" type="button" aria-label="全屏播放"></button>
   </div>
   <div class="player-ctrl">
-    <button id="btnPlay" aria-label="播放/暂停"></button>
-    <input id="seek" type="range" min="0" max="1000" value="0">
-    <span id="timeText">00:00 / 00:00</span>
-    <select id="rateSel" aria-label="播放倍速">
-      <option value="0.75">0.75x</option>
-      <option value="1" selected>1.0x</option>
-      <option value="1.25">1.25x</option>
-      <option value="1.5">1.5x</option>
-      <option value="2">2.0x</option>
-    </select>
-    <select id="qualitySel"><option>自动</option></select>
-    <button id="btnFs" aria-label="全屏"></button>
+    <div class="player-ctrl-row">
+      <button id="btnPlay" aria-label="播放/暂停"></button>
+      <input id="seek" type="range" min="0" max="1000" value="0">
+      <span id="timeText">00:00 / 00:00</span>
+    </div>
+    <div class="player-ctrl-tools">
+      <div class="player-ctrl-left">
+        <select id="rateSel" aria-label="播放倍速">
+          <option value="0.75">0.75x</option>
+          <option value="1" selected>1.0x</option>
+          <option value="1.25">1.25x</option>
+          <option value="1.5">1.5x</option>
+          <option value="2">2.0x</option>
+        </select>
+        <select id="qualitySel"><option>自动</option></select>
+      </div>
+      <button id="btnFs" class="player-fs-btn" type="button" aria-label="全屏"></button>
+    </div>
   </div>
   <div id="epList" class="ep-list"></div>
 </div>
@@ -226,6 +233,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="app.js?v=20261125-v232"></script>
+<script src="app.js?v=20261125-v233"></script>
 </body>
 </html>

@@ -8,24 +8,102 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="icon.svg">
 <title>NovaHub · 星隅</title>
+<script>
+(function(){
+  const origFetch = window.fetch.bind(window);
+  window.__NH_API_BASE__ = '';
+  window.__NH_REFRESH_ENDPOINT__ = async function() {
+    if (!location.hostname.endsWith('github.io')) return '';
+    try {
+      const r = await origFetch('./endpoint.json?t=' + Date.now(), { cache: 'no-store' });
+      const d = await r.json();
+      window.__NH_API_BASE__ = ((d && d.url) || '').replace(/\/+$/, '');
+      return window.__NH_API_BASE__;
+    } catch {
+      return window.__NH_API_BASE__;
+    }
+  };
+  if (!location.hostname.endsWith('github.io')) return;
+  let ready = window.__NH_REFRESH_ENDPOINT__();
+  window.fetch = async function(input, init) {
+    await ready;
+    const isRel = typeof input === 'string' && /^\/(api|kw|proxy)(\/|\?|$)/.test(input);
+    const buildUrl = (base) => isRel && base ? base + input : input;
+    const target = buildUrl(window.__NH_API_BASE__);
+    try {
+      const resp = await origFetch(target, init);
+      if (isRel && (resp.status === 502 || resp.status === 503 || resp.status === 530)) {
+        const oldBase = window.__NH_API_BASE__;
+        const newBase = await window.__NH_REFRESH_ENDPOINT__();
+        if (newBase && newBase !== oldBase) {
+          return origFetch(buildUrl(newBase), init);
+        }
+      }
+      return resp;
+    } catch (err) {
+      if (isRel) {
+        const oldBase = window.__NH_API_BASE__;
+        const newBase = await window.__NH_REFRESH_ENDPOINT__();
+        if (newBase && newBase !== oldBase) {
+          return origFetch(buildUrl(newBase), init);
+        }
+      }
+      throw err;
+    }
+  };
+})();
+</script>
 <link rel="manifest" href="manifest.json">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261124-pro1">
+<link rel="stylesheet" href="style.css?v=20261125-v233">
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+<style>
+#nhSplash {
+  position: fixed; inset: 0; z-index: 99999; background: #090a0e;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+}
+.nh-splash-mark {
+  width: 68px; height: 68px; border-radius: 20px;
+  background: radial-gradient(circle at 30% 30%, rgba(231, 198, 107, 0.22), rgba(20, 21, 28, 0.92));
+  border: 1px solid rgba(231, 198, 107, 0.42);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 36px rgba(212, 175, 55, 0.22);
+}
+.nh-splash-brand { font-size: 22px; font-weight: 700; color: #f7ead1; letter-spacing: 0.04em; }
+.nh-splash-brand span { color: #e5b869; margin: 0 1px; }
+.nh-splash-sub { font-size: 12px; color: #8c8996; letter-spacing: 0.14em; }
+.nh-splash-bar { width: 120px; height: 2px; border-radius: 99px; background: rgba(255, 255, 255, 0.08); overflow: hidden; margin-top: 6px; }
+.nh-splash-bar i { display: block; width: 45%; height: 100%; border-radius: 99px; background: linear-gradient(90deg, transparent, #e7c66b, transparent); }
+</style>
 </head>
 <body>
+<!-- 首帧开屏幕布 -->
+<div id="nhSplash" class="nh-splash" aria-hidden="true">
+  <div class="nh-splash-mark">
+    <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+      <path d="M18 3L21.6 14.4L33 18L21.6 21.6L18 33L14.4 21.6L3 18L14.4 14.4L18 3Z" fill="#E7C66B"/>
+      <path d="M18 9.5L19.9 16.1L26.5 18L19.9 19.9L18 26.5L16.1 19.9L9.5 18L16.1 16.1L18 9.5Z" fill="#FFF3D1"/>
+    </svg>
+  </div>
+  <div class="nh-splash-brand">Nova<span>.</span>Hub</div>
+  <div class="nh-splash-sub">星隅 · 私人视听空间</div>
+  <div class="nh-splash-bar"><i></i></div>
+</div>
 <!-- 顶栏 -->
 <header class="topbar">
   <div class="logo" id="brandLogo"></div>
   <div class="search-box">
     <span class="search-ico" id="topSearchIco"></span>
     <input id="searchInput" class="search" type="search" placeholder="搜索影片或演员">
+    <button id="searchClear" class="search-clear hidden" type="button" aria-label="清空搜索">×</button>
     <button id="searchBtn" class="search-submit" aria-label="搜索">搜索</button>
   </div>
 </header>
+<div id="topProgress" class="top-progress hidden" aria-hidden="true"></div>
+<div id="searchHistPop" class="search-hist-pop hidden"></div>
 
 <!-- 主内容区（SPA 视图切换） -->
 <main id="view" class="view"></main>
@@ -56,20 +134,27 @@
   <div class="player-box">
     <video id="video" playsinline webkit-playsinline x5-video-player-type="h5"></video>
     <div id="playerTip" class="player-tip"></div>
+    <button id="btnBoxFs" class="player-box-fs" type="button" aria-label="全屏播放"></button>
   </div>
   <div class="player-ctrl">
-    <button id="btnPlay" aria-label="播放/暂停"></button>
-    <input id="seek" type="range" min="0" max="1000" value="0">
-    <span id="timeText">00:00 / 00:00</span>
-    <select id="rateSel" aria-label="播放倍速">
-      <option value="0.75">0.75x</option>
-      <option value="1" selected>1.0x</option>
-      <option value="1.25">1.25x</option>
-      <option value="1.5">1.5x</option>
-      <option value="2">2.0x</option>
-    </select>
-    <select id="qualitySel"><option>自动</option></select>
-    <button id="btnFs" aria-label="全屏"></button>
+    <div class="player-ctrl-row">
+      <button id="btnPlay" aria-label="播放/暂停"></button>
+      <input id="seek" type="range" min="0" max="1000" value="0">
+      <span id="timeText">00:00 / 00:00</span>
+    </div>
+    <div class="player-ctrl-tools">
+      <div class="player-ctrl-left">
+        <select id="rateSel" aria-label="播放倍速">
+          <option value="0.75">0.75x</option>
+          <option value="1" selected>1.0x</option>
+          <option value="1.25">1.25x</option>
+          <option value="1.5">1.5x</option>
+          <option value="2">2.0x</option>
+        </select>
+        <select id="qualitySel"><option>自动</option></select>
+      </div>
+      <button id="btnFs" class="player-fs-btn" type="button" aria-label="全屏"></button>
+    </div>
   </div>
   <div id="epList" class="ep-list"></div>
 </div>
@@ -148,6 +233,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="app.js?v=20261124-pro1"></script>
+<script src="app.js?v=20261125-v233"></script>
 </body>
 </html>
