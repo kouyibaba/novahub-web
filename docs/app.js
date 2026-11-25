@@ -9,12 +9,20 @@ const K = {
 };
 const _mem = {};
 const get = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? (k in _mem ? _mem[k] : d) : JSON.parse(v); } catch { return k in _mem ? _mem[k] : d; } };
-const SYNC_WATCH = new Set(["like", "history", "music_favs", "music_fav_groups", "music_hist", "novel_shelf", "novel_hist", "novel_prog"]);
+const SYNC_KEYS = [
+  K.SOURCE, K.LIKE, K.HISTORY, "channels", "music_favs", "music_fav_groups",
+  "music_hist", "m_br", "progress", "novel_shelf", "novel_hist", "novel_prog",
+  "novel_cfg", "nh_shist_vod", "nh_shist_music", "nh_shist_novel",
+];
+const SYNC_WATCH = new Set(SYNC_KEYS);
 let _syncPushTimer = null;
+let _isRestoring = false;
+let _syncDirty = false;
 const set = (k, v) => {
   _mem[k] = v;
   try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
-  if (SYNC_WATCH.has(k) && typeof cloudSyncPush === "function" && typeof NH !== "undefined" && NH.user) {
+  if (!_isRestoring && SYNC_WATCH.has(k) && typeof cloudSyncPush === "function" && typeof NH !== "undefined" && NH.user) {
+    _syncDirty = true;
     clearTimeout(_syncPushTimer);
     _syncPushTimer = setTimeout(() => cloudSyncPush(true), 2000);
   }
@@ -1736,9 +1744,14 @@ function renderWebdav() {
 }
 function restore(obj) {
   const d = obj.data || obj;
-  Object.entries(d).forEach(([k, v]) => { if (v !== null && v !== undefined) set(k, v); });
-  if (d.music_favs && !d.music_fav) set("music_fav", d.music_favs);
-  ensureLocalAuth();
+  try {
+    _isRestoring = true;
+    Object.entries(d).forEach(([k, v]) => { if (v !== null && v !== undefined) set(k, v); });
+    if (d.music_fav && !d.music_favs) set("music_favs", d.music_fav);
+    ensureLocalAuth();
+  } finally {
+    _isRestoring = false;
+  }
 }
 
 /* ============ 我的（NovaHub Pro 会员中心 + 源管理 + 数据设置） ============ */
@@ -1757,7 +1770,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.1</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.2</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -2725,14 +2738,24 @@ async function openRedeemModal() {
   }
 }
 
-async function cloudSyncPush(silent = false) {
+async function cloudSyncPush(silent = false, useKeepalive = false) {
   if (!NH.user) { if (!silent) toast("请先登录账号"); return; }
-  const keys = [K.SOURCE, K.LIKE, K.HISTORY, "channels", "music_favs", "music_fav_groups", "music_hist", "progress", "novel_shelf", "novel_hist", "novel_prog", "novel_cfg"];
-  const data = Object.fromEntries(keys.map((k) => [k, get(k, null)]));
+  clearTimeout(_syncPushTimer);
+  _syncDirty = false;
+  const data = Object.fromEntries(SYNC_KEYS.map((k) => [k, get(k, null)]));
+  if (useKeepalive) {
+    try {
+      const headers = { "Content-Type": "application/json" };
+      if (NH.token) headers["Authorization"] = "Bearer " + NH.token;
+      fetch("/api/sync", { method: "POST", keepalive: true, headers, body: JSON.stringify({ data }) }).catch(() => {});
+    } catch {}
+    return;
+  }
   try {
     await nhApi("/api/sync", "POST", { data });
     if (!silent) toast("全站片单、书架与进度已同步至云端");
   } catch (e) {
+    _syncDirty = true;
     if (!silent) toast("同步失败：" + e.message, 2400);
   }
 }
@@ -2741,10 +2764,22 @@ async function cloudSyncPull(silent = false) {
   if (!NH.user) { if (!silent) toast("请先登录账号"); return; }
   try {
     const d = await nhApi("/api/sync", "GET");
-    if (!d.sync || !d.sync.data) { if (!silent) toast("云端暂无历史备份"); return; }
+    if (!d.sync || !d.sync.data) {
+      if (silent) {
+        const hasLocal = [K.LIKE, K.HISTORY, "music_favs", "novel_shelf", "novel_hist"].some((k) => {
+          const val = get(k, null);
+          return Array.isArray(val) && val.length > 0;
+        });
+        if (hasLocal) await cloudSyncPush(true);
+      } else {
+        toast("云端暂无历史备份");
+      }
+      return;
+    }
     restore(d.sync.data);
     sources = get(K.SOURCE, DEFAULT_SOURCES);
     channels = get("channels", DEFAULT_CHANNELS);
+    mBr = get("m_br", "320");
     if (!silent) {
       toast("已从云端恢复全部片单、书架与阅读进度");
       renderMe();
@@ -2753,6 +2788,13 @@ async function cloudSyncPull(silent = false) {
     if (!silent) toast("恢复失败：" + e.message, 2400);
   }
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && _syncDirty && NH.user) cloudSyncPush(true, true);
+});
+window.addEventListener("pagehide", () => {
+  if (_syncDirty && NH.user) cloudSyncPush(true, true);
+});
 
 /* ============ 音乐睡眠定时关闭 & 画中画悬浮歌词窗 ============ */
 let mSleepMode = ""; // "" | "15" | "30" | "60" | "track"
