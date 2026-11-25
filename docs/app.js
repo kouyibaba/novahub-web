@@ -9,7 +9,16 @@ const K = {
 };
 const _mem = {};
 const get = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? (k in _mem ? _mem[k] : d) : JSON.parse(v); } catch { return k in _mem ? _mem[k] : d; } };
-const set = (k, v) => { _mem[k] = v; try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+const SYNC_WATCH = new Set(["like", "history", "music_fav", "music_fav_groups", "music_hist", "novel_shelf", "novel_hist", "novel_prog"]);
+let _syncPushTimer = null;
+const set = (k, v) => {
+  _mem[k] = v;
+  try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
+  if (SYNC_WATCH.has(k) && typeof cloudSyncPush === "function" && typeof NH !== "undefined" && NH.user) {
+    clearTimeout(_syncPushTimer);
+    _syncPushTimer = setTimeout(() => cloudSyncPush(true), 2000);
+  }
+};
 
 function ensureLocalAuth() {
   set(K.VIP, true);
@@ -2452,30 +2461,32 @@ async function openRedeemModal() {
   }
 }
 
-async function cloudSyncPush() {
-  if (!isProUser()) return toast("云端多端同步为 NovaHub Pro 专属权益");
-  const keys = [K.SOURCE, K.LIKE, K.HISTORY, "channels", "music_favs", "music_hist", "progress", "novel_shelf", "novel_hist", "novel_prog", "novel_cfg"];
+async function cloudSyncPush(silent = false) {
+  if (!NH.user) { if (!silent) toast("请先登录账号"); return; }
+  const keys = [K.SOURCE, K.LIKE, K.HISTORY, "channels", "music_fav", "music_fav_groups", "music_hist", "progress", "novel_shelf", "novel_hist", "novel_prog", "novel_cfg"];
   const data = Object.fromEntries(keys.map((k) => [k, get(k, null)]));
   try {
     await nhApi("/api/sync", "POST", { data });
-    toast("全站片单、书架与进度已同步至云端");
+    if (!silent) toast("全站片单、书架与进度已同步至云端");
   } catch (e) {
-    toast("同步失败：" + e.message, 2400);
+    if (!silent) toast("同步失败：" + e.message, 2400);
   }
 }
 
-async function cloudSyncPull() {
-  if (!isProUser()) return toast("云端多端同步为 NovaHub Pro 专属权益");
+async function cloudSyncPull(silent = false) {
+  if (!NH.user) { if (!silent) toast("请先登录账号"); return; }
   try {
     const d = await nhApi("/api/sync", "GET");
-    if (!d.sync || !d.sync.data) return toast("云端暂无历史备份");
+    if (!d.sync || !d.sync.data) { if (!silent) toast("云端暂无历史备份"); return; }
     restore(d.sync.data);
     sources = get(K.SOURCE, DEFAULT_SOURCES);
     channels = get("channels", DEFAULT_CHANNELS);
-    toast("已从云端恢复全部片单、书架与阅读进度");
-    renderMe();
+    if (!silent) {
+      toast("已从云端恢复全部片单、书架与阅读进度");
+      renderMe();
+    }
   } catch (e) {
-    toast("恢复失败：" + e.message, 2400);
+    if (!silent) toast("恢复失败：" + e.message, 2400);
   }
 }
 
