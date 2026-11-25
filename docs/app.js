@@ -833,7 +833,8 @@ function renderMusicDiscover() {
 function renderLyricsBox() {
   const box = $("#lrcBox");
   if (!box) return;
-  if (!curLyrics.length) { box.innerHTML = `<div class="lrc-line active">纯音乐或暂无歌词</div>`; return; }
+  const isInstrumental = !curLyrics.length || (curLyrics.length <= 2 && /纯音乐|没有填词|请欣赏/.test(curLyrics.map((l) => l.text).join("")));
+  if (isInstrumental) { box.innerHTML = `<div class="lrc-line active" style="margin-top:24px">🎵 纯音乐 · 沉浸伴奏聆听</div>`; return; }
   box.innerHTML = curLyrics.map((l, i) => `<div class="lrc-line ${i === activeLrcIdx ? "active" : ""}" data-i="${i}">${esc(l.text).replace(/\n/g, "<br>")}</div>`).join("");
   box.querySelectorAll(".lrc-line").forEach((el) => el.onclick = () => {
     const l = curLyrics[+el.dataset.i];
@@ -920,15 +921,76 @@ function renderMusicPlayer() {
   sk.onchange = () => { sk._dragging = false; if (isFinite(audioEl.duration) && audioEl.duration > 0) audioEl.currentTime = (sk.value / 1000) * audioEl.duration; };
 }
 
+let curMusicFavGroup = "全部";
+function getMusicFavGroups() {
+  const custom = get("music_fav_groups", []);
+  const fromFavs = getMusicFavs().map((x) => x.group).filter(Boolean);
+  return ["全部", "我喜欢的音乐", ...new Set([...custom, ...fromFavs].filter((g) => g && g !== "全部" && g !== "我喜欢的音乐"))];
+}
+
 function renderMusicFav() {
-  const favs = getMusicFavs();
+  const favs = getMusicFavs().map((x) => ({ ...x, group: x.group || "我喜欢的音乐" }));
+  const groups = getMusicFavGroups();
+  if (!groups.includes(curMusicFavGroup)) curMusicFavGroup = "全部";
+  const shown = curMusicFavGroup === "全部" ? favs : favs.filter((x) => x.group === curMusicFavGroup);
   const hist = get("music_hist", []);
   $("#view").innerHTML = `
-    <div class="section-title">${ico("heartFill")} 收藏曲目 (${favs.length})</div>
+    <div class="m-chips" id="mFavGroups">
+      ${groups.map((g) => `<button class="m-chip ${curMusicFavGroup === g ? "active" : ""}" data-fg="${esc(g)}">${esc(g)}</button>`).join("")}
+      <button class="m-chip" id="addFavGroupBtn">+ 新建分组</button>
+    </div>
+    <div class="section-title" style="justify-content:space-between">
+      <span>${ico("heartFill")} ${esc(curMusicFavGroup)} (${shown.length})</span>
+      ${curMusicFavGroup !== "全部" && curMusicFavGroup !== "我喜欢的音乐" ? `<button class="btn ghost sm" id="delFavGroupBtn">删除分组</button>` : ""}
+    </div>
     <div class="group" id="mFavList"></div>
     <div class="section-title">${ico("clock")} 最近播放 (${hist.length})</div>
     <div class="group" id="mHistList"></div>`;
-  paintMusicList($("#mFavList"), favs);
+  $("#mFavGroups").querySelectorAll("[data-fg]").forEach((el) => {
+    el.onclick = () => { curMusicFavGroup = el.dataset.fg; renderMusicFav(); };
+  });
+  $("#addFavGroupBtn").onclick = () => {
+    const name = (prompt("输入新歌单分组名称：", "") || "").trim();
+    if (!name || name === "全部") return;
+    const custom = get("music_fav_groups", []);
+    if (!custom.includes(name) && name !== "我喜欢的音乐") {
+      custom.push(name);
+      set("music_fav_groups", custom);
+    }
+    curMusicFavGroup = name;
+    renderMusicFav();
+  };
+  const delBtn = $("#delFavGroupBtn");
+  if (delBtn) delBtn.onclick = () => {
+    const g = curMusicFavGroup;
+    set("music_fav_groups", get("music_fav_groups", []).filter((x) => x !== g));
+    set("music_fav", getMusicFavs().map((x) => x.group === g ? { ...x, group: "我喜欢的音乐" } : x));
+    curMusicFavGroup = "全部";
+    renderMusicFav();
+    toast(`已删除分组「${g}」，歌曲已移回默认分组`);
+  };
+  paintMusicList($("#mFavList"), shown);
+  if (shown.length) {
+    $("#mFavList").querySelectorAll(".m-item").forEach((row, idx) => {
+      const btn = document.createElement("button");
+      btn.className = "m-act";
+      btn.title = "移动分组";
+      btn.textContent = shown[idx].group === "我喜欢的音乐" ? "分组" : shown[idx].group;
+      btn.style.cssText = "font-size:11px;padding:2px 6px;border-radius:6px;border:1px solid var(--line);color:var(--text-2);margin-right:4px";
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const target = (prompt(`将「${shown[idx].name}」移动到分组：`, shown[idx].group) || "").trim();
+        if (!target || target === "全部") return;
+        const custom = get("music_fav_groups", []);
+        if (!custom.includes(target) && target !== "我喜欢的音乐") { custom.push(target); set("music_fav_groups", custom); }
+        const k = songKey(shown[idx]);
+        set("music_fav", getMusicFavs().map((x) => songKey(x) === k ? { ...x, group: target } : x));
+        renderMusicFav();
+        toast(`已移入「${target}」`);
+      };
+      row.insertBefore(btn, row.lastElementChild);
+    });
+  }
   paintMusicList($("#mHistList"), hist);
 }
 

@@ -240,6 +240,7 @@ input[type="range"]::-webkit-slider-thumb {
 .player-layer {
   position: fixed; inset: 0; z-index: 100; background: #000;
   display: flex; flex-direction: column;
+  height: 100dvh; overflow: hidden;
   padding-top: env(safe-area-inset-top);
 }
 .player-layer.hidden { display: none; }
@@ -253,8 +254,9 @@ input[type="range"]::-webkit-slider-thumb {
   background: none; border: none; color: var(--text-2);
   font-size: 13.5px; font-weight: 500; padding: 6px 8px; cursor: pointer;
 }
-.player-box { position: relative; background: #000; aspect-ratio: 16/9; max-height: 56vh; }
-.player-box video { width: 100%; height: 100%; display: block; }
+.player-box { position: relative; background: #000; aspect-ratio: 16/9; max-height: 52dvh; flex-shrink: 0; }
+.player-box video { width: 100%; height: 100%; display: block; object-fit: contain; }
+#epList { flex: 1; min-height: 0; overflow-y: auto; }
 .player-tip {
   position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
   color: var(--text-2); font-size: 13px; text-align: center; pointer-events: none;
