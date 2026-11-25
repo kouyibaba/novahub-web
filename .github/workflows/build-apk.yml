@@ -25,6 +25,30 @@ jobs:
         with:
           gradle-version: '8.5'
 
+      - name: Generate fallback PNG launcher icon
+        run: |
+          mkdir -p android-app/app/src/main/res/mipmap-xxhdpi
+          python3 -c '
+          import struct, zlib
+          w = h = 192
+          rows = []
+          for y in range(h):
+              row = bytearray([0])
+              for x in range(w):
+                  dx, dy = abs(x - 96), abs(y - 96)
+                  in_star = (dx / 68.0) ** 0.55 + (dy / 68.0) ** 0.55 <= 1.0
+                  if in_star:
+                      row += bytes([231, 198, 107, 255])
+                  else:
+                      row += bytes([13, 14, 18, 255])
+              rows.append(bytes(row))
+          raw = b"".join(rows)
+          def chunk(t, d):
+              return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+          png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+          open("android-app/app/src/main/res/mipmap-xxhdpi/ic_launcher.png", "wb").write(png)
+          '
+
       - name: Build Debug APK
         working-directory: android-app
         run: gradle assembleDebug --no-daemon
