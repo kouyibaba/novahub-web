@@ -1574,6 +1574,7 @@ function renderWebdav() {
 function restore(obj) {
   const d = obj.data || obj;
   Object.entries(d).forEach(([k, v]) => { if (v !== null && v !== undefined) set(k, v); });
+  if (d.music_favs && !d.music_fav) set("music_fav", d.music_favs);
   ensureLocalAuth();
 }
 

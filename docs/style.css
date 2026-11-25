@@ -839,7 +839,7 @@ html, body, #epList, #lrcBox, .modal-box, .n-drawer-list {
 .modal, .modal-box, .player-layer, .n-reader {
   overscroll-behavior: contain;
 }
-.n-reader, .m-player-page {
+.n-reader {
   min-height: 100dvh;
 }
 
