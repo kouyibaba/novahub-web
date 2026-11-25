@@ -1,0 +1,14 @@
+{
+  "name": "ZY Player Web",
+  "short_name": "ZY Player",
+  "description": "私人影视、黑胶音乐与番茄小说终端",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0C0D10",
+  "theme_color": "#0C0D10",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
