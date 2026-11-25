@@ -1317,10 +1317,27 @@ progress.loading-spinner:indeterminate {
   }
 }
 
-/* ============ 视频播放器全屏态适配 ============ */
+/* ============ 视频播放器全屏态适配（真全屏影院模式 + 自动隐藏 + 竖屏旋转兜底） ============ */
+.player-fit-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
 .player-layer:fullscreen,
 .player-layer:-webkit-full-screen,
 .player-layer.is-fs {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
   width: 100vw;
   height: 100vh;
   height: 100dvh;
@@ -1328,32 +1345,79 @@ progress.loading-spinner:indeterminate {
   padding-top: 0;
   background: #000;
 }
-.player-layer:fullscreen .player-head,
-.player-layer:-webkit-full-screen .player-head,
-.player-layer.is-fs .player-head,
+.player-layer.is-fs.fs-rotate {
+  width: 100dvh;
+  height: 100vw;
+  top: 0;
+  left: 0;
+  right: auto;
+  bottom: auto;
+  transform: rotate(90deg) translateY(-100%);
+  transform-origin: top left;
+}
 .player-layer:fullscreen #epList,
 .player-layer:-webkit-full-screen #epList,
-.player-layer.is-fs #epList {
+.player-layer.is-fs #epList,
+.player-layer:fullscreen #playerFav,
+.player-layer:-webkit-full-screen #playerFav,
+.player-layer.is-fs #playerFav {
   display: none !important;
+}
+.player-layer:fullscreen .player-fit-btn,
+.player-layer:-webkit-full-screen .player-fit-btn,
+.player-layer.is-fs .player-fit-btn {
+  display: inline-flex;
 }
 .player-layer:fullscreen .player-box,
 .player-layer:-webkit-full-screen .player-box,
 .player-layer.is-fs .player-box,
 .player-box:fullscreen,
 .player-box:-webkit-full-screen {
-  flex: 1;
-  min-height: 0;
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   max-height: none;
   aspect-ratio: auto;
 }
+.player-layer.fs-cover .player-box video {
+  object-fit: cover;
+}
+.player-layer:fullscreen .player-head,
+.player-layer:-webkit-full-screen .player-head,
+.player-layer.is-fs .player-head {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 8;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.78) 0%, rgba(0, 0, 0, 0) 100%);
+  border-bottom: none;
+  padding: max(10px, env(safe-area-inset-top)) 14px 18px;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
 .player-layer:fullscreen .player-ctrl,
 .player-layer:-webkit-full-screen .player-ctrl,
 .player-layer.is-fs .player-ctrl {
-  flex-shrink: 0;
-  background: rgba(9, 10, 13, 0.88);
-  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 8;
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0) 100%);
+  border-bottom: none;
+  padding: 22px 16px max(12px, env(safe-area-inset-bottom));
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.player-layer.is-fs.fs-ui-hide .player-head {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-10px);
+}
+.player-layer.is-fs.fs-ui-hide .player-ctrl {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(10px);
 }
 
 /* ============ v2.3.3 音乐黑胶播放页单屏零滚动布局 ============ */
@@ -1453,3 +1517,121 @@ body.in-mplayer {
 }
 .vod-cat-bar::-webkit-scrollbar { display: none; }
 .vod-cat-bar .m-chip { flex-shrink: 0; }
+
+/* ============ v2.3.5 音乐搜索状态栏、选歌手胶囊与最近播放/队列抽屉 ============ */
+.m-search-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+  background: rgba(229, 184, 105, 0.08);
+  border: 1px solid rgba(229, 184, 105, 0.22);
+  font-size: 12.5px;
+  color: var(--text);
+}
+.m-search-bar strong { color: var(--accent); font-weight: 600; }
+.m-artist-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0 10px;
+}
+.m-artist-bar::-webkit-scrollbar { display: none; }
+.m-artist-bar-lbl {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.m-artist-chip {
+  flex-shrink: 0;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+}
+.m-artist-chip:active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.m-artist-links {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+.m-artist-link {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-2);
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.m-artist-link:active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.m-recent-panel {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+}
+.m-queue-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.m-queue-sheet {
+  width: 100%;
+  max-width: 600px;
+  max-height: 76dvh;
+  background: rgba(20, 22, 29, 0.96);
+  border-top: 1px solid rgba(229, 184, 105, 0.25);
+  border-radius: 18px 18px 0 0;
+  padding: 14px 14px calc(16px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 -12px 38px rgba(0, 0, 0, 0.65);
+}
+.m-q-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.m-q-tabs {
+  display: flex;
+  gap: 6px;
+}
+.m-q-list {
+  flex: 1;
+  min-height: 160px;
+  overflow-y: auto;
+}
