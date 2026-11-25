@@ -251,18 +251,36 @@ function renderTabbar() {
         { route: "m_discover", icon: "disc", text: "曲库" },
         { route: "m_player", icon: "headphones", text: "播放器" },
         { route: "m_fav", icon: "heart", activeIcon: "heartFill", text: "收藏" },
+        { route: "me", icon: "user", text: "我的" },
       ]
     : appMode === "novel"
     ? [
         { route: "n_store", icon: "book", text: "书城" },
         { route: "n_shelf", icon: "bookmark", activeIcon: "bookmarkFill", text: "书架" },
+        { route: "me", icon: "user", text: "我的" },
       ]
     : [
         { route: "home", icon: "film", text: "影视" },
-        { route: "live", icon: "tv", text: "直播" },
-        { route: "webdav", icon: "cloud", text: "备份" },
+        { route: "live", icon: "tv", text: "电视" },
         { route: "me", icon: "user", text: "我的" },
       ];
+  let pills = $("#nhModePills");
+  if (!pills && $(".topbar")) {
+    pills = document.createElement("div");
+    pills.id = "nhModePills";
+    pills.className = "mode-pills";
+    $(".topbar").insertAdjacentElement("afterend", pills);
+  }
+  if (pills) {
+    pills.innerHTML = [
+      { m: "video", label: "影视" },
+      { m: "music", label: "音乐" },
+      { m: "novel", label: "小说" },
+    ].map((x) => `<button class="mode-pill ${appMode === x.m ? "active" : ""}" data-m="${x.m}">${x.label}</button>`).join("");
+    pills.querySelectorAll(".mode-pill").forEach((b) => {
+      b.onclick = () => switchMode(b.dataset.m);
+    });
+  }
   tb.innerHTML = tabs.map((t) => {
     const on = currentRoute === t.route;
     return `<a href="#" class="tab ${on ? "active" : ""}" data-route="${t.route}"><span class="ico">${ico(on && t.activeIcon ? t.activeIcon : t.icon)}</span>${t.text}</a>`;
@@ -1575,7 +1593,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.1.0</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.2.0</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>

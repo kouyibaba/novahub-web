@@ -875,3 +875,33 @@ html, body, #epList, #lrcBox, .modal-box, .n-drawer-list {
   border: 1px solid rgba(212, 175, 55, 0.14) !important;
   background: rgba(20, 21, 28, 0.86) !important;
 }
+
+/* ============ 顶栏分段胶囊切换器（替代悬浮球） ============ */
+#modeFab { display: none !important; }
+.mode-pills {
+  display: flex;
+  gap: 6px;
+  padding: 6px 14px 8px;
+  background: rgba(12, 13, 18, 0.72);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid rgba(212, 175, 55, 0.1);
+}
+.mode-pill {
+  flex: 1;
+  padding: 7px 0;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.mode-pill.active {
+  background: linear-gradient(135deg, #e7c66b, #b68928);
+  color: #111;
+  border-color: transparent;
+  box-shadow: 0 4px 14px rgba(212, 175, 55, 0.28);
+}
