@@ -496,6 +496,10 @@ const M_BR_OPTS = [
 let mBr = get("m_br", "320");
 const brSelectHtml = () => `<select id="mBrSel" class="ui-select">${M_BR_OPTS.map((o) => `<option value="${o.v}" ${mBr === o.v ? "selected" : ""}>${o.label}</option>`).join("")}</select>`;
 async function changeBr(newBr) {
+  if ((newBr === "320" || newBr === "999") && !curUser?.is_pro) {
+    toast("极高 320k / 无损 FLAC 为 Pro 会员专属权益，请兑换卡密解锁");
+    return;
+  }
   mBr = newBr;
   set("m_br", mBr);
   toast("已切换音质：" + (M_BR_OPTS.find((o) => o.v === mBr)?.label || mBr));
@@ -609,6 +613,11 @@ async function loadSongLyrics(song, token) {
 }
 
 async function playSongFromList(list, idx, openPlayerView = false) {
+  if (!curUser) {
+    toast("请先登录账号后收听（5 秒免费注册）");
+    if (typeof openAuthModal === "function") openAuthModal("login");
+    return;
+  }
   const song = list[idx];
   if (!song) return;
   const token = ++mPlayToken;
@@ -1194,6 +1203,11 @@ async function doSearch(q, _fromBack) {
 /* ============ 视频播放器 ============ */
 const P = { hls: null, flv: null, eps: [], idx: 0, title: "", vodKey: "" };
 function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0) {
+  if (!curUser) {
+    toast("请先登录账号后观看（5 秒免费注册）");
+    if (typeof openAuthModal === "function") openAuthModal("login");
+    return;
+  }
   P.title = title; P.eps = eps; P.idx = idx; P.vodKey = vodKey;
   $("#playerTitle").textContent = title;
   $("#playerLayer").classList.remove("hidden");
