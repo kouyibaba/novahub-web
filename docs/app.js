@@ -2416,7 +2416,8 @@ async function refreshAuthUser() {
     NH.user = d.user || null;
     if (!NH.user) { NH.token = ""; set("nh_token", ""); }
     set("nh_user", NH.user);
-    if (currentRoute === "me" || currentRoute === "home" || currentRoute === "n_store") routes[currentRoute]();
+    if (NH.user) await cloudSyncPull(true);
+    if (currentRoute === "me" || currentRoute === "home" || currentRoute === "n_store" || currentRoute === "m_fav" || currentRoute === "n_shelf") routes[currentRoute]();
   } catch {}
 }
 
@@ -2459,8 +2460,10 @@ async function openAuthModal() {
     const d = await nhApi(isReg ? "/api/auth/register" : "/api/auth/login", "POST", { username, password });
     NH.token = d.token; NH.user = d.user;
     set("nh_token", d.token); set("nh_user", d.user);
+    if (isReg) await cloudSyncPush(true);
+    else await cloudSyncPull(true);
     toast(isReg ? "注册并登录成功" : "登录成功");
-    renderMe();
+    if (routes[currentRoute]) routes[currentRoute](); else renderMe();
   } catch (e) {
     toast(e.message, 2400);
   }
