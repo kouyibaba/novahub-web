@@ -105,6 +105,19 @@ if (!sources || !sources.length || get("src_ver", "") !== SRC_VER) {
   set("src_ver", SRC_VER);
 }
 const saveSources = () => set(K.SOURCE, sources);
+(async function syncLiveSources() {
+  try {
+    const r = await fetch("/api/sources/live");
+    if (!r.ok) return;
+    const d = await r.json();
+    if (Array.isArray(d.items) && d.items.length) {
+      const liveIds = new Set(d.items.map((x) => x.id));
+      const custom = (sources || []).filter((s) => !liveIds.has(s.id) && !DEFAULT_SOURCES.some((b) => b.id === s.id));
+      sources = d.items.concat(custom);
+      saveSources();
+    }
+  } catch {}
+})();
 
 /* ============ 工具 ============ */
 const $ = (s) => document.querySelector(s);
