@@ -51,20 +51,25 @@
       throw err;
     }
   };
-  // 开屏防卡死兜底：任何极端异常 4.5 秒后自动移除遮罩
+  // 开屏防卡死兜底：4.5 秒后自动移除遮罩；若主视图仍未渲染则显示可视重试提示（避免纯黑屏）
   setTimeout(function() {
     var s = document.getElementById('nhSplash');
     if (s) s.remove();
+    var v = document.getElementById('view');
+    if (v && !v.innerHTML.trim()) {
+      v.innerHTML = '<div style="padding:72px 24px;text-align:center;color:#d6d2c8;font-size:14px;line-height:1.8">'
+        + '<div style="font-size:16px;font-weight:600;color:#f3d285;margin-bottom:8px">网络较慢，正在重连星隅…</div>'
+        + '<div style="color:#8c8996;margin-bottom:18px">若长时间未加载完成，请点击下方按钮重新载入</div>'
+        + '<button onclick="location.reload()" style="padding:10px 26px;border-radius:99px;border:1px solid rgba(231,198,107,.5);background:rgba(231,198,107,.16);color:#f7ead1;font-size:14px">重新加载</button>'
+        + '</div>';
+    }
   }, 4500);
 })();
 </script>
 <link rel="manifest" href="manifest.json">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261126-v237">
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+<link rel="stylesheet" href="style.css?v=20261126-v238">
+<script async src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+<script async src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
 <style>
 #nhSplash {
   position: fixed; inset: 0; z-index: 99999; background: #090a0e;
@@ -242,6 +247,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="app.js?v=20261126-v237"></script></script>
+<script src="app.js?v=20261126-v238"></script>
 </body>
 </html>
