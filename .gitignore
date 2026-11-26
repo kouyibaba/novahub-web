@@ -13,6 +13,7 @@ novel_engine/*.txt
 novel_engine/*.epub
 PAD_SSH_PASSWORD.md
 TABLET_OPS_MANUAL.md
+DEPLOY_TO_PAD.md
 pad.ps1
 *.key
 *.p12

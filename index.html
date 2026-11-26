@@ -67,7 +67,7 @@
 })();
 </script>
 <link rel="manifest" href="manifest.json">
-<link rel="stylesheet" href="style.css?v=20261126-v242-security">
+<link rel="stylesheet" href="style.css?v=20261126-v244-nav">
 <script async src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
 <script async src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
 <style>
@@ -137,7 +137,7 @@
 <!-- 视频播放器全屏浮层 -->
 <div id="playerLayer" class="player-layer hidden">
   <div class="player-head">
-    <button id="playerBack" class="btn-back"></button>
+    <button id="playerBack" class="nav-back" type="button" aria-label="返回上一页"></button>
     <span id="playerTitle" class="player-title"></span>
     <button id="playerFav" class="btn-back"></button>
   </div>
@@ -176,7 +176,7 @@
 <!-- 小说沉浸阅读器全屏浮层 -->
 <div id="readerLayer" class="reader-layer hidden" data-rtheme="dark">
   <div id="readerHead" class="reader-head">
-    <button id="readerBack" class="btn-back"></button>
+    <button id="readerBack" class="nav-back" type="button" aria-label="返回上一页"></button>
     <div class="reader-meta">
       <div id="readerBookTitle" class="reader-book-title"></div>
       <div id="readerChSub" class="reader-ch-sub"></div>
@@ -247,6 +247,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="app.js?v=20261126-v243-tts"></script>
+<script src="app.js?v=20261126-v244-nav"></script>
 </body>
 </html>

@@ -185,12 +185,28 @@ button, input, select, textarea { font-family: inherit; }
 
 /* 二级返回导航条 */
 .back-bar {
-  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+  position: sticky; top: 0; z-index: 25;
+  display: grid; grid-template-columns: 48px minmax(0, 1fr) 48px;
+  align-items: center; gap: 4px; min-height: 56px;
+  margin: -14px -14px 16px; padding: env(safe-area-inset-top) 8px 0;
+  background: var(--bg); border-bottom: 1px solid var(--line);
 }
 .back-bar-title {
-  font-size: 15px; font-weight: 600; color: var(--text);
+  margin: 0; font-size: 17px; font-weight: 600; color: var(--text); text-align: center;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.nav-back {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 48px; height: 48px; flex: 0 0 48px;
+  padding: 12px; border: 0; border-radius: 50%;
+  background: transparent; color: var(--text); font-size: 24px; cursor: pointer;
+  touch-action: manipulation; transition: background 0.15s;
+}
+.nav-back:active { background: var(--surface-active); }
+.nav-back:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; }
+body.detail-view > .topbar, body.detail-view > .mode-pills,
+body.detail-view > #searchHistPop, body.detail-view > #topProgress { display: none; }
+.player-head .nav-back, .reader-head .nav-back { padding: 12px; color: inherit; }
 
 /* 直播频道网格 */
 .ch-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }

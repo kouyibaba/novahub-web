@@ -242,6 +242,7 @@ let currentRoute = "home";
 const viewStack = [];
 function pushView(fn) {
   viewStack.push(fn);
+  document.body.classList.add("detail-view");
   history.pushState({ depth: viewStack.length }, "");
 }
 let _playerPushed = false;
@@ -275,6 +276,7 @@ function goBack(fromPop = false) {
   if (!$("#playerLayer").classList.contains("hidden")) { closePlayer(fromPop); return; }
   if (viewStack.length > 0) {
     viewStack.pop();
+    document.body.classList.toggle("detail-view", viewStack.length > 0);
     const prev = viewStack[viewStack.length - 1];
     if (prev) prev();
     else routes[currentRoute]();
@@ -283,11 +285,42 @@ function goBack(fromPop = false) {
     routes[currentRoute]();
   }
 }
+let _appBackPending = false;
+let _appBackTimer;
+function requestAppBack() {
+  if (_appBackPending) return true;
+  const visible = (selector) => {
+    const element = $(selector);
+    return element && !element.classList.contains("hidden");
+  };
+  if (visible("#modal")) { $("#modalCancel").click(); return true; }
+  if (visible("#tocMask")) { $("#tocMask").classList.add("hidden"); return true; }
+  if (visible("#searchHistPop")) { hideSearchHistPop(); return true; }
+  if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return true; }
+  if ($("#playerLayer")?.classList.contains("is-fs")) { setPlayerFullscreen(false); return true; }
+  const reader = visible("#readerLayer");
+  const player = visible("#playerLayer");
+  if (!reader && !player && !viewStack.length) return false;
+  const entry = history.state || {};
+  const ownsEntry = reader ? entry.reader : player ? entry.player : entry.depth === viewStack.length;
+  if (ownsEntry) {
+    _appBackPending = true;
+    clearTimeout(_appBackTimer);
+    _appBackTimer = setTimeout(() => { _appBackPending = false; }, 1500);
+    history.back();
+  } else {
+    goBack(true);
+  }
+  return true;
+}
+window.__nhHandleBack = requestAppBack;
 window.addEventListener("popstate", () => {
+  _appBackPending = false;
+  clearTimeout(_appBackTimer);
   if (_skipNextPop) { _skipNextPop = false; return; }
   goBack(true);
 });
-const backBar = (title) => `<div class="back-bar"><button class="btn ghost" onclick="history.back()" style="padding:5px 11px;font-size:13px">${ico("back")} 返回</button><span class="back-bar-title">${esc(title)}</span></div>`;
+const backBar = (title) => `<header class="back-bar"><button class="nav-back" type="button" aria-label="返回上一页" onclick="requestAppBack()">${ico("back")}</button><h1 class="back-bar-title">${esc(title)}</h1><span aria-hidden="true"></span></header>`;
 
 function renderTabbar() {
   const tb = $("#tabbar");
@@ -364,6 +397,7 @@ function go(route) {
   const applyRoute = () => {
     currentRoute = route;
     viewStack.length = 0;
+    document.body.classList.remove("detail-view");
     const isMp = route === "m_player" && !!curSong;
     const vEl = $("#view");
     if (vEl) vEl.classList.toggle("view-mplayer", isMp);
@@ -1711,7 +1745,7 @@ async function openSource(src, _fromBack) {
       <div class="grid" id="srcGrid"></div>`;
     paintGrid($("#srcGrid"), list);
   } catch (e) {
-    $("#view").innerHTML = `<div class="empty">数据源读取失败：${esc(e.message)}<br><br><button class="btn ghost" onclick="history.back()">${ico("back")} 返回</button></div>`;
+    $("#view").innerHTML = `${backBar(src.name)}<div class="empty">数据源读取失败：${esc(e.message)}</div>`;
   }
 }
 
@@ -2185,13 +2219,7 @@ function syncVideoMediaSession() {
   } catch {}
 }
 
-$("#playerBack").onclick = () => {
-  if ($("#playerLayer")?.classList.contains("is-fs")) {
-    setPlayerFullscreen(false);
-    return;
-  }
-  closePlayer(false);
-};
+$("#playerBack").onclick = requestAppBack;
 $("#playerFav").onclick = () => toast("已记录至观看历史");
 $("#btnPlay").onclick = () => { const v = $("#video"); v.paused ? v.play() : v.pause(); showFsControls(true); };
 $("#btnFit")?.addEventListener("click", () => {
@@ -2635,7 +2663,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.3</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.4</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -3346,13 +3374,13 @@ function openReaderToc() {
 
 /* 绑定阅读器固定控件与手势 */
 (() => {
-  $("#readerBack").innerHTML = `${ico("back")} 返回`;
+  $("#readerBack").innerHTML = ico("back");
   $("#readerFsBtn").innerHTML = ico("fullscreen");
   $("#rTocBtn").innerHTML = `${ico("list")} 目录`;
   $("#rTtsBtn").innerHTML = `${ico("volume")} 听书`;
   $("#rTtsBtn").onclick = toggleNovelTts;
 
-  $("#readerBack").onclick = () => history.back();
+  $("#readerBack").onclick = requestAppBack;
   $("#readerFsBtn").onclick = () => {
     const layer = $("#readerLayer");
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -3982,7 +4010,7 @@ async function dismissSplash(bootAt) {
 /* ============ 初始化固定控件矢量图标与启动 ============ */
 const _bootAt = performance.now();
 $("#topSearchIco").innerHTML = ico("search");
-$("#playerBack").innerHTML = `${ico("back")} 返回`;
+$("#playerBack").innerHTML = ico("back");
 $("#playerFav").innerHTML = `${ico("heart")} 记录`;
 $("#btnPlay").innerHTML = ico("play");
 syncFsButtons(false);

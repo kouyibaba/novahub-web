@@ -44,6 +44,8 @@ public class MainActivity extends Activity {
     private WebChromeClient.CustomViewCallback customViewCallback;
     private boolean jsFullscreen = false;
     private long lastBackTime = 0;
+    private boolean backNavigationPending;
+    private android.window.OnBackInvokedCallback systemBackCallback;
     private NovelTtsController novelTts;
 
     /** 供 MediaNotifyService 回调网页端控制播放状态 */
@@ -82,6 +84,11 @@ public class MainActivity extends Activity {
         webView = new WebView(this);
         webView.setBackgroundColor(Color.parseColor("#090A0D"));
         setContentView(webView);
+        if (Build.VERSION.SDK_INT >= 33) {
+            systemBackCallback = this::handleAppBack;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, systemBackCallback);
+        }
         novelTts = new NovelTtsController(this, (id, event, detail) -> {
             if (!isFinishing() && isTrustedNovelPage()) {
                 webView.evaluateJavascript("window.__nhNovelTtsEvent && window.__nhNovelTtsEvent("
@@ -358,6 +365,11 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        handleAppBack();
+    }
+
+    private void handleAppBack() {
+        if (backNavigationPending || isFinishing()) return;
         if (customView != null && webView.getWebChromeClient() != null) {
             webView.getWebChromeClient().onHideCustomView();
             return;
@@ -369,13 +381,37 @@ public class MainActivity extends Activity {
             webView.evaluateJavascript("window.__nhExitFs && window.__nhExitFs()", null);
             return;
         }
-        if (webView.canGoBack()) {
+        if (isTrustedNovelPage()) {
+            backNavigationPending = true;
+            webView.evaluateJavascript("(function(){if(typeof window.__nhHandleBack!=='function')return 'legacy';"
+                    + "return window.__nhHandleBack()?'handled':'root';})()", result -> {
+                backNavigationPending = false;
+                if (isFinishing()) return;
+                if ("\"handled\"".equals(result)) {
+                    lastBackTime = 0;
+                } else if ("\"root\"".equals(result)) {
+                    confirmExit();
+                } else {
+                    handleLegacyBack();
+                }
+            });
+            return;
+        }
+        handleLegacyBack();
+    }
+
+    private void handleLegacyBack() {
+        if (webView != null && webView.canGoBack()) {
             webView.goBack();
             return;
         }
+        confirmExit();
+    }
+
+    private void confirmExit() {
         long now = System.currentTimeMillis();
         if (now - lastBackTime < 2000) {
-            super.onBackPressed();
+            finish();
         } else {
             lastBackTime = now;
             Toast.makeText(this, "再按一次退出 NovaHub", Toast.LENGTH_SHORT).show();
@@ -384,6 +420,9 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (Build.VERSION.SDK_INT >= 33 && systemBackCallback != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(systemBackCallback);
+        }
         if (novelTts != null) novelTts.shutdown();
         MediaNotifyService.clear(this);
         super.onDestroy();
