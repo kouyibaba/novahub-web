@@ -1,10 +1,10 @@
 {
-  "versionCode": 3,
-  "versionName": "2.4.0",
+  "versionCode": 4,
+  "versionName": "2.4.1",
   "force": false,
-  "notes": "新增原生手机状态栏与锁屏媒体控制通知栏\n新增看视频左半屏调亮度、右半屏调声音硬件级手势\n升级固定正式签名并内置应用内一键自动检查与覆盖更新\n配合 v2.3.6 网页端同步支持高清分类直播、分段选集与高可见进度条",
-  "sha256": "d70f2397718bc52274835944d4acd6e8f0ef4d345be7b84de2c754d93958d982",
-  "size": 25831,
+  "notes": "通知栏升级：支持实时同步当前歌词、显示歌曲/视频总时长及拖动进度条\n通知栏支持异步加载展示当前歌曲专辑封面图\n优化 WebView 资源缓存与首屏启动速度，断网时展示可视化一键重试页\n配合网页端实现无缝自动检测与覆盖更新",
+  "sha256": "e196ad5bcbc9b5b11675bd31e9395520f917b4f955b5c4d2c87e814ac8ab97c6",
+  "size": 30399,
   "url": "https://kouyibaba.github.io/novahub-web/apk/novahub-latest.apk",
-  "fallback_url": "https://github.com/kouyibaba/novahub-web/releases/download/v2.4.0/NovaHub-v2.4.0.apk"
+  "fallback_url": "https://github.com/kouyibaba/novahub-web/releases/download/v2.4.1/NovaHub-v2.4.1.apk"
 }
