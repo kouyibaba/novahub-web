@@ -1,10 +1,10 @@
 {
-  "versionCode": 4,
-  "versionName": "2.4.1",
+  "versionCode": 5,
+  "versionName": "2.4.2",
   "force": false,
-  "notes": "通知栏升级：支持实时同步当前歌词、显示歌曲/视频总时长及拖动进度条\n通知栏支持异步加载展示当前歌曲专辑封面图\n优化 WebView 资源缓存与首屏启动速度，断网时展示可视化一键重试页\n配合网页端实现无缝自动检测与覆盖更新",
-  "sha256": "e196ad5bcbc9b5b11675bd31e9395520f917b4f955b5c4d2c87e814ac8ab97c6",
-  "size": 30399,
+  "notes": "全新设计应用内升级提示与下载进度弹窗（深曜石黑与暖琥珀金圆角卡片）\n优化更新日志排版、百分比大字与实时下载字节进度条展示\n延续通知栏实时歌词、总时长可拖动进度条与专辑封面体验",
+  "sha256": "1c1130ae260abeb13e21f98b7c0e71cd8c8a7496ffa6b89a9b864523f36f1da7",
+  "size": 33751,
   "url": "https://kouyibaba.github.io/novahub-web/apk/novahub-latest.apk",
-  "fallback_url": "https://github.com/kouyibaba/novahub-web/releases/download/v2.4.1/NovaHub-v2.4.1.apk"
+  "fallback_url": "https://github.com/kouyibaba/novahub-web/releases/download/v2.4.2/NovaHub-v2.4.2.apk"
 }
