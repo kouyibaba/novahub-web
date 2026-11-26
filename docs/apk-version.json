@@ -1,10 +1,10 @@
 {
-  "versionCode": 6,
-  "versionName": "2.4.3",
+  "versionCode": 7,
+  "versionName": "2.4.4",
   "force": false,
-  "notes": "新增免费原生中文听书，使用手机已安装的离线中文语音\n支持按句暂停续听、自动续章及标点语气和停顿调整\n语音包缺失时引导打开系统设置，修复朗读出错跳段和续章失败重复朗读\n全新设计应用内升级提示与下载进度弹窗（深曜石黑与暖琥珀金圆角卡片）\n优化更新日志排版、百分比大字与实时下载字节进度条展示\n延续通知栏实时歌词、总时长可拖动进度条与专辑封面体验",
-  "sha256": "170c3b15f2359124ea8c14eed30ba120468260efd7eba2694f3488b9bf82cfec",
-  "size": 38727,
+  "notes": "适配 Android 13 及以上系统返回手势，首页连续按两次返回退出\n统一详情、播放器与小说阅读器的返回顺序，避免误退应用和重复回退\n详情页使用原生风格标题栏，隐藏顶部搜索栏并优化返回按钮触控范围\n新增免费原生中文听书，使用手机已安装的离线中文语音\n支持按句暂停续听、自动续章及标点语气和停顿调整\n语音包缺失时引导打开系统设置，修复朗读出错跳段和续章失败重复朗读\n全新设计应用内升级提示与下载进度弹窗（深曜石黑与暖琥珀金圆角卡片）\n优化更新日志排版、百分比大字与实时下载字节进度条展示\n延续通知栏实时歌词、总时长可拖动进度条与专辑封面体验",
+  "sha256": "262ce55c73c9fc85a8ba2746e9e168b48591f01a43167cbf0d166dcaa3afad5b",
+  "size": 39451,
   "url": "https://kouyibaba.github.io/novahub-web/apk/novahub-latest.apk",
-  "fallback_url": "https://github.com/kouyibaba/novahub-web/releases/download/v2.4.3/NovaHub-v2.4.3.apk"
+  "fallback_url": "https://github.com/kouyibaba/novahub-web/releases/download/v2.4.4/NovaHub-v2.4.4.apk"
 }
