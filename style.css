@@ -1768,3 +1768,5 @@ body.in-mplayer {
 }
 .live-cat-bar::-webkit-scrollbar { display: none; }
 .live-cat-bar .m-chip { flex-shrink: 0; }
+
+.ad-image{width:76px;height:76px;object-fit:cover;border-radius:8px;flex-shrink:0}

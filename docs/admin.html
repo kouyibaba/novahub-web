@@ -378,6 +378,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M3 10h18M7 14h4"/></svg>
           <span>发卡与台账</span>
         </button>
+        <button type="button" class="nav-tab" role="tab" data-panel="catalog" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 4 16 4 16 0V6M4 12c0 4 16 4 16 0"/></svg><span>片库与订阅</span></button>
         <button type="button" class="nav-tab" role="tab" data-panel="config" aria-selected="false">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v3m0 12v3M4.9 4.9l2.1 2.1m10 10 2.1 2.1M3 12h3m12 0h3M4.9 19.1 7 17m10-10 2.1-2.1"/><circle cx="12" cy="12" r="4"/></svg>
           <span>广告位配置</span>
@@ -418,6 +419,7 @@
       <button type="button" class="nav-tab" role="tab" data-panel="overview" aria-selected="true">总览</button>
       <button type="button" class="nav-tab" role="tab" data-panel="users" aria-selected="false">用户管理</button>
       <button type="button" class="nav-tab" role="tab" data-panel="codes" aria-selected="false">发卡与台账</button>
+      <button type="button" class="nav-tab" role="tab" data-panel="catalog" aria-selected="false">片库与订阅</button>
       <button type="button" class="nav-tab" role="tab" data-panel="config" aria-selected="false">广告配置</button>
       <button type="button" class="nav-tab" role="tab" data-panel="security" aria-selected="false">安全设置</button>
     </div>
@@ -591,12 +593,20 @@
       </div>
     </section>
 
+    <section id="panel-catalog" role="tabpanel" hidden>
+      <div class="page-head"><div><h1>片库与订阅</h1><p>订阅每日更新，健康每 6 小时检测。候选通过两轮间隔至少 30 分钟的检测后启用。</p></div><button id="catalogReload" class="btn">刷新状态</button></div>
+      <div class="card"><div class="row" style="flex-wrap:wrap;gap:8px"><button id="catalogRefresh" class="btn primary">更新订阅并检测</button><button id="catalogCheck" class="btn">检测现有源</button><button id="catalogRollback" class="btn danger">回滚上版可用源库</button></div><p class="hint" id="catalogJob"></p><p class="hint" id="catalogTimers"></p></div>
+      <div class="grid-2" style="margin-top:16px"><div class="card"><h2>JSON 订阅</h2><label class="fld" for="subName">名称</label><input id="subName"><label class="fld" for="subUrl">HTTPS JSON 地址</label><input id="subUrl" placeholder="https://.../sources.json"><button class="btn primary" id="subAdd" style="margin-top:10px">添加订阅</button><div id="catalogSubscriptions" style="margin-top:12px"></div></div>
+      <div class="card"><h2>手动加入候选</h2><label class="fld" for="sourceName">名称</label><input id="sourceName"><label class="fld" for="sourceApi">直接 JSON 接口</label><input id="sourceApi" placeholder="https://.../api.php/provide/vod"><button class="btn primary" id="sourceAdd" style="margin-top:10px">加入候选</button><p class="hint">只读取普通 JSON / LibreTV SourceList / TVBox 直接 CMS 接口；不运行远程脚本和插件。</p></div></div>
+      <div class="card" style="margin-top:16px"><h2>全站源库</h2><div class="table-wrap"><table class="data-tbl"><thead><tr><th>名称 / 接口</th><th>状态</th><th>质量 / 延迟</th><th>检测</th><th>操作</th></tr></thead><tbody id="catalogSources"></tbody></table></div></div>
+    </section>
+
     <!-- 模块 4：赞助广告位配置 -->
     <section id="panel-config" role="tabpanel" hidden>
       <div class="page-head">
         <div>
           <h1>赞助与广告位配置</h1>
-          <p>修改后立即下发至全端（Pro 会员自动免广告）</p>
+          <p>修改后立即下发至全端（Pro 会员免站内广告）</p>
         </div>
       </div>
       <div class="grid-2">
@@ -612,8 +622,12 @@
           <input id="adDesc" placeholder="描述开通 Pro 的权益说明">
           <div class="row">
             <div><label class="fld" for="adBtn">按钮文字</label><input id="adBtn" placeholder="了解 Pro"></div>
-            <div><label class="fld" for="adUrl">跳转链接（留空跳会员中心）</label><input id="adUrl" placeholder="https://..."></div>
+            <div><label class="fld" for="adUrl">HTTPS 跳转链接（可留空）</label><input id="adUrl" placeholder="https://..."></div>
           </div>
+          <label class="fld" for="adImage">HTTPS 图片地址（可留空）</label><input id="adImage" placeholder="https://.../banner.png">
+          <label class="fld" for="adSlots">展示位置</label><select id="adSlots"><option value="home,novel">影视首页与书城</option><option value="home">影视首页</option><option value="novel">书城</option></select>
+          <label class="fld" for="adProvider">接入方式</label><select id="adProvider"><option value="manual">自营图文广告</option><option value="reserved">供应商接入预留（不展示）</option></select>
+          <p class="hint">广告默认关闭。供应商接口已预留，后续接入需实现适配器；当前不加载广告 SDK 或任意脚本。</p>
           <label class="fld" for="sponsorTip">会员中心赞助说明</label>
           <textarea id="sponsorTip" rows="3"></textarea>
           <button id="btnSaveAd" type="button" class="btn primary" style="width:100%;margin-top:14px">保存并立即生效</button>
@@ -622,6 +636,7 @@
         <div class="card">
           <div class="card-hd"><h2>前台样式实时预览</h2><span id="pvStatusTag" class="tag ok">展示中</span></div>
           <div class="preview-shell">
+            <img id="pvImage" alt="广告图片预览" hidden style="max-width:100%;max-height:140px;object-fit:contain;margin-bottom:10px">
             <div id="pvCard" class="preview-ad">
               <div style="min-width:0">
                 <div id="pvTitle" style="font-size:14.5px;font-weight:700;color:#F7EAD1"></div>
@@ -811,6 +826,7 @@ function switchPanel(name) {
     p.hidden = p.id !== ("panel-" + name);
   });
   if (name === "users" && !allUsers.length) loadUsers();
+  if (name === "catalog") loadCatalog();
 }
 $$("[role='tab'][data-panel]").forEach((btn) => {
   btn.addEventListener("click", () => switchPanel(btn.dataset.panel));
@@ -1035,9 +1051,34 @@ $("#dlgDelCode").addEventListener("close", async () => {
   }
 });
 
+/* Managed catalog administration */
+async function loadCatalog() {
+  try{renderCatalog(await api('/api/admin/sources'));}catch(e){toast(e.message,true);}
+}
+function renderCatalog(d) {
+  const job=d.job||{};
+  $('#catalogJob').textContent=`${job.running?'任务进行中':'空闲'} · 每查询 ${d.limits.per_query} 路 / 全局 ${d.limits.global} 路 · ${job.error||''}`;
+  $('#catalogTimers').textContent=`订阅更新 ${fmtTime(d.timers.subscription_at)} · 健康检测 ${fmtTime(d.timers.health_at)} · 最近任务 ${fmtTime(job.finished_at||job.started_at)}`;
+  for(const id of ['#catalogRefresh','#catalogCheck'])$(id).disabled=!!job.running;
+  $('#catalogSources').innerHTML=(d.items||[]).map(s=>`<tr><th scope="row">${esc(s.name)}<div class="hint" style="overflow-wrap:anywhere;font-weight:400">${esc(s.api)}</div></th><td data-label="状态">${s.disabled?'手动停用':({active:'可用',candidate:'候选',paused:'暂缓'})[s.state]||esc(s.state)}</td><td data-label="质量 / 延迟">${Math.round(s.quality)} / ${Math.round(s.latency)} ms</td><td data-label="检测">${fmtTime(s.checked_at)}<div class="hint">成功轮 ${s.successes} · 连败 ${s.failures} ${esc(s.error||'')}</div></td><td data-label="操作"><button class="btn sm" data-source="${esc(s.id)}" data-enabled="${s.disabled?'1':'0'}">${s.disabled?'允许启用':'停用'}</button></td></tr>`).join('');
+  $('#catalogSources').querySelectorAll('[data-source]').forEach(b=>b.onclick=()=>catalogAction({action:'toggle',id:b.dataset.source,enabled:b.dataset.enabled==='1'}));
+  $('#catalogSubscriptions').innerHTML=(d.subscriptions||[]).map(s=>`<div class="mini-row" style="display:block;overflow-wrap:anywhere"><strong>${esc(s.name)}</strong><div class="hint">${esc(s.url)}</div><div class="hint">${fmtTime(s.checked_at)} ${esc(s.error||'')} · ${s.enabled?'启用':'停用'}</div><button class="btn sm" data-sub="${esc(s.id)}">${s.enabled?'停用':'启用'}</button></div>`).join('');
+  $('#catalogSubscriptions').querySelectorAll('[data-sub]').forEach(b=>b.onclick=async()=>{const s=d.subscriptions.find(x=>x.id===b.dataset.sub);try{renderCatalog(await api('/api/admin/subscriptions','POST',{name:s.name,url:s.url,enabled:!s.enabled}));}catch(e){toast(e.message,true);}});
+}
+async function catalogAction(body){try{renderCatalog(await api('/api/admin/sources','POST',body));}catch(e){toast(e.message,true);}}
+$('#catalogReload').onclick=loadCatalog;
+$('#catalogRefresh').onclick=()=>catalogAction({action:'refresh'});
+$('#catalogCheck').onclick=()=>catalogAction({action:'check'});
+$('#catalogRollback').onclick=()=>{if(confirm('恢复上版源库？手动停用状态会保留。'))catalogAction({action:'rollback'});};
+$('#subAdd').onclick=async()=>{try{renderCatalog(await api('/api/admin/subscriptions','POST',{name:$('#subName').value.trim(),url:$('#subUrl').value.trim(),enabled:true}));toast('订阅已保存，请点击更新订阅');}catch(e){toast(e.message,true);}};
+$('#sourceAdd').onclick=()=>catalogAction({action:'add',name:$('#sourceName').value.trim(),api:$('#sourceApi').value.trim()});
+setInterval(()=>{if(token&&!$('#panel-catalog').hidden)loadCatalog();},10000);
+
 /* ============ 赞助广告预览 ============ */
 function updateAdPreview() {
-  const on = $("#adEnabled").checked;
+  const on = $("#adEnabled").checked && $("#adProvider").value === "manual";
+  const image=$("#adImage").value.trim();let safeImage=false;try{safeImage=new URL(image).protocol==="https:";}catch{}
+  $("#pvImage").hidden=!safeImage;$("#pvImage").src=safeImage?image:"";
   $("#pvStatusTag").textContent = on ? "展示中" : "已关闭";
   $("#pvStatusTag").className = "tag " + (on ? "ok" : "muted");
   $("#pvCard").classList.toggle("off", !on);
@@ -1046,7 +1087,7 @@ function updateAdPreview() {
   $("#pvBtn").textContent = $("#adBtn").value.trim() || "了解 Pro";
   $("#pvTip").textContent = $("#sponsorTip").value.trim() || "未配置会员中心赞助说明";
 }
-["#adEnabled", "#adTitle", "#adDesc", "#adBtn", "#adUrl", "#sponsorTip"].forEach((sel) => {
+["#adEnabled", "#adTitle", "#adDesc", "#adBtn", "#adUrl", "#adImage", "#adSlots", "#adProvider", "#sponsorTip"].forEach((sel) => {
   $(sel).addEventListener("input", updateAdPreview);
   $(sel).addEventListener("change", updateAdPreview);
 });
@@ -1067,6 +1108,9 @@ async function loadDash(withUsers = true) {
     $("#adBtn").value = d.config.ad_btn || "";
     $("#adUrl").value = d.config.ad_url || "";
     $("#sponsorTip").value = d.config.sponsor_tip || "";
+    $("#adImage").value=d.config.ad_image||"";
+    $("#adSlots").value=(d.config.ad_slots||["home","novel"]).join(",");
+    $("#adProvider").value=d.config.ad_provider||"manual";
     updateAdPreview();
     refreshApkVersion();
     if (withUsers && !$("#panel-users").hidden) await loadUsers();
@@ -1180,6 +1224,9 @@ $("#btnSaveAd").onclick = async () => {
       ad_btn: $("#adBtn").value.trim(),
       ad_url: $("#adUrl").value.trim(),
       sponsor_tip: $("#sponsorTip").value.trim(),
+      ad_image: $("#adImage").value.trim(),
+      ad_slots: $("#adSlots").value,
+      ad_provider: $("#adProvider").value,
     });
     toast("赞助广告位配置已生效");
   } catch (e) { toast(e.message, true); }

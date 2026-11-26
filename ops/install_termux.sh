@@ -5,7 +5,7 @@ source_dir="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 target_dir="$HOME/novahub"
 mkdir -p "$target_dir/novel_engine"
 if [ "$source_dir" != "$target_dir" ]; then
-  for name in server.py db.py safe_http.py source_probe.py sources.json backup_db.py admin_cli.py index.html admin.html app.js style.css manifest.json icon.svg; do
+  for name in server.py db.py safe_http.py sync_state.py catalog.py source_probe.py sources.json backup_db.py admin_cli.py index.html admin.html app.js auth_session.js history_state.js vod_client.js style.css manifest.json icon.svg; do
     cp -- "$source_dir/$name" "$target_dir/$name"
   done
 fi

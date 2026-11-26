@@ -3,6 +3,7 @@ import http.client
 import ipaddress
 import socket
 import ssl
+import time
 import urllib.error
 import urllib.parse
 
@@ -32,25 +33,31 @@ def resolve_public(url):
     return parsed, port, addresses
 
 
-def request(url, headers=None, timeout=8, max_bytes=4_194_304, method="GET", body=None):
+def request(url, headers=None, timeout=8, max_bytes=4_194_304, method="GET", body=None, include_headers=False):
     """Resolve each redirect once, connect only to that validated address set."""
     headers = dict(headers or {})
+    deadline = time.monotonic() + timeout
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0: raise TimeoutError('Upstream deadline exceeded')
+        return value
     for _ in range(6):
+        remaining()
         parsed, port, addresses = resolve_public(url)
 
         def connect_pinned(_destination, timeout=timeout, source_address=None):
             last_error = None
             for address in addresses:
                 try:
-                    return socket.create_connection((address, port), timeout, source_address)
+                    return socket.create_connection((address, port), remaining(), source_address)
                 except OSError as exc:
                     last_error = exc
             raise last_error or OSError("No target address")
 
         if parsed.scheme == "https":
-            conn = http.client.HTTPSConnection(parsed.hostname, port, timeout=timeout, context=TLS_CONTEXT)
+            conn = http.client.HTTPSConnection(parsed.hostname, port, timeout=remaining(), context=TLS_CONTEXT)
         else:
-            conn = http.client.HTTPConnection(parsed.hostname, port, timeout=timeout)
+            conn = http.client.HTTPConnection(parsed.hostname, port, timeout=remaining())
         conn._create_connection = connect_pinned
         try:
             path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
@@ -72,10 +79,21 @@ def request(url, headers=None, timeout=8, max_bytes=4_194_304, method="GET", bod
                 continue
             if response.status >= 400:
                 raise urllib.error.HTTPError(url, response.status, response.reason, response.headers, None)
-            data = response.read(max_bytes + 1)
+            chunks = []; size = 0
+            while size <= max_bytes:
+                seconds = remaining()
+                if conn.sock: conn.sock.settimeout(seconds)
+                # read1 returns currently available bytes, allowing a whole-body deadline
+                # even when an upstream trickles data below the socket idle timeout.
+                chunk = response.read1(min(65536, max_bytes + 1 - size))
+                if not chunk: break
+                chunks.append(chunk); size += len(chunk)
+            remaining()
+            data = b''.join(chunks)
             if len(data) > max_bytes:
                 raise ValueError("Upstream response too large")
-            return response.status, data, response.getheader("Content-Type", "application/octet-stream"), url
+            result = (response.status, data, response.getheader("Content-Type", "application/octet-stream"), url)
+            return result + ({k.lower():v for k,v in response.getheaders()},) if include_headers else result
         finally:
             conn.close()
     raise ValueError("Too many redirects")

@@ -15,18 +15,23 @@ import secrets
 import sqlite3
 import threading
 import time
+import urllib.parse
+import sync_state
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("NOVAHUB_DB_PATH", os.path.join(ROOT, "novahub.db"))
 _DB_LOCK = threading.Lock()
 
 DEFAULT_SITE_CONFIG = {
-    "ad_enabled": "1",
-    "ad_title": "赞助支持 NovaHub · 星隅",
-    "ad_desc": "纯净流式影视、无损黑胶与在线阅读体验 · 开通 Pro 会员享全局免广告与云端同步",
+    "ad_enabled": "0",
+    "ad_title": "",
+    "ad_desc": "",
     "ad_url": "",
     "ad_btn": "了解 Pro",
-    "sponsor_tip": "通过赞助或兑换卡密即可立即激活 NovaHub Pro 会员，支持多端云同步与无损音质。",
+    "ad_image": "",
+    "ad_slots": "home,novel",
+    "ad_provider": "manual",
+    "sponsor_tip": "Pro 支持站内广告豁免、高码率音乐与会员标识；音质以曲源实际提供为准。账号云同步与系统听书向普通用户开放。",
 }
 
 
@@ -90,6 +95,11 @@ def init_db():
                 "INSERT OR IGNORE INTO site_config(key, value) VALUES(?, ?)",
                 (k, v),
             )
+        if not c.execute("SELECT 1 FROM site_config WHERE key='ad_schema_v2'").fetchone():
+            title = c.execute("SELECT value FROM site_config WHERE key='ad_title'").fetchone()
+            if title and title['value'] == '赞助支持 NovaHub · 星隅':
+                c.execute("UPDATE site_config SET value='0' WHERE key='ad_enabled'")
+            c.execute("INSERT INTO site_config VALUES('ad_schema_v2','1')")
 
 
 def _get_secret():
@@ -215,6 +225,20 @@ def verify_token(token, role=None):
     return _format_user(row)
 
 
+def refresh_user_session(token):
+    """Renew an active session near expiry without resurrecting revoked credentials."""
+    user = verify_token(token)
+    if not user:
+        raise ValueError("登录已失效，请重新登录")
+    encoded = token.split(".", 1)[0]
+    payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+    if int(payload["exp"]) - int(time.time()) <= 7 * 86400:
+        # Carry the validated credential version: a concurrent password reset
+        # must also revoke the token produced by this refresh.
+        token = _sign_token(user["id"], user["username"], credential_version=payload["cv"])
+    return user, token
+
+
 def sign_media_ticket(token):
     """Six-hour read-only media ticket for native video/HLS requests."""
     user = verify_token(token)
@@ -280,6 +304,10 @@ def save_user_sync(user_id, payload_obj):
         raise ValueError("同步数据体积超出限制")
     now = int(time.time())
     with _DB_LOCK, _conn() as c:
+        row = c.execute('SELECT payload FROM user_sync WHERE user_id=?', (int(user_id),)).fetchone()
+        merged = sync_state.merge(json.loads(row['payload']) if row else {}, payload_obj)
+        raw = json.dumps(merged, ensure_ascii=False)
+        if len(raw.encode('utf-8')) > 1024 * 1024: raise ValueError('合并后同步数据体积超出限制')
         c.execute(
             "INSERT INTO user_sync(user_id, payload, updated_at) VALUES(?, ?, ?) "
             "ON CONFLICT(user_id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
@@ -294,7 +322,15 @@ def get_user_sync(user_id):
         row = c.execute("SELECT payload, updated_at FROM user_sync WHERE user_id=?", (int(user_id),)).fetchone()
     if not row:
         return None
-    return {"data": json.loads(row["payload"]), "updated_at": row["updated_at"]}
+    return {"data": sync_state.merge({}, json.loads(row["payload"])), "updated_at": row["updated_at"]}
+
+
+def get_legacy_sources(user_id):
+    """Internal migration input only; never emit old API URLs in sync responses."""
+    with _DB_LOCK, _conn() as c:
+        row = c.execute('SELECT payload FROM user_sync WHERE user_id=?', (int(user_id),)).fetchone()
+    data = json.loads(row['payload']) if row else {}
+    return data.get('source') if isinstance(data, dict) else None
 
 
 def get_public_config():
@@ -310,8 +346,38 @@ def get_public_config():
         "ad_desc": cfg.get("ad_desc", ""),
         "ad_url": cfg.get("ad_url", ""),
         "ad_btn": cfg.get("ad_btn", "了解 Pro"),
+        "ad_image": cfg.get("ad_image", ""),
+        "ad_slots": [x for x in cfg.get("ad_slots", "home,novel").split(',') if x in ('home','novel')],
+        "ad_provider": cfg.get("ad_provider", "manual"),
         "sponsor_tip": cfg.get("sponsor_tip", ""),
     }
+
+
+def configure_site(body):
+    if not isinstance(body, dict): raise ValueError('配置必须为对象')
+    values = {}
+    for key in DEFAULT_SITE_CONFIG:
+        if key not in body: continue
+        value = body[key]
+        if key == 'ad_enabled':
+            if not isinstance(value, bool): raise ValueError('广告开关必须为布尔值')
+            value = '1' if value else '0'
+        else: value = str(value or '').strip()
+        if len(value) > (2048 if key in ('ad_url','ad_image') else 500): raise ValueError('配置过长')
+        if key in ('ad_url','ad_image') and value:
+            try: p = urllib.parse.urlsplit(value)
+            except ValueError: raise ValueError('广告链接无效')
+            if p.scheme != 'https' or not p.hostname or p.username or p.password or any(ord(ch)<=32 for ch in value) or '\\' in value:
+                raise ValueError('广告链接和图片必须为 HTTPS 地址')
+        if key == 'ad_provider' and value not in ('manual','reserved'): raise ValueError('暂不支持该广告供应商')
+        if key == 'ad_slots':
+            slots = list(dict.fromkeys(value.split(',')))
+            if not slots or any(x not in ('home','novel') for x in slots): raise ValueError('请选择有效广告位置')
+            value = ','.join(slots)
+        values[key] = value
+    with _DB_LOCK, _conn() as c:
+        c.executemany('INSERT INTO site_config(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', values.items())
+    return get_public_config()
 
 
 def set_site_config(key, value):

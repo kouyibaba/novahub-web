@@ -28,6 +28,7 @@ import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.Toast;
 import java.lang.ref.WeakReference;
+import java.util.UUID;
 import org.json.JSONObject;
 
 /**
@@ -47,6 +48,11 @@ public class MainActivity extends Activity {
     private boolean backNavigationPending;
     private android.window.OnBackInvokedCallback systemBackCallback;
     private NovelTtsController novelTts;
+    private SessionStore sessionStore;
+    private final Object sessionLock = new Object();
+    private String sessionNonce = "";
+    private int sessionSequence = -1;
+    private boolean sessionInjected;
 
     /** 供 MediaNotifyService 回调网页端控制播放状态 */
     public static void dispatchMediaAction(final String act) {
@@ -76,6 +82,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         activeRef = new WeakReference<>(this);
+        sessionStore = new SessionStore(this);
 
         Window window = getWindow();
         window.setStatusBarColor(Color.parseColor("#090A0D"));
@@ -112,8 +119,33 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                synchronized (sessionLock) {
+                    sessionNonce = isTrustedPageUrl(url) ? UUID.randomUUID().toString() : "";
+                    sessionSequence = -1;
+                    sessionInjected = false;
+                }
                 if (novelTts != null) novelTts.stop();
                 super.onPageStarted(view, url, favicon);
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                if (!isTrustedPageUrl(url) || !url.equals(view.getUrl())) return;
+                String nonce;
+                synchronized (sessionLock) {
+                    if (sessionInjected) return;
+                    nonce = sessionNonce;
+                    sessionInjected = true;
+                }
+                if (nonce.isEmpty()) return;
+                // Values enter only the trusted main frame via evaluateJavascript;
+                // no native getter exposes credentials to arbitrary subframes.
+                String saved = sessionStore.read().toString();
+                view.evaluateJavascript("(function(){var sequence=0;var nonce=" + JSONObject.quote(nonce)
+                        + ";var saved=JSON.parse(" + JSONObject.quote(saved) + ");"
+                        + "if(typeof window.__nhNativeSessionReady==='function')window.__nhNativeSessionReady(saved,"
+                        + "function(value){NovaNative.saveSession(nonce,++sequence,JSON.stringify(value));});})()", null);
             }
 
             @Override
@@ -201,9 +233,14 @@ public class MainActivity extends Activity {
     }
 
     private boolean isTrustedNovelPage() {
-        if (webView == null || webView.getUrl() == null) return false;
-        Uri uri = Uri.parse(webView.getUrl());
+        return webView != null && isTrustedPageUrl(webView.getUrl());
+    }
+
+    private boolean isTrustedPageUrl(String url) {
+        if (url == null) return false;
+        Uri uri = Uri.parse(url);
         return "https".equals(uri.getScheme()) && "kouyibaba.github.io".equals(uri.getHost())
+                && (uri.getPort() == -1 || uri.getPort() == 443)
                 && uri.getPath() != null && uri.getPath().startsWith("/novahub-web/");
     }
 
@@ -254,6 +291,19 @@ public class MainActivity extends Activity {
 
     /** 提供给前端网页的原生控制桥（全屏、富媒体通知栏、硬件亮度、系统音量、自动更新） */
     public class NovaBridge {
+        @JavascriptInterface
+        public void saveSession(String nonce, int sequence, String payload) {
+            synchronized (sessionLock) {
+                if (sessionNonce.isEmpty() || !sessionNonce.equals(nonce) || sequence <= sessionSequence) return;
+                try {
+                    sessionStore.save(payload);
+                    sessionSequence = sequence;
+                } catch (Exception error) {
+                    Log.w("NovaSession", "Session persistence unavailable");
+                }
+            }
+        }
+
         @JavascriptInterface
         public void speakNovel(final String text, final String id, final float rate, final float pitch) {
             runOnUiThread(() -> {

@@ -10,8 +10,8 @@ android {
         applicationId "com.novahub.app"
         minSdk 24
         targetSdk 34
-        versionCode 7
-        versionName "2.4.4"
+        versionCode 8
+        versionName "2.4.5"
     }
 
     signingConfigs {
@@ -41,9 +41,14 @@ android {
     }
 }
 
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}
+
 // Never silently generate an unsigned release for distribution.
 tasks.configureEach { task ->
     if (task.name == 'preReleaseBuild') {
+        task.dependsOn 'testDebugUnitTest'
         task.doFirst {
             def cfg = android.signingConfigs.release
             if (cfg.storeFile == null || !cfg.storeFile.exists() ||

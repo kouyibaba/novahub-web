@@ -25,6 +25,7 @@ import urllib.request
 import db
 import safe_http
 import source_probe
+import catalog
 import backup_db
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -382,7 +383,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def send_head(self):
         # One allowlist shared by inherited GET and HEAD; no directory listing.
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
-        allowed = {"/", "/index.html", "/admin.html", "/app.js", "/style.css",
+        allowed = {"/", "/index.html", "/admin.html", "/app.js", "/auth_session.js", "/history_state.js", "/vod_client.js", "/style.css",
                    "/manifest.json", "/icon.svg", "/endpoint.json", "/apk-version.json",
                    "/apk/novahub-latest.apk"}
         relative = path[5:] if path.startswith("/docs/") else path
@@ -572,10 +573,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({"error": str(e)}, 500)
 
     def handle_auth_me(self):
-        user = self._current_user()
-        if not user:
-            return self.send_json({"user": None}, 200)
-        self.send_json({"user": user})
+        auth = self.headers.get("Authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        try:
+            user, token = db.refresh_user_session(token)
+        except ValueError:
+            return self.send_json({"error": "登录已失效，请重新登录", "user": None}, 401)
+        self.send_json({"user": user, "token": token})
 
     def handle_vip_redeem(self):
         if not _check_rate_limit(self._client_ip(), "redeem", 15, 60):
@@ -596,6 +600,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         user = self._current_user()
         if not user:
             return self.send_json({"error": "请先登录账号"}, 401)
+        catalog.current().migrate_private(user['id'], db.get_legacy_sources(user['id']))
         snap = db.get_user_sync(user["id"])
         self.send_json({"sync": snap})
 
@@ -605,14 +610,61 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_json({"error": "请先登录账号"}, 401)
         try:
             body = self._read_json_body(1_048_576)
-            ts = db.save_user_sync(user["id"], body.get("data") or body)
-            self.send_json({"ok": True, "updated_at": ts})
+            data = body.get("data") or body
+            catalog.current().migrate_private(user['id'], data.get('source'))
+            ts = db.save_user_sync(user["id"], data)
+            self.send_json({"ok": True, "updated_at": ts, 'sync': db.get_user_sync(user['id'])})
         except ValueError as e:
             self.send_json({"error": str(e)}, 400)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
 
     # ---------- 站长网页后台管理接口 ----------
+    def handle_catalog(self, path, qs=None):
+        is_admin = path.startswith('/api/admin/')
+        if is_admin and not self._is_admin():
+            return self.send_json({'error': '未授权'}, 401)
+        user = self._current_user()
+        owner = user['id'] if user else 0
+        if not is_admin and not _check_rate_limit(self._client_ip(), 'catalog', 50, 60):
+            return self.send_json({'error': '请求过于频繁'}, 429)
+        try:
+            cat = catalog.current()
+            if self.command == 'GET':
+                if is_admin: return self.send_json(cat.status())
+                arg = lambda key: (qs.get(key) or [''])[0]
+                if path in ('/api/vod/search', '/api/vod/home'):
+                    return self.send_json(cat.search(arg('q') if path.endswith('search') else '', owner))
+                if path == '/api/vod/detail':
+                    return self.send_json(cat.detail(arg('source'), arg('id'), owner))
+            body = self._read_json_body(32768)
+            if path == '/api/vod/migrate':
+                if not user: return self.send_json({'error': '请先登录'}, 401)
+                cat.migrate_private(owner, body.get('sources'))
+                return self.send_json({'ok': True})
+            if path == '/api/vod/feedback':
+                if not user: return self.send_json({'error': '请先登录'}, 401)
+                return self.send_json({'ok': cat.feedback(owner, body)})
+            if path == '/api/admin/subscriptions':
+                cat.add_subscription(body.get('name'), body.get('url'), body.get('enabled', True))
+            elif path == '/api/admin/sources':
+                action = body.get('action')
+                if action == 'toggle': cat.set_enabled(str(body.get('id') or ''), bool(body.get('enabled')))
+                elif action == 'rollback': cat.rollback()
+                elif action in ('check', 'refresh'):
+                    return self.send_json({'started': cat.start_job(action), **cat.status()})
+                elif action == 'add':
+                    cat.ingest(catalog.parse_subscription([body]))
+                else: raise ValueError('未知操作')
+            else: raise ValueError('未知接口')
+            return self.send_json(cat.status())
+        except catalog.BusyError as exc:
+            self.send_json({'error': str(exc)}, 429)
+        except (ValueError, TypeError) as exc:
+            self.send_json({'error': str(exc)}, 400)
+        except Exception:
+            self.send_json({'error': '片库暂不可用，请稍后重试'}, 502)
+
     def handle_admin_login(self):
         if not _check_rate_limit(self._client_ip(), "admin_auth", 12, 60):
             return self.send_json({"error": "尝试过于频繁，请 1 分钟后再试"}, 429)
@@ -709,12 +761,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_json({"error": "未授权"}, 401)
         try:
             body = self._read_json_body(16384)
-            if "ad_enabled" in body:
-                db.set_site_config("ad_enabled", "1" if body["ad_enabled"] else "0")
-            for k in ("ad_title", "ad_desc", "ad_url", "ad_btn", "sponsor_tip"):
-                if k in body and body[k] is not None:
-                    db.set_site_config(k, str(body[k])[:300])
-            self.send_json({"ok": True, "config": db.get_public_config()})
+            self.send_json({"ok": True, "config": db.configure_site(body)})
         except Exception as e:
             self.send_json({"error": str(e)}, 400)
 
@@ -1029,6 +1076,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # ---------- HTTP 路由入口 ----------
     def do_POST(self):
         p = urllib.parse.urlparse(self.path).path
+        if p in ('/api/admin/sources', '/api/admin/subscriptions', '/api/vod/migrate', '/api/vod/feedback'):
+            return self.handle_catalog(p)
         if p == "/api/auth/register":
             return self.handle_auth_register()
         if p == "/api/auth/login":
@@ -1063,7 +1112,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if p == "/api/config":
             return self.send_json(db.get_public_config())
         if p == "/api/sources/live":
-            return self.send_json(source_probe.snapshot())
+            return self.send_json({'items': [], 'managed': True})
+        if p in ('/api/admin/sources', '/api/admin/subscriptions', '/api/vod/home', '/api/vod/search', '/api/vod/detail'):
+            return self.handle_catalog(p, qs)
         if p == "/api/media/ticket":
             user = self._current_user()
             if not user:
@@ -1163,7 +1214,7 @@ class ThreadedHTTPServer(http.server.ThreadingHTTPServer):
 
 if __name__ == "__main__":
     db.init_db()
-    source_probe.start()
+    catalog.current().start()
     backup_db.start_scheduler(db.DB_PATH, os.environ.get("NOVAHUB_BACKUP_DIR", os.path.join(os.path.dirname(db.DB_PATH), "backups")))
     _start_cold_cache_cleaner(ttl_days=30)
     threading.Thread(target=ensure_novel_engine, daemon=True).start()

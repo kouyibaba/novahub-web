@@ -19,11 +19,19 @@ class SocketResponse:
     def setsockopt(self, *args):
         pass
 
+    def settimeout(self, *args):
+        pass
+
     def close(self):
         pass
 
 
 class SafeHttpTests(unittest.TestCase):
+    def test_slow_body_has_absolute_deadline(self):
+        sock = SocketResponse(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK')
+        with mock.patch.object(socket, 'getaddrinfo', return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('8.8.8.8', 80))]), mock.patch.object(socket, 'create_connection', return_value=sock), mock.patch('time.monotonic', side_effect=[0, 0, 0, 0, 5, 5, 5, 5]):
+            with self.assertRaises(TimeoutError): safe_http.request('http://public.example/', timeout=1)
+
     def test_redirect_to_private_target_is_blocked_before_connection(self):
         wire = b'HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/secret\r\nContent-Length: 0\r\n\r\n'
         def dns(host, port, **kwargs):
@@ -56,3 +64,4 @@ class SafeHttpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

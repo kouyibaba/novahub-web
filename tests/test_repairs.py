@@ -91,6 +91,17 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsInstance(json.loads(body)["items"], list)
 
+    def test_catalog_admin_is_protected_and_public_status_redacts_apis(self):
+        self.assertEqual(self.request('/api/admin/sources')[0], 401)
+        _, token = db.register_user('catalog-free', 'temporary-pass')
+        self.assertEqual(self.request('/api/admin/subscriptions', token)[0], 401)
+        status, body = self.request('/api/sources/live')
+        self.assertEqual(status, 200)
+        self.assertNotIn('api.php', body.decode())
+        status, body = self.request('/api/admin/sources', db.sign_admin_token())
+        self.assertEqual(status, 200)
+        self.assertIn('subscriptions', json.loads(body))
+
     def test_media_ticket_only_authorizes_media_and_propagates_to_segments(self):
         user, token = db.register_user("media-user", "temporary-pass")
         status, body = self.request("/api/media/ticket", token)
@@ -113,6 +124,16 @@ class GatewayTests(unittest.TestCase):
         db.admin_reset_user_password(user["id"], "new-temporary-pass")
         self.assertIsNone(db.verify_token(token))
         self.assertIsNotNone(db.verify_token(db.login_user("reset-user", "new-temporary-pass")[1]))
+
+    def test_session_endpoint_is_explicit_about_invalid_auth_and_keeps_valid_auth(self):
+        self.assertEqual(self.request('/api/auth/me')[0], 401)
+        _, token = db.register_user('upgrade-api-user', 'temporary-pass')
+        db.init_db()
+        status, body = self.request('/api/auth/me', token)
+        self.assertEqual(status, 200)
+        session = json.loads(body)
+        self.assertEqual(session['user']['username'], 'upgrade-api-user')
+        self.assertIsNotNone(db.verify_token(session['token']))
 
     def test_reset_between_login_validation_and_signing_cannot_grant_session(self):
         user, _ = db.register_user("race-user", "temporary-pass")

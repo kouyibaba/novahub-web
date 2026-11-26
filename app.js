@@ -32,7 +32,7 @@ window.fetch = (input, init = {}) => {
   return _mediaFetch(input, init);
 };
 const SYNC_KEYS = [
-  K.SOURCE, K.LIKE, K.HISTORY, "channels", "music_favs", "music_fav_groups",
+  K.LIKE, K.HISTORY, "history_deleted", "history_cleared_at", "channels", "music_favs", "music_fav_groups",
   "music_hist", "m_br", "progress", "novel_shelf", "novel_hist", "novel_prog",
   "novel_cfg", "nh_shist_vod", "nh_shist_music", "nh_shist_novel",
 ];
@@ -51,13 +51,23 @@ const set = (k, v) => {
   }
 };
 
-function ensureLocalAuth() {
-  set(K.VIP, true);
-  set(K.VIP_SUPER, true);
-  set(K.GOD_IS, true);
-  if (!get(K.GOD_NAME)) set(K.GOD_NAME, "web-local");
-}
-ensureLocalAuth();
+// Legacy local privilege flags are no longer read or written; server membership is authoritative.
+const authSession = NovaSession.create(NH, {
+  write: set,
+  request: async (token) => {
+    const response = await fetch('/api/auth/me', { headers: { Authorization: 'Bearer ' + token } });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw Object.assign(new Error(data.error || 'Session unavailable'), { status: response.status });
+    return data;
+  },
+});
+window.__nhNativeSessionReady = (saved, persist) => {
+  const restored = authSession.nativeReady(saved, persist);
+  if (restored) {
+    if (routes[currentRoute]) routes[currentRoute]();
+    refreshAuthUser();
+  }
+};
 
 /* ============ 定制 24x24 纯矢量图标引擎（零 Emoji） ============ */
 const IC = {
@@ -114,51 +124,22 @@ window._imgPh = (el, iconName, cls) => {
 };
 
 /* ============ 内置默认源（MacCMS 格式，20 个内置源） ============ */
-const DEFAULT_SOURCES = [
-  { id: "ffzy", name: "非凡资源", api: "https://api.ffzyapi.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "jszy", name: "极速资源", api: "https://jszyapi.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "gszy", name: "光速资源", api: "https://api.guangsuapi.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "hnzy", name: "红牛资源", api: "https://www.hongniuzy2.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "bdzy", name: "百度资源", api: "https://api.apibdzy.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "360zy", name: "360资源", api: "https://360zy.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "wjzy", name: "无尽资源", api: "https://api.wujinapi.me/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "mdzy", name: "魔都资源", api: "https://www.mdzyapi.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "sdzy", name: "闪电资源", api: "https://sdzyapi.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "tyys", name: "天涯资源", api: "https://tyyszy.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "zdzy", name: "最大资源", api: "https://api.zuidapi.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "modu", name: "魔都动漫", api: "https://caiji.moduapi.cc/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "huya", name: "虎牙资源", api: "https://www.huyaapi.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "maotai", name: "茅台资源", api: "https://caiji.maotaizy.cc/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "lzi", name: "量子资源", api: "https://cj.lziapi.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "bfzy", name: "暴风资源", api: "https://bfzyapi.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "wolong", name: "卧龙资源", api: "https://wolongzyw.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "yhzy", name: "樱花动漫", api: "https://m3u8.apiyhzy.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "feisu", name: "飞速资源", api: "https://www.feisuzyapi.com/api.php/provide/vod/", type: "mac", enabled: true },
-  { id: "suoni", name: "索尼资源", api: "https://suoniapi.com/api.php/provide/vod/", type: "mac", enabled: true },
-];
-const SRC_VER = "20261124-v4";
-let sources = get(K.SOURCE, null);
-if (!sources || !sources.length || get("src_ver", "") !== SRC_VER) {
-  const builtinIds = new Set(DEFAULT_SOURCES.map((d) => d.id).concat(["demo"]));
-  const custom = (sources || []).filter((s) => !builtinIds.has(s.id));
-  sources = DEFAULT_SOURCES.concat(custom);
-  set(K.SOURCE, sources);
-  set("src_ver", SRC_VER);
+// Retained only for authenticated private-source migration; browsing uses managed APIs.
+let sources = get(K.SOURCE, []);
+const vodClient = NovaVod.create(q => nhApi('/api/vod/search?q=' + encodeURIComponent(q)));
+let viewRequest = 0;
+const historyBlocked = new Set();
+function historyState() {
+  return Object.fromEntries(['history','progress','history_deleted','history_cleared_at'].map(k=>[k,get(k,k==='history'?[]:k==='history_cleared_at'?0:{})]));
 }
-const saveSources = () => set(K.SOURCE, sources);
-(async function syncLiveSources() {
-  try {
-    const r = await fetch("/api/sources/live");
-    if (!r.ok) return;
-    const d = await r.json();
-    if (Array.isArray(d.items) && d.items.length) {
-      const liveIds = new Set(d.items.map((x) => x.id));
-      const custom = (sources || []).filter((s) => !liveIds.has(s.id) && !DEFAULT_SOURCES.some((b) => b.id === s.id));
-      sources = d.items.concat(custom);
-      saveSources();
-    }
-  } catch {}
-})();
+function applyHistoryState(state) {
+  for (const k of ['history','progress','history_deleted','history_cleared_at']) set(k,state[k]);
+}
+async function migrateLegacySources(extra) {
+  if (!NH.user) return;
+  const legacy = Array.isArray(extra) ? extra : sources;
+  if (Array.isArray(legacy) && legacy.length) await nhApi('/api/vod/migrate','POST',{sources:legacy.slice(0,100)});
+}
 
 /* ============ 工具 ============ */
 const $ = (s) => document.querySelector(s);
@@ -271,6 +252,7 @@ function closeReader() {
   syncModeFab();
 }
 function goBack(fromPop = false) {
+  if (typeof vodClient !== "undefined") { vodClient.cancel(); viewRequest++; }
   if (!$("#tocMask").classList.contains("hidden")) { $("#tocMask").classList.add("hidden"); return; }
   if (!$("#readerLayer").classList.contains("hidden")) { closeReader(); return; }
   if (!$("#playerLayer").classList.contains("hidden")) { closePlayer(fromPop); return; }
@@ -395,6 +377,7 @@ function switchMode(mode, targetRoute) {
 let _bootDone = false;
 function go(route) {
   const applyRoute = () => {
+    vodClient.cancel(); viewRequest++;
     currentRoute = route;
     viewStack.length = 0;
     document.body.classList.remove("detail-view");
@@ -746,7 +729,7 @@ if (!isProUser() && !["128", "192"].includes(mBr)) mBr = "192";
 const brSelectHtml = () => `<select id="mBrSel" class="ui-select">${M_BR_OPTS.map((o) => `<option value="${o.v}" ${mBr === o.v ? "selected" : ""}>${o.label}</option>`).join("")}</select>`;
 async function changeBr(newBr) {
   if ((newBr === "320" || newBr === "999") && !NH.user?.is_pro) {
-    toast("极高 320k / 无损 FLAC 为 Pro 会员专属权益，请兑换卡密解锁");
+    toast("320k / FLAC 音质需 Pro 权益，能否提供以曲源实际支持为准");
     return;
   }
   mBr = newBr;
@@ -1676,44 +1659,41 @@ function renderMusicFav() {
 
 /* ============ 影视首页 ============ */
 function renderHome() {
-  const likes = get(K.LIKE, []);
-  const history = get(K.HISTORY, []).filter((x) => x.srcId && !String(x.id).startsWith("ep-"));
-  const enabled = sources.filter((s) => s.enabled);
-  $("#view").innerHTML = `
-    ${history.length ? `<div class="section-title">${ico("clock")} 继续观看</div><div class="grid" id="histGrid"></div>` : ""}
-    ${renderAdSlotHtml()}
-    ${likes.length ? `<div class="section-title">${ico("heart")} 我的片单</div><div class="grid" id="likeGrid"></div>` : ""}
-    <div class="section-title" id="srcToggle" style="justify-content:space-between;cursor:pointer;padding:6px 2px">
-      <span style="display:inline-flex;align-items:center;gap:6px">${ico("database")} 影视片库 (${enabled.length})</span>
-      <span id="srcArrow" style="display:inline-flex;align-items:center;gap:3px;font-size:12px">${ico("chevronRight")} 展开</span>
-    </div>
-    <div id="srcWrap" style="display:none">
-      <div id="srcList"></div>
-      <button class="btn ghost block" id="addSrc">${ico("plus")} 手动添加片库源</button>
-      <div class="hint">支持标准 JSON 影视接口。批量管理请前往「我的 → 源管理」。</div>
-    </div>
-  `;
-  if (history.length) paintGrid($("#histGrid"), history.slice(0, 6).map((x) => {
-    const p = getProgress(x.srcId + ":" + x.id);
-    return { ...x, _fromHistory: true, remark: p ? `第${p.idx + 1}集 ${fmt(p.time)}` : x.remark };
-  }));
-  if (likes.length) paintGrid($("#likeGrid"), likes.slice(0, 12));
-  const list = $("#srcList");
-  list.innerHTML = enabled.length ? "" : `<div class="empty">暂无启用的片库源<br>点击下方添加，或前往「我的 → 源管理」批量导入</div>`;
-  enabled.forEach((s) => {
-    const row = document.createElement("div");
-    row.className = "row";
-    row.innerHTML = `<span class="r-ico">${ico("database")}</span><div class="r-main"><div class="r-title">${esc(s.name)}</div><div class="r-sub">${esc(s.api)}</div></div><span class="r-arrow">${ico("chevronRight")}</span>`;
-    row.onclick = () => openSource(s);
-    list.appendChild(row);
+  const mine=++viewRequest;
+  vodClient.cancel();
+  const likes=get(K.LIKE,[]);
+  const rows=NovaHistory.merge({},historyState()).history.filter(x=>x.srcId && !String(x.id).startsWith('ep-'));
+  $('#view').innerHTML=`
+    ${rows.length?`<div class="section-title" style="justify-content:space-between"><span>${ico('clock')} 继续观看</span><div><button class="btn ghost" id="manageHistory">管理</button><button class="btn ghost" id="clearHistory">清空</button></div></div><div class="grid" id="histGrid"></div>`:''}
+    ${renderAdSlotHtml('home')}
+    ${likes.length?`<div class="section-title">${ico('heart')} 我的片单</div><div class="grid" id="likeGrid"></div>`:''}
+    <div class="section-title">${ico('film')} 最近更新</div><div class="grid" id="homeGrid">${renderSkeletonHtml('grid',6)}</div>`;
+  if(rows.length) {
+    paintGrid($('#histGrid'),rows.slice(0,12).map(x=>({...x,_fromHistory:true,remark:getProgress(NovaHistory.key(x))?`第${getProgress(NovaHistory.key(x)).idx+1}集 ${fmt(getProgress(NovaHistory.key(x)).time)}`:x.remark})));
+    $('#manageHistory').onclick=()=>renderHistoryManager();
+    $('#clearHistory').onclick=async()=>{if(await modal('清空观看历史','将删除全部观看历史和续播进度，收藏会保留。')){if(P.vodKey)historyBlocked.add(P.vodKey);applyHistoryState(NovaHistory.clear(historyState(),Date.now()));renderHome();}};
+  }
+  if(likes.length)paintGrid($('#likeGrid'),likes.slice(0,12));
+  bindAdSlots($('#view'));
+  nhApi('/api/vod/home').then(d=>{
+    if(mine!==viewRequest || !$('#homeGrid'))return;
+    if(d.items?.length)paintGrid($('#homeGrid'),d.items.slice(0,24));
+    else $('#homeGrid').innerHTML='<div class="empty">片库正在更新，可使用顶部搜索</div>';
+  }).catch(()=>{if(mine===viewRequest && $('#homeGrid'))$('#homeGrid').innerHTML='<div class="empty">片库暂时无法连接，请稍后重试</div>';});
+}
+function renderHistoryManager(_fromBack=false) {
+  if(!_fromBack)pushView(()=>renderHistoryManager(true));
+  ++viewRequest;vodClient.cancel();
+  const rows=NovaHistory.merge({},historyState()).history;
+  $('#view').innerHTML=backBar('观看历史')+'<div class="group" id="historyRows"></div>';
+  const host=$('#historyRows');
+  if(!rows.length)host.innerHTML='<div class="empty">暂无观看记录</div>';
+  rows.forEach(item=>{
+    const el=document.createElement('div');el.className='row';
+    el.innerHTML=`<div class="r-main"><div class="r-title">${esc(item.name)}</div><div class="r-sub">${esc(item.remark||'')}</div></div><button class="btn ghost danger" aria-label="删除观看记录">删除</button>`;
+    el.querySelector('button').onclick=()=>{const k=NovaHistory.key(item);historyBlocked.add(k);applyHistoryState(NovaHistory.remove(historyState(),k,Date.now()));renderHistoryManager(true);};
+    host.appendChild(el);
   });
-  $("#srcToggle").onclick = () => {
-    const w = $("#srcWrap"), open = w.style.display === "none";
-    w.style.display = open ? "block" : "none";
-    $("#srcArrow").innerHTML = `${ico(open ? "chevronDown" : "chevronRight")} ${open ? "收起" : "展开"}`;
-  };
-  $("#addSrc").onclick = () => go("me") || setTimeout(() => $("#srcManager")?.scrollIntoView(), 50);
-  bindAdSlots($("#view"));
 }
 
 function paintGrid(el, items) {
@@ -1727,26 +1707,6 @@ function paintGrid(el, items) {
     c.onclick = () => openDetail(items[i]);
   });
   applyStagger(el);
-}
-
-/* 打开数据源：拉首页列表（MacCMS ac=detail） */
-async function openSource(src, _fromBack) {
-  if (!_fromBack) pushView(() => openSource(src, true));
-  $("#view").innerHTML = `${backBar(src.name)}<div class="empty">正在读取「${esc(src.name)}」片库…</div>`;
-  try {
-    const url = buildVodUrl(src.api, "ac=detail&pg=1");
-    const j = await fetchJson(url);
-    const list = (j.list || []).map((v) => ({
-      id: String(v.vod_id), name: v.vod_name, pic: v.vod_pic, remark: v.vod_remark || v.vod_year || "",
-      srcId: src.id,
-    }));
-    $("#view").innerHTML = `
-      ${backBar(`${src.name} · 最新更新 (${list.length})`)}
-      <div class="grid" id="srcGrid"></div>`;
-    paintGrid($("#srcGrid"), list);
-  } catch (e) {
-    $("#view").innerHTML = `${backBar(src.name)}<div class="empty">数据源读取失败：${esc(e.message)}</div>`;
-  }
 }
 
 /**
@@ -1802,86 +1762,48 @@ function renderPagedEpisodes(container, eps, activeIdx, onSelect, stateObj, show
 
 /* 详情 + 播放 */
 async function openDetail(v, _fromBack) {
-  if (!_fromBack) pushView(() => openDetail(v, true));
-  const src = sources.find((s) => s.id === v.srcId) || sources.find((s) => s.enabled);
-  if (!src || !v.id) { toast("缺少源信息"); return; }
-  $("#view").innerHTML = `${backBar(v.name)}<div class="empty">正在载入影片详情…</div>`;
+  if(!_fromBack)pushView(()=>openDetail(v,true));
+  vodClient.cancel();const mine=++viewRequest;
+  if(!v.srcId||!v.id)return toast('该记录缺少线路信息，请重新搜索');
+  $('#view').innerHTML=backBar(v.name)+'<div class="empty">正在载入影片详情…</div>';
   try {
-    const url = buildVodUrl(src.api, `ac=detail&ids=${encodeURIComponent(v.id)}`);
-    const j = await fetchJson(url);
-    const d = (j.list || [])[0] || {};
-    const groups = (d.vod_play_url || "").split("$$$").map((g) =>
-      g.split("#").filter(Boolean).map((ep) => {
-        const i = ep.indexOf("$");
-        return i > -1 ? { name: ep.slice(0, i), url: ep.slice(i + 1).trim() } : { name: "正片", url: ep.trim() };
-      })
-    ).filter((g) => g.length);
-    const isDirect = (u) => /\.(m3u8|mp4|flv|mkv|webm)(\?|$)/i.test(u);
-    groups.sort((a, b) => (isDirect(b[0]?.url) ? 1 : 0) - (isDirect(a[0]?.url) ? 1 : 0));
-    const eps = groups[0] || [];
-    const liked = get(K.LIKE, []).some((x) => x.id === v.id);
-    $("#view").innerHTML = `
-      ${backBar(d.vod_name || v.name)}
-      <div class="form">
-        <div style="display:flex;gap:12px">
-          ${d.vod_pic ? `<img src="${esc(d.vod_pic)}" style="width:94px;aspect-ratio:3/4.2;object-fit:cover;border-radius:8px;border:1px solid var(--line)" onerror="this.style.display='none'">` : ""}
-          <div style="flex:1;min-width:0">
-            <div style="font-size:16px;font-weight:600">${esc(d.vod_name || v.name)}</div>
-            <div class="hint">${esc([d.vod_year, d.vod_area, d.vod_lang].filter(Boolean).join(" · "))}<br>${esc(d.vod_actor || "").slice(0, 60)}</div>
-          </div>
-        </div>
-        <div class="hint" style="margin-top:10px">${esc(d.vod_content || "").replace(/<[^>]+>/g, "").slice(0, 200) || "暂无剧情简介"}</div>
-        <div style="display:flex;gap:8px;margin-top:12px">
-          <button class="btn primary" id="btnPlay0">${ico("play")} 立即播放</button>
-          <button class="btn ghost" id="btnLike">${ico(liked ? "heartFill" : "heart")} ${liked ? "已收藏" : "收藏"}</button>
-        </div>
-      </div>
-      <div id="eps" style="margin-top:12px"></div>`;
-    const vodKey = src.id + ":" + v.id;
-    const saved = getProgress(vodKey);
-    const activeEpIdx = saved && saved.idx < eps.length ? saved.idx : -1;
-    renderPagedEpisodes($("#eps"), eps, activeEpIdx, (i) => play(v.name + " · " + eps[i].name, eps[i].url, eps, i, vodKey, 0), { page: null, reversed: false }, true);
-    const playSaved = () => {
-      if (!eps.length) return toast("暂无可用播放源");
-      const idx = saved && saved.idx < eps.length ? saved.idx : 0;
-      play(v.name + " · " + eps[idx].name, eps[idx].url, eps, idx, vodKey, saved ? saved.time : 0);
+    await migrateLegacySources();
+    const d=await nhApi('/api/vod/detail?source='+encodeURIComponent(v.srcId)+'&id='+encodeURIComponent(v.id));
+    if(mine!==viewRequest)return;
+    const item={...v,...d.item};
+    // Keep the legacy key for existing bookmarks/progress even after a private alias resolves.
+    const vodKey=NovaHistory.key(v);
+    const eps=(d.episodes||[]).map(e=>({name:e.n,url:e.url}));
+    const liked=get(K.LIKE,[]).some(x=>NovaHistory.key(x)===vodKey);
+    $('#view').innerHTML=`${backBar(item.name)}<div class="form"><div style="display:flex;gap:12px">${item.pic?`<img src="${esc(item.pic)}" style="width:94px;aspect-ratio:3/4.2;object-fit:cover;border-radius:8px" onerror="this.style.display='none'">`:''}<div><div style="font-size:16px;font-weight:600">${esc(item.name)}</div><div class="hint">${esc([item.year,item.lang,item.typeName].filter(Boolean).join(' · '))}</div></div></div><div class="hint" style="margin-top:10px">${esc(d.description||'暂无剧情简介')}</div><div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary" id="btnPlay0">${ico('play')} 立即播放</button><button class="btn ghost" id="btnLike">${ico(liked?'heartFill':'heart')} ${liked?'已收藏':'收藏'}</button></div></div><div id="eps" style="margin-top:12px"></div>`;
+    const saved=getProgress(vodKey);
+    const start=(idx,time=0)=>{
+      if(!eps[idx])return toast('暂无可用播放线路');
+      const playback={item,routes:v.routes||[{srcId:item.srcId,id:item.id}],ticket:d.ticket,attempts:0,tried:new Set([item.srcId+':'+item.id]),generation:0};
+      play(item.name+' · '+eps[idx].name,eps[idx].url,eps,idx,vodKey,time);
+      if(NH.user){P.managed=playback;historyBlocked.delete(vodKey);addHistory({...v,name:item.name,pic:item.pic,remark:item.remark});P.historyVersion={deleted_at:get('history_deleted',{})[vodKey]||0,cleared_at:get('history_cleared_at',0)};}
     };
-    if (v._fromHistory && eps.length) playSaved();
-    $("#btnPlay0").onclick = playSaved;
-    $("#btnLike").onclick = () => {
-      let likes = get(K.LIKE, []);
-      const idx = likes.findIndex((x) => x.id === v.id);
-      if (idx === -1) {
-        likes.unshift({ id: v.id, name: v.name, pic: v.pic, srcId: v.srcId, remark: d.vod_remark || "" });
-        set(K.LIKE, likes);
-        $("#btnLike").innerHTML = `${ico("heartFill")} 已收藏`;
-        toast("已加入片单");
-      } else {
-        likes.splice(idx, 1);
-        set(K.LIKE, likes);
-        $("#btnLike").innerHTML = `${ico("heart")} 收藏`;
-        toast("已移出片单");
-      }
+    renderPagedEpisodes($('#eps'),eps,saved?.idx??-1,i=>start(i),{page:null,reversed:false},true);
+    $('#btnPlay0').onclick=()=>start(saved&&saved.idx<eps.length?saved.idx:0,saved?.time||0);
+    $('#btnLike').onclick=()=>{
+      const list=get(K.LIKE,[]);const i=list.findIndex(x=>NovaHistory.key(x)===vodKey);
+      if(i<0)list.unshift({...v,name:item.name,pic:item.pic,remark:item.remark});else list.splice(i,1);
+      set(K.LIKE,list);$('#btnLike').innerHTML=ico(i<0?'heartFill':'heart')+(i<0?' 已收藏':' 收藏');
     };
-    addHistory({ id: v.id, name: v.name, pic: v.pic, srcId: v.srcId, remark: d.vod_remark || "" });
-  } catch (e) {
-    $("#view").innerHTML = `${backBar(v.name)}<div class="empty">详情载入失败：${esc(e.message)}</div>`;
-  }
+    if(v._fromHistory&&eps.length)$('#btnPlay0').click();
+  } catch(e) {if(mine===viewRequest)$('#view').innerHTML=backBar(v.name)+`<div class="empty">${esc(e.message)}</div>`;}
 }
-
 function addHistory(item) {
-  let h = get(K.HISTORY, []).filter((x) => x.id !== item.id);
-  h.unshift(item); set(K.HISTORY, h.slice(0, 30));
+  const state=historyState();const k=NovaHistory.key(item);
+  const row={...item,at:Date.now(),deleted_at:state.history_deleted[k]||0,cleared_at:state.history_cleared_at||0};
+  state.history=[row,...state.history.filter(x=>NovaHistory.key(x)!==k)].slice(0,100);
+  applyHistoryState(NovaHistory.merge({},state));
 }
-function saveProgress(vodKey, idx, time) {
-  if (!vodKey || !time || time < 1) return;
-  const p = get("progress", {});
-  p[vodKey] = { idx, time: Math.floor(time) };
-  set("progress", p);
+function saveProgress(vodKey,idx,time) {
+  if(!vodKey||!time||time<1||historyBlocked.has(vodKey))return;
+  const p=get('progress',{});p[vodKey]={idx,time:Math.floor(time),at:Date.now(),...(P.vodKey===vodKey?P.historyVersion||{}:{})};set('progress',p);
 }
-function getProgress(vodKey) {
-  return vodKey ? (get("progress", {})[vodKey] || null) : null;
-}
+function getProgress(vodKey) { return vodKey?(get('progress',{})[vodKey]||null):null; }
 
 /* ============ 搜索（MacCMS ac=detail，多源并发 + 缓存 + 分类筛选） ============ */
 const _searchCache = new Map();
@@ -1924,48 +1846,22 @@ function renderSearchResults(q) {
   });
 }
 
-async function doSearch(q, _fromBack) {
-  if (!_fromBack) pushView(() => doSearch(q, true));
-  if (_fromBack && _searchCache.has(q)) {
-    setSearchLoading(false);
-    renderSearchResults(q);
-    return;
-  }
-  setSearchLoading(true);
-  $("#view").innerHTML = `${backBar("搜索：" + q)}${renderSkeletonHtml("grid", 6)}`;
-  const results = [];
+async function doSearch(q,_fromBack) {
+  if(!_fromBack)pushView(()=>doSearch(q,true));
+  const mine=++viewRequest;
+  if(_fromBack&&_searchCache.has(q)&&Date.now()-_searchCache.get(q).ts<120000){vodClient.cancel();setSearchLoading(false);renderSearchResults(q);return;}
+  setSearchLoading(true);$('#view').innerHTML=backBar('搜索：'+q)+renderSkeletonHtml('grid',6);
   try {
-    await Promise.allSettled(
-      sources.filter((x) => x.enabled).map(async (s) => {
-        const url = buildVodUrl(s.api, `ac=detail&wd=${encodeURIComponent(q)}&pg=1`);
-        const j = await fetchJson(url, 12000);
-        const hits = (j.list || []).filter((v) => {
-          const name = (v.vod_name || "").toLowerCase();
-          const kw = q.toLowerCase();
-          return name.includes(kw) || kw.split(/\s+/).some((w) => w.length > 1 && name.includes(w));
-        });
-        sortByExactMatch(hits, q, (v) => v.vod_name);
-        hits.slice(0, 12).forEach((v) => results.push({
-          id: String(v.vod_id),
-          name: v.vod_name,
-          pic: v.vod_pic,
-          remark: v.vod_remark || "",
-          typeName: v.type_name || v.vod_class || "",
-          srcId: s.id,
-          from: s.name,
-        }));
-      })
-    );
-  } finally {
-    setSearchLoading(false);
-  }
-  sortByExactMatch(results, q, (x) => x.name);
-  if (_searchCache.size >= 20) {
-    const firstKey = _searchCache.keys().next().value;
-    if (firstKey !== undefined) _searchCache.delete(firstKey);
-  }
-  _searchCache.set(q, { ts: Date.now(), results, activeCat: "全部" });
-  renderSearchResults(q);
+    await migrateLegacySources();
+    if(mine!==viewRequest)return;
+    await vodClient.search(q,d=>{
+      if(mine!==viewRequest)return;
+      const results=d.items||[];sortByExactMatch(results,q,x=>x.name);
+      if(_searchCache.size>=20)_searchCache.delete(_searchCache.keys().next().value);
+      _searchCache.set(q,{ts:Date.now(),results,activeCat:'全部'});renderSearchResults(q);
+    });
+  }catch(e){if(mine===viewRequest)$('#view').innerHTML=backBar('搜索：'+q)+`<div class="empty">${esc(e.message)}</div>`;}
+  finally{if(mine===viewRequest)setSearchLoading(false);}
 }
 
 /* ============ 视频播放器 ============ */
@@ -1979,6 +1875,7 @@ function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0, isLive =
   stopMusicForVideo();
   const layer = $("#playerLayer");
   const wasHidden = layer.classList.contains("hidden");
+  P.managed = null;
   P.title = title; P.eps = eps; P.idx = idx; P.vodKey = vodKey; P.isLive = !!isLive;
   P._epState = { page: null, reversed: false };
   $("#playerTitle").textContent = title;
@@ -1999,12 +1896,39 @@ function renderEpisodes() {
   const el = $("#epList");
   if (!P.eps || P.eps.length <= 1) { if (el) el.innerHTML = ""; return; }
   renderPagedEpisodes(el, P.eps, P.idx, (i) => {
+    if(P.managed)P.managed.generation++;
     P.idx = i;
     renderEpisodes();
     mountSource(P.eps[i].url);
     $("#playerTitle").textContent = P.title.replace(/ · .*$/, "") + " · " + P.eps[i].name;
   }, P._epState || (P._epState = { page: null, reversed: false }), false);
 }
+async function retryManagedPlayback(mountToken) {
+  const ctx=P.managed;
+  if(!ctx||P.isLive||ctx.retrying||mountToken!==P.mountToken||ctx.attempts>=2)return false;
+  ctx.retrying=true;const generation=ctx.generation;
+  const label=P.eps[P.idx]?.name;const time=$('#video').currentTime||getProgress(P.vodKey)?.time||0;
+  try {
+    if(ctx.ticket){nhApi('/api/vod/feedback','POST',{ticket:ctx.ticket,ok:false}).catch(()=>{});ctx.ticket='';}
+    const result=await nhApi('/api/vod/search?q='+encodeURIComponent(ctx.item.name));
+    const candidates=[];
+    for(const item of result.items||[])if(NovaVod.compatible(ctx.item,item))candidates.push(...(item.routes||[{srcId:item.srcId,id:item.id}]));
+    for(const route of candidates){
+      if(ctx.attempts>=2)break;
+      const key=route.srcId+':'+route.id;if(ctx.tried.has(key))continue;
+      ctx.tried.add(key);ctx.attempts++;
+      const d=await nhApi('/api/vod/detail?source='+encodeURIComponent(route.srcId)+'&id='+encodeURIComponent(route.id)).catch(()=>null);
+      if(P.managed!==ctx||generation!==ctx.generation||mountToken!==P.mountToken||$('#playerLayer').classList.contains('hidden'))return false;
+      if(!d||!NovaVod.compatible(ctx.item,d.item))continue;
+      const eps=d.episodes.map(e=>({name:e.n,url:e.url}));const index=NovaVod.episodeIndex(eps,label);
+      if(index<0)continue;
+      P.eps=eps;P.idx=index;ctx.ticket=d.ticket;renderEpisodes();
+      mountSource(eps[index].url,time);toast('已切换备用线路并保留进度');return true;
+    }
+    tip('暂无同一版本、同一集数的可用备用线路，请稍后重试');return false;
+  }catch{return false;}finally{ctx.retrying=false;}
+}
+
 function destroyPlayers() {
   P.mountToken = (P.mountToken || 0) + 1;
   if (P.hls) { P.hls.destroy(); P.hls = null; }
@@ -2084,7 +2008,8 @@ async function mountSource(url, seekTime = 0, _proxyTried = false) {
         v.play().catch(() => {});
         tip("");
       } else {
-        tip("视频流异常：" + d.type + (d.details ? " / " + d.details : ""));
+        if(!P.managed)tip("视频流异常：" + d.type);
+        else retryManagedPlayback(mountToken);
       }
     });
     P.hls.on(Hls.Events.LEVEL_SWITCHED, (_e, d) => { if (P.hls.autoLevelEnabled) $("#qualitySel").value = String(d.level); });
@@ -2099,7 +2024,9 @@ async function mountSource(url, seekTime = 0, _proxyTried = false) {
     v.src = url; v.play().catch(() => {});
     if (isMp4) tip("");
   }
-  v.onerror = () => {
+  v.onerror = async () => {
+    if(mountToken!==P.mountToken)return;
+    if(P.managed && await retryManagedPlayback(mountToken))return;
     const kw = (P.title || "").split(" · ")[0].trim();
     tip(
       `<span>当前线路无法播放</span>` +
@@ -2109,12 +2036,14 @@ async function mountSource(url, seekTime = 0, _proxyTried = false) {
     const btn = $("#switchSrcBtn");
     if (btn) btn.onclick = () => { closePlayer(); doSearch(kw); };
   };
+  v.onplaying=()=>{if(mountToken===P.mountToken&&P.managed?.ticket){nhApi("/api/vod/feedback","POST",{ticket:P.managed.ticket,ok:true}).catch(()=>{});P.managed.ticket="";}};
   v.onloadedmetadata = () => {
     const rate = parseFloat($("#rateSel")?.value || "1") || 1;
     v.playbackRate = rate;
   };
   v.onended = () => {
     if (P.eps && P.idx + 1 < P.eps.length) {
+      if(P.managed)P.managed.generation++;
       P.idx += 1;
       renderEpisodes();
       const nextEp = P.eps[P.idx];
@@ -2601,7 +2530,7 @@ function renderWebdav() {
   const file = "zyplayer-backup.json";
   const payload = () => JSON.stringify({
     version: 1, time: Date.now(),
-    data: Object.fromEntries([K.SOURCE, K.LIKE, K.HISTORY, K.VIP, K.GOD_IS, K.GOD_NAME, "channels", "music_favs", "music_hist", "progress", "novel_shelf", "novel_hist", "novel_prog", "novel_cfg"].map((k) => [k, get(k, null)])),
+    data: Object.fromEntries([K.SOURCE, ...SYNC_KEYS].map((k) => [k, get(k, null)])),
   }, null, 2);
   $("#davExport").onclick = async () => {
     const a = auth(), c = get(K.WEBDAV, {});
@@ -2636,15 +2565,17 @@ function renderWebdav() {
   };
 }
 function restore(obj) {
-  const d = obj.data || obj;
+  const d=obj.data||obj;
+  if(!d||typeof d!=='object'||Array.isArray(d))throw new Error('备份格式无效');
+  const merged=NovaHistory.merge(historyState(),d);
   try {
-    _isRestoring = true;
-    Object.entries(d).forEach(([k, v]) => { if (v !== null && v !== undefined) set(k, v); });
-    if (d.music_fav && !d.music_favs) set("music_favs", d.music_fav);
-    ensureLocalAuth();
-  } finally {
-    _isRestoring = false;
-  }
+    _isRestoring=true;
+    for(const k of SYNC_KEYS)if(d[k]!==undefined&&d[k]!==null&&!['history','progress','history_deleted','history_cleared_at'].includes(k))set(k,d[k]);
+    applyHistoryState(merged);
+    if(d.music_fav&&!d.music_favs)set('music_favs',d.music_fav);
+    if(Array.isArray(d.source)){sources=d.source;set(K.SOURCE,sources);migrateLegacySources().catch(()=>{});}
+    if(typeof P!=='undefined'&&P.vodKey){const threshold=Math.max(merged.history_cleared_at||0,merged.history_deleted[P.vodKey]||0);if(threshold&&!merged.history.some(x=>NovaHistory.key(x)===P.vodKey))historyBlocked.add(P.vodKey);}
+  }finally{_isRestoring=false;}
 }
 
 /* ============ 我的（NovaHub Pro 会员中心 + 源管理 + 数据设置） ============ */
@@ -2653,7 +2584,7 @@ function renderMe() {
   const pro = isProUser();
   const expText = pro
     ? `Pro 会员生效中 · 剩余 ${u.remain_days} 天`
-    : (u ? "当前为标准免费版 · 开通 Pro 享免广告与云同步" : "登录账号开启云端多端同步与 Pro 会员权益");
+    : (u ? "当前为标准免费版 · 开通 Pro 享站内免广告与高码率音乐" : "登录账号开启云端多端同步与 Pro 会员权益");
 
   $("#view").innerHTML = `
     <div class="vip-card">
@@ -2663,7 +2594,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.4</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.5</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -2671,17 +2602,17 @@ function renderMe() {
       <div class="vip-compare">
         <div class="vc-col">
           <div class="vc-head">标准免费版</div>
-          <div>• 基础影视与书城</div>
+          <div>• 影视、阅读与系统听书</div>
           <div>• 标准 128k / 192k</div>
-          <div>• 包含原生赞助位</div>
+          <div>• 可能展示站内赞助位</div>
           <div>• 账号云同步收藏</div>
         </div>
         <div class="vc-col pro">
           <div class="vc-head">${ico("crown")} Pro 尊享版</div>
-          <div>• 全局纯净零广告</div>
-          <div>• 320k / FLAC 无损</div>
-          <div>• 全站极速源与听书</div>
-          <div>• 多端云同步专属徽章</div>
+          <div>• 免站内广告</div>
+          <div>• 320k / FLAC（以曲源为准）</div>
+          <div>• 会员专属标识</div>
+          <div>• 普通版云同步权益保留</div>
         </div>
       </div>
       <div class="vip-actions">
@@ -2702,16 +2633,6 @@ function renderMe() {
       <span id="nodeLatency">正在探测节点…</span>
       <span class="node-url" id="nodeUrlText"></span>
       <button class="node-refresh" id="btnNodeRefresh" type="button">刷新节点</button>
-    </div>
-
-    <div class="section-title" id="srcManager">${ico("database")} 影视源管理 (${sources.length})</div>
-    <div class="group" id="srcRows"></div>
-    <button class="btn ghost block" id="addSrc2">${ico("plus")} 添加单个片库源</button>
-    <div class="form">
-      <label>批量导入 JSON 片库配置（支持数组 [{name, api}]）</label>
-      <textarea id="batchSrc" placeholder='[{"name":"示例片库","api":"https://api.xxx.com/api.php/provide/vod/"}]'></textarea>
-      <button class="btn primary block" id="doBatch" style="margin:10px 0 4px">执行导入</button>
-      <div class="hint">支持标准 JSON 影视接口批量导入与管理。</div>
     </div>
 
     <div class="section-title">数据维护</div>
@@ -2742,8 +2663,7 @@ function renderMe() {
     $("#btnCloudPush").onclick = () => cloudSyncPush(false);
     $("#btnCloudPull").onclick = () => cloudSyncPull(false);
     $("#btnLogout").onclick = () => {
-      NH.token = ""; NH.user = null;
-      set("nh_token", ""); set("nh_user", null);
+      authSession.clear();
       renderMe(); toast("已退出登录");
     };
   }
@@ -2754,7 +2674,7 @@ function renderMe() {
     dot.className = "node-dot";
     lat.textContent = "测速中…";
     const base = window.__NH_API_BASE__ || location.origin;
-    if (urlEl) urlEl.textContent = base.replace(/^https?:\/\//, "");
+    if (urlEl) urlEl.textContent = "";
     const t0 = performance.now();
     try {
       const r = await fetch("/api/config?ping=" + Date.now());
@@ -2779,51 +2699,15 @@ function renderMe() {
     }
   };
 
-  const rows = $("#srcRows");
-  rows.innerHTML = sources.length ? "" : `<div class="row" style="cursor:default"><div class="r-main"><div class="r-sub">暂无数据源</div></div></div>`;
-  sources.forEach((s, i) => {
-    const row = document.createElement("div");
-    row.className = "row";
-    row.innerHTML = `<div class="r-main"><div class="r-title">${esc(s.name)} ${s.enabled ? '<span class="badge">启用</span>' : '<span class="badge gray">停用</span>'}</div><div class="r-sub">${esc(s.api)}</div></div>
-      <button class="btn ghost" data-a="toggle" style="padding:5px 10px;font-size:12px">${s.enabled ? "停用" : "启用"}</button>
-      <button class="btn ghost" data-a="del" style="padding:5px 9px;font-size:13px;color:var(--crimson)" aria-label="删除">${ico("trash")}</button>`;
-    row.querySelector('[data-a="toggle"]').onclick = (e) => { e.stopPropagation(); s.enabled = !s.enabled; saveSources(); renderMe(); };
-    row.querySelector('[data-a="del"]').onclick = async (e) => {
-      e.stopPropagation();
-      if (await modal("删除数据源", `确定移除「${esc(s.name)}」？`)) { sources.splice(i, 1); saveSources(); renderMe(); }
-    };
-    rows.appendChild(row);
-  });
-
-  $("#addSrc2").onclick = async () => {
-    if (!(await modal("添加数据源", `<div class="form" style="margin:0;border:none;padding:0"><label>源名称</label><input id="sName" placeholder="自定义名称">
-      <label>MacCMS 接口地址</label><input id="sApi" placeholder="https://api.xxx.com/api.php/provide/vod/"></div>`))) return;
-    const n = $("#sName")?.value.trim(), a = $("#sApi")?.value.trim();
-    if (n && a) { sources.push({ id: "s" + Date.now(), name: n, api: a, type: "mac", enabled: true }); saveSources(); renderMe(); toast("数据源已添加"); }
-    else toast("请填写完整名称与地址");
-  };
-  $("#doBatch").onclick = () => {
-    try {
-      const arr = JSON.parse($("#batchSrc").value);
-      const list = Array.isArray(arr) ? arr : (arr.source || arr.sites || []);
-      let n = 0;
-      list.forEach((s) => {
-        const name = s.name || s.n, api = s.api || s.url || s.host;
-        if (name && api) { sources.push({ id: "s" + Date.now() + n, name, api, type: "mac", enabled: s.enabled !== false }); n++; }
-      });
-      if (!n) return toast("未识别到有效源字段");
-      saveSources(); renderMe(); toast(`成功导入 ${n} 个数据源`);
-    } catch { toast("JSON 格式解析失败"); }
-  };
   $("#goWebdav").onclick = () => go("webdav");
   $("#clearAll").onclick = async () => {
-    if (await modal("清空本机数据", "将重置所有自定义源、观看进度、影视片单、音乐收藏与小说书架，确定继续？")) {
+    if (await modal("清空本机数据", "将重置本机观看进度、影视片单、音乐收藏与小说书架，确定继续？")) {
       [K.SOURCE, K.LIKE, K.HISTORY, K.WEBDAV, "channels", "music_favs", "music_fav_groups", "music_hist", "progress", "novel_shelf", "novel_hist", "novel_prog", "novel_cfg"].forEach((k) => {
         delete _mem[k];
         localStorage.removeItem(k);
       });
-      sources = DEFAULT_SOURCES.slice(); channels = DEFAULT_CHANNELS.slice();
-      ensureLocalAuth(); renderMe(); toast("本机数据已重置");
+      sources = []; channels = DEFAULT_CHANNELS.slice();
+      renderMe(); toast("本机数据已重置");
     }
   };
 }
@@ -2990,7 +2874,7 @@ async function searchNovel(q) {
 function renderNovelStore() {
   $("#view").innerHTML = `
     <div class="m-chips">${NOVEL_CATS.map((c) => `<button class="m-chip ${!novelIsSearch && curNovelCat === c.id ? "active" : ""}" data-cat="${esc(c.id)}">${esc(c.name)}</button>`).join("")}</div>
-    ${renderAdSlotHtml()}
+    ${renderAdSlotHtml('novel')}
     <div class="section-title" style="justify-content:space-between">
       <span>${ico("book")} ${novelIsSearch ? `「${esc(novelSearchKw)}」搜索结果 (${novelStoreList.length})` : `${esc(curNovelCat)} · 精选推荐 (${novelStoreList.length})`}</span>
     </div>
@@ -3561,39 +3445,34 @@ async function loadSiteConfig() {
     NH.cfg = cfg;
     NH.offline = false;
     set("nh_site_cfg", cfg);
-    if (currentRoute === "home" || currentRoute === "n_store") routes[currentRoute]();
+    if (!viewStack.length && (currentRoute === "home" || currentRoute === "n_store")) routes[currentRoute]();
   } catch {}
 }
 
 async function refreshAuthUser() {
   if (!NH.token) return;
-  try {
-    const d = await nhApi("/api/auth/me");
-    NH.offline = false;
-    NH.user = d.user || null;
-    if (!NH.user) { NH.token = ""; set("nh_token", ""); }
-    set("nh_user", NH.user);
-    if (NH.user) await cloudSyncPull(true);
-    if (currentRoute === "me" || currentRoute === "home" || currentRoute === "n_store" || currentRoute === "m_fav" || currentRoute === "n_shelf") routes[currentRoute]();
-  } catch (err) {
-    // 仅明确返回 401 时注销，网络波动/节点重连时保留本地快照进入只读离线态
-    if (err && err.status === 401) {
-      NH.token = ""; NH.user = null;
-      set("nh_token", ""); set("nh_user", null);
-      if (currentRoute === "me") renderMe();
-    } else if (NH.user) {
-      NH.offline = true;
-      toast("节点正在重连，已保持本地登录态与离线能力", 2400);
-    }
+  const result = await authSession.refresh();
+  if (result === 'valid') {
+    await cloudSyncPull(true);
+    if (!viewStack.length && ["me","home","n_store","m_fav","n_shelf"].includes(currentRoute)) routes[currentRoute]();
+  } else if (result === 'invalid') {
+    if (currentRoute === 'me') renderMe();
+  } else if (result === 'offline' && NH.user) {
+    toast("节点正在重连，已保持本地登录态与离线能力", 2400);
   }
 }
 
-function renderAdSlotHtml() {
-  if (!NH.cfg || !NH.cfg.ad_enabled || isProUser()) return "";
-  return `<div class="ad-card" data-ad-slot="1">
+function renderAdSlotHtml(slot = 'home') {
+  const cfg=NH.cfg;
+  if (!cfg || !cfg.ad_enabled || !cfg.ad_title || isProUser() ||
+      (cfg.ad_provider && cfg.ad_provider !== 'manual') || !Array.isArray(cfg.ad_slots) || !cfg.ad_slots.includes(slot)) return "";
+  let image='';
+  try{if(cfg.ad_image && new URL(cfg.ad_image).protocol==='https:')image=cfg.ad_image;}catch{}
+  return `<div class="ad-card" data-ad-slot="${esc(slot)}">
+    ${image?`<img class="ad-image" src="${esc(image)}" alt="" loading="lazy" onerror="this.style.display='none'">`:''}
     <div class="ad-body">
-      <div class="ad-head"><span class="ad-tag">赞助</span><span class="ad-title">${esc(NH.cfg.ad_title || "支持 NovaHub · 星隅")}</span></div>
-      <div class="ad-desc">${esc(NH.cfg.ad_desc || "开通 Pro 会员享全局免广告与云端多端同步")}</div>
+      <div class="ad-head"><span class="ad-tag">广告</span><span class="ad-title">${esc(cfg.ad_title)}</span></div>
+      <div class="ad-desc">${esc(cfg.ad_desc || '')}</div>
     </div>
     <button class="ad-cta" type="button">${esc(NH.cfg.ad_btn || "了解 Pro")}</button>
   </div>`;
@@ -3603,8 +3482,7 @@ function bindAdSlots(root) {
   if (!root) return;
   root.querySelectorAll("[data-ad-slot]").forEach((el) => {
     el.onclick = () => {
-      if (NH.cfg.ad_url && NH.cfg.ad_url.startsWith("http")) window.open(NH.cfg.ad_url, "_blank", "noopener");
-      else switchMode("vod", "me");
+      try{if(NH.cfg.ad_url && new URL(NH.cfg.ad_url).protocol==='https:')window.open(NH.cfg.ad_url,'_blank','noopener,noreferrer');}catch{}
     };
   });
 }
@@ -3625,8 +3503,7 @@ async function openAuthModal() {
   if (!username || !password) return toast("请填写完整账号与密码");
   try {
     const d = await nhApi(isReg ? "/api/auth/register" : "/api/auth/login", "POST", { username, password });
-    NH.token = d.token; NH.user = d.user;
-    set("nh_token", d.token); set("nh_user", d.user);
+    authSession.apply(d.token, d.user);
     if (isReg) await cloudSyncPush(true);
     else await cloudSyncPull(true);
     toast(isReg ? "注册并登录成功" : "登录成功");
@@ -3671,7 +3548,10 @@ async function cloudSyncPush(silent = false, useKeepalive = false) {
     return;
   }
   try {
-    await nhApi("/api/sync", "POST", { data });
+    const accountToken=NH.token;
+    const result=await nhApi("/api/sync", "POST", { data });
+    if(NH.token!==accountToken)return;
+    if(result.sync?.data)restore(result.sync.data);
     if (!silent) toast("全站片单、书架与进度已同步至云端");
   } catch (e) {
     _syncDirty = true;
@@ -3681,8 +3561,11 @@ async function cloudSyncPush(silent = false, useKeepalive = false) {
 
 async function cloudSyncPull(silent = false) {
   if (!NH.user) { if (!silent) toast("请先登录账号"); return; }
+  const accountToken=NH.token;
   try {
+    await migrateLegacySources();
     const d = await nhApi("/api/sync", "GET");
+    if(NH.token!==accountToken)return;
     if (!d.sync || !d.sync.data) {
       if (silent) {
         const hasLocal = [K.LIKE, K.HISTORY, "music_favs", "novel_shelf", "novel_hist"].some((k) => {
@@ -3696,7 +3579,7 @@ async function cloudSyncPull(silent = false) {
       return;
     }
     restore(d.sync.data);
-    sources = get(K.SOURCE, DEFAULT_SOURCES);
+
     channels = get("channels", DEFAULT_CHANNELS);
     mBr = get("m_br", "192");
     if (!isProUser() && !["128", "192"].includes(mBr)) mBr = "192";

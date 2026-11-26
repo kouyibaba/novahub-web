@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && rm -rf /var/lib/apt/lists/*
 
 # 拷贝核心前后端代码与配置
-COPY server.py db.py safe_http.py source_probe.py sources.json backup_db.py admin_cli.py index.html admin.html style.css app.js manifest.json icon.svg ./
+COPY server.py db.py safe_http.py sync_state.py catalog.py source_probe.py sources.json backup_db.py admin_cli.py index.html admin.html style.css app.js auth_session.js history_state.js vod_client.js manifest.json icon.svg ./
 COPY novel_engine/config.yml ./novel_engine/config.yml
 
 # 下载 Linux amd64 版章节实时解析引擎并赋予执行权限
