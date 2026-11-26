@@ -51,13 +51,18 @@
       throw err;
     }
   };
+  // 开屏防卡死兜底：任何极端异常 4.5 秒后自动移除遮罩
+  setTimeout(function() {
+    var s = document.getElementById('nhSplash');
+    if (s) s.remove();
+  }, 4500);
 })();
 </script>
 <link rel="manifest" href="manifest.json">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261125-v236">
+<link rel="stylesheet" href="style.css?v=20261126-v237">
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
 <style>
@@ -237,6 +242,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="app.js?v=20261125-v236"></script>
+<script src="app.js?v=20261126-v237"></script></script>
 </body>
 </html>

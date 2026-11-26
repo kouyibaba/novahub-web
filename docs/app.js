@@ -9,6 +9,13 @@ const K = {
 };
 const _mem = {};
 const get = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? (k in _mem ? _mem[k] : d) : JSON.parse(v); } catch { return k in _mem ? _mem[k] : d; } };
+const NH = {
+  token: get("nh_token", ""),
+  user: get("nh_user", null),
+  offline: false,
+  cfg: get("nh_site_cfg", { ad_enabled: false, ad_title: "", ad_desc: "", ad_url: "", ad_btn: "了解 Pro", sponsor_tip: "" }),
+};
+const isProUser = () => !!(NH.user && NH.user.is_pro);
 const SYNC_KEYS = [
   K.SOURCE, K.LIKE, K.HISTORY, "channels", "music_favs", "music_fav_groups",
   "music_hist", "m_br", "progress", "novel_shelf", "novel_hist", "novel_prog",
@@ -18,10 +25,11 @@ const SYNC_WATCH = new Set(SYNC_KEYS);
 let _syncPushTimer = null;
 let _isRestoring = false;
 let _syncDirty = false;
+let _bootReady = false;
 const set = (k, v) => {
   _mem[k] = v;
   try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
-  if (!_isRestoring && SYNC_WATCH.has(k) && typeof cloudSyncPush === "function" && typeof NH !== "undefined" && NH.user) {
+  if (_bootReady && !_isRestoring && SYNC_WATCH.has(k) && typeof cloudSyncPush === "function" && NH.user) {
     _syncDirty = true;
     clearTimeout(_syncPushTimer);
     _syncPushTimer = setTimeout(() => cloudSyncPush(true), 2000);
@@ -2502,7 +2510,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.6</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.7</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -3375,14 +3383,6 @@ function syncModeFab() {
 })();
 
 /* ============ 商业化会员鉴权 / 卡密兑换 / 云端同步 / 动态赞助位 ============ */
-const NH = {
-  token: get("nh_token", ""),
-  user: get("nh_user", null),
-  offline: false,
-  cfg: get("nh_site_cfg", { ad_enabled: false, ad_title: "", ad_desc: "", ad_url: "", ad_btn: "了解 Pro", sponsor_tip: "" }),
-};
-const isProUser = () => !!(NH.user && NH.user.is_pro);
-
 async function nhApi(path, method = "GET", body = null) {
   const headers = { "Content-Type": "application/json" };
   if (NH.token) headers["Authorization"] = "Bearer " + NH.token;
@@ -3748,6 +3748,7 @@ syncSearchClear();
 syncModeFab();
 go(appMode === "music" ? "m_discover" : appMode === "novel" ? "n_store" : "home");
 _bootDone = true;
+_bootReady = true;
 dismissSplash(_bootAt);
 loadSiteConfig();
 refreshAuthUser();
