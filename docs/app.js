@@ -823,6 +823,15 @@ async function loadSongLyrics(song, token) {
       if (parsed.length) {
         if (token === mPlayToken && curSong && songKey(curSong) === songKey(song)) {
           curLyrics = parsed;
+          const t = audioEl.currentTime || 0;
+          let ni = -1;
+          for (let i = 0; i < curLyrics.length; i++) {
+            if (t >= curLyrics[i].t) ni = i; else break;
+          }
+          activeLrcIdx = ni;
+          updateMiniBar();
+          syncMediaSessionTitle();
+          syncMediaSessionState();
           if (currentRoute === "m_player") renderLyricsBox();
         }
         return;
@@ -950,10 +959,32 @@ function getBufferedPct(media) {
   } catch { return 0; }
 }
 
-/** 同步媒体通知状态至 Android 原生前台通知栏（如在 APK 壳内） */
-function syncNativeMedia(title, artist, isPlaying, mediaType = "audio") {
+/** 提取当前高亮单行歌词文本 */
+function getCurrentLyricLine() {
+  return activeLrcIdx >= 0 && curLyrics[activeLrcIdx]
+    ? curLyrics[activeLrcIdx].text.replace(/\n/g, " ").trim()
+    : "";
+}
+
+/** 同步媒体通知状态至 Android 原生前台通知栏（支持歌词、封面、进度与总时长） */
+function syncNativeMedia(title, artist, isPlaying, mediaType = "audio", opts = null) {
+  const o = opts || {};
+  const t = String(title || "NovaHub");
+  const a = String(artist || "");
+  if (window.NovaNative && typeof window.NovaNative.updateMediaRich === "function") {
+    try {
+      const posMs = Math.max(0, Math.round(Number(o.positionMs) || 0));
+      const durMs = Math.max(0, Math.round(Number(o.durationMs) || 0));
+      const spd = Number(o.speed) > 0 ? Number(o.speed) : 1;
+      window.NovaNative.updateMediaRich(
+        t, a, String(o.lyric || ""), String(o.coverUrl || ""),
+        !!isPlaying, posMs, durMs, spd, String(mediaType || "audio")
+      );
+      return;
+    } catch {}
+  }
   if (window.NovaNative && typeof window.NovaNative.updateMediaNotification === "function") {
-    try { window.NovaNative.updateMediaNotification(String(title || "NovaHub"), String(artist || ""), !!isPlaying, mediaType); } catch {}
+    try { window.NovaNative.updateMediaNotification(t, a, !!isPlaying, mediaType); } catch {}
   }
 }
 
@@ -962,6 +993,45 @@ function clearNativeMedia() {
     try { window.NovaNative.clearMediaNotification(); } catch {}
   }
 }
+
+/** 供原生 Android 通知栏进度条拖拽回调跳转指定毫秒 */
+window.__nhMediaSeek = (posMs) => {
+  const sec = Math.max(0, (Number(posMs) || 0) / 1000);
+  const layer = $("#playerLayer");
+  const isVideoActive = layer && !layer.classList.contains("hidden");
+  if (isVideoActive) {
+    const v = $("#video");
+    if (v && !P.isLive && isFinite(v.duration) && v.duration > 0) {
+      v.currentTime = Math.min(v.duration, sec);
+      syncVideoMediaSession();
+    }
+    return;
+  }
+  if (!curSong || !isFinite(audioEl.duration) || audioEl.duration <= 0) return;
+  const target = Math.min(audioEl.duration, sec);
+  audioEl.currentTime = target;
+  if (curLyrics.length) {
+    let ni = -1;
+    for (let i = 0; i < curLyrics.length; i++) {
+      if (target >= curLyrics[i].t) ni = i; else break;
+    }
+    activeLrcIdx = ni;
+    updateMiniBar();
+    syncMediaSessionTitle();
+    if (currentRoute === "m_player") highlightLyric(ni);
+  }
+  if (currentRoute === "m_player") {
+    const pct = (target / audioEl.duration) * 100;
+    const seek = $("#mSeek"), curT = $("#mCurTime");
+    if (seek && !seek._dragging) {
+      seek.value = String(Math.round(pct * 10));
+      paintRange(seek, pct, getBufferedPct(audioEl));
+    }
+    if (curT) curT.textContent = fmt(target);
+  }
+  syncAudioPositionState();
+  syncMediaSessionState();
+};
 
 /** 供原生 Android 通知栏按钮回调操控当前网页播放 */
 window.__nhMediaAction = (act) => {
@@ -995,7 +1065,12 @@ audioEl.onloadedmetadata = () => {
     if (curT) curT.textContent = fmt(audioEl.currentTime || 0);
     if (durT) durT.textContent = fmt(dur);
   }
+  syncMediaSessionState();
   syncAudioPositionState();
+};
+audioEl.onseeked = audioEl.onratechange = () => {
+  syncAudioPositionState();
+  syncMediaSessionState();
 };
 audioEl.onended = () => {
   if (mSleepMode === "track") {
@@ -1026,6 +1101,7 @@ audioEl.ontimeupdate = () => {
       activeLrcIdx = ni;
       updateMiniBar();
       syncMediaSessionTitle();
+      syncMediaSessionState();
       drawPipLyrics();
       if (currentRoute === "m_player") highlightLyric(ni);
     }
@@ -1064,7 +1140,15 @@ function syncMediaSessionTitle() {
 
 function syncMediaSessionState() {
   if (!curSong) return;
-  syncNativeMedia(curSong.name || "未知歌曲", curSong.artist || "NovaHub 音乐", !audioEl.paused, "audio");
+  const durMs = isFinite(audioEl.duration) && audioEl.duration > 0 ? audioEl.duration * 1000 : 0;
+  const posMs = isFinite(audioEl.currentTime) && audioEl.currentTime > 0 ? audioEl.currentTime * 1000 : 0;
+  syncNativeMedia(curSong.name || "未知歌曲", curSong.artist || "NovaHub 音乐", !audioEl.paused, "audio", {
+    lyric: getCurrentLyricLine(),
+    coverUrl: curSong.pic || "",
+    positionMs: posMs,
+    durationMs: durMs,
+    speed: audioEl.playbackRate || 1,
+  });
   if (!("mediaSession" in navigator)) return;
   try {
     const artUrl = curSong.pic || new URL("icon.svg", location.href).href;
@@ -1977,6 +2061,7 @@ $("#rateSel").addEventListener("change", (e) => {
   const v = $("#video");
   const r = parseFloat(e.target.value) || 1;
   v.playbackRate = r;
+  syncVideoMediaSession();
   toast(`播放倍速：${r}x`);
 });
 $("#qualitySel").addEventListener("change", (e) => {
@@ -2031,7 +2116,14 @@ function syncVideoMediaSession() {
   const layer = $("#playerLayer");
   const v = $("#video");
   if (!layer || layer.classList.contains("hidden") || !P.title) return;
-  syncNativeMedia(P.title, P.isLive ? "电视直播" : "NovaHub 影院", !!(v && !v.paused), "video");
+  const hasDur = !P.isLive && v && isFinite(v.duration) && v.duration > 0;
+  syncNativeMedia(P.title, P.isLive ? "电视直播" : "NovaHub 影院", !!(v && !v.paused), "video", {
+    lyric: "",
+    coverUrl: "",
+    positionMs: hasDur && isFinite(v.currentTime) ? v.currentTime * 1000 : 0,
+    durationMs: hasDur ? v.duration * 1000 : 0,
+    speed: v ? (v.playbackRate || 1) : 1,
+  });
   if (!("mediaSession" in navigator)) return;
   try {
     const artUrl = new URL("icon.svg", location.href).href;

@@ -11,11 +11,16 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.util.Log;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.webkit.ConsoleMessage;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -24,7 +29,7 @@ import android.widget.Toast;
 import java.lang.ref.WeakReference;
 
 /**
- * NovaHub · 星隅 无缓存热更新主界面（支持原生全屏、状态栏媒体通知、硬件亮度音量控制与自动更新）
+ * NovaHub · 星隅 客户端主界面（支持原生全屏、歌词与进度通知栏、硬件亮度音量控制与自动更新）
  */
 public class MainActivity extends Activity {
     private static final String ENTRY_URL = "https://kouyibaba.github.io/novahub-web/";
@@ -51,6 +56,17 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** 供 MediaNotifyService 回调网页端拖拽跳转到指定毫秒进度 */
+    public static void dispatchMediaSeek(final long posMs) {
+        final long safeMs = Math.max(0L, posMs);
+        mainHandler.post(() -> {
+            MainActivity actRef = activeRef != null ? activeRef.get() : null;
+            if (actRef != null && !actRef.isFinishing() && actRef.webView != null) {
+                actRef.webView.evaluateJavascript("window.__nhMediaSeek && window.__nhMediaSeek(" + safeMs + ")", null);
+            }
+        });
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -73,12 +89,43 @@ public class MainActivity extends Activity {
         s.setUseWideViewPort(true);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        webView.clearCache(true);
+        // 静态 JS/CSS 允许磁盘缓存加速冷启动，入口 HTML 通过时间戳实时热更新
+        s.setCacheMode(WebSettings.LOAD_DEFAULT);
 
         webView.addJavascriptInterface(new NovaBridge(), "NovaNative");
-        webView.setWebViewClient(new WebViewClient());
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (request != null && request.isForMainFrame()) {
+                    CharSequence desc = Build.VERSION.SDK_INT >= 23 && error != null ? error.getDescription() : "网络连接超时";
+                    showErrorFallback(view, desc != null ? desc.toString() : "网络连接超时");
+                }
+            }
+
+            @Override
+            @SuppressWarnings("deprecation")
+            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                if (failingUrl != null && failingUrl.startsWith(ENTRY_URL)) {
+                    showErrorFallback(view, description != null ? description : "网络连接超时");
+                }
+            }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                loadEntryUrl();
+                return true;
+            }
+        });
+
         webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage cm) {
+                if (cm != null && cm.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                    Log.e("NovaWebView", cm.message() + " (" + cm.sourceId() + ":" + cm.lineNumber() + ")");
+                }
+                return super.onConsoleMessage(cm);
+            }
+
             @Override
             public void onShowCustomView(View view, CustomViewCallback callback) {
                 if (customView != null) {
@@ -116,13 +163,35 @@ public class MainActivity extends Activity {
             }
         });
 
-        webView.loadUrl(ENTRY_URL + "?t=" + System.currentTimeMillis());
+        loadEntryUrl();
 
         requestNotifyPermissionOnce();
         AppUpdater.cleanupOldApks(this);
         mainHandler.postDelayed(() -> {
             if (!isFinishing()) AppUpdater.check(MainActivity.this, false);
         }, 2500);
+    }
+
+    private void loadEntryUrl() {
+        if (webView != null) {
+            webView.loadUrl(ENTRY_URL + "?t=" + System.currentTimeMillis());
+        }
+    }
+
+    /** 主文档加载失败时呈现可视暗黑重试页，避免纯黑屏 */
+    private void showErrorFallback(WebView view, String reason) {
+        String safeReason = reason.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+        String html = "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                + "<meta name='viewport' content='width=device-width,initial-scale=1'></head>"
+                + "<body style='margin:0;background:#090A0D;color:#E6E1D6;font-family:sans-serif;"
+                + "display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;padding:24px;box-sizing:border-box;text-align:center'>"
+                + "<div style='font-size:18px;font-weight:700;color:#E7C66B;margin-bottom:10px'>连接 NovaHub 失败</div>"
+                + "<div style='font-size:13px;color:#8C8996;margin-bottom:22px;max-width:300px;line-height:1.6'>" + safeReason + "</div>"
+                + "<button onclick=\"location.replace('" + ENTRY_URL + "?t=' + Date.now())\" "
+                + "style='padding:11px 28px;border-radius:99px;border:1px solid rgba(231,198,107,0.5);"
+                + "background:rgba(231,198,107,0.16);color:#F7EAD1;font-size:14px'>点击重试</button>"
+                + "</body></html>";
+        view.loadDataWithBaseURL(ENTRY_URL, html, "text/html", "utf-8", null);
     }
 
     private void requestNotifyPermissionOnce() {
@@ -154,7 +223,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 提供给前端网页的原生控制桥（全屏、通知栏、硬件亮度、系统音量、自动更新） */
+    /** 提供给前端网页的原生控制桥（全屏、富媒体通知栏、硬件亮度、系统音量、自动更新） */
     public class NovaBridge {
         @JavascriptInterface
         public void setFullscreen(final boolean enter) {
@@ -170,6 +239,15 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void updateMediaNotification(final String title, final String artist, final boolean playing, final String mediaType) {
             MediaNotifyService.pushUpdate(MainActivity.this, title, artist, playing, mediaType);
+        }
+
+        @JavascriptInterface
+        public void updateMediaRich(final String title, final String artist, final String lyric,
+                                    final String coverUrl, final boolean playing,
+                                    final long positionMs, final long durationMs,
+                                    final float speed, final String mediaType) {
+            MediaNotifyService.pushRichUpdate(MainActivity.this, title, artist, lyric, coverUrl,
+                    playing, positionMs, durationMs, speed, mediaType);
         }
 
         @JavascriptInterface
