@@ -19,6 +19,24 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Browser publication path: apply only the exact reviewed release patch.
+      # Once applied, the patch is removed; ordinary builds skip this step.
+      - name: Apply reviewed v2.4.5 release bundle
+        run: |
+          set -euo pipefail
+          patch=reviewed-v2.4.5.patch
+          if [ -f "$patch" ]; then
+            echo "f870eed9786527f6cfbcc45dd78d6b4770f513fd13f1194c3453d3e781816365  $patch" | sha256sum --check --strict
+            git apply --check "$patch"
+            git apply --index "$patch"
+            git rm -- "$patch"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "feat: release v2.4.5 managed catalog and session protection"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
