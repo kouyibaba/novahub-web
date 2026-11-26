@@ -6,6 +6,7 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.media.AudioManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -27,6 +28,7 @@ import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.Toast;
 import java.lang.ref.WeakReference;
+import org.json.JSONObject;
 
 /**
  * NovaHub · 星隅 客户端主界面（支持原生全屏、歌词与进度通知栏、硬件亮度音量控制与自动更新）
@@ -42,6 +44,7 @@ public class MainActivity extends Activity {
     private WebChromeClient.CustomViewCallback customViewCallback;
     private boolean jsFullscreen = false;
     private long lastBackTime = 0;
+    private NovelTtsController novelTts;
 
     /** 供 MediaNotifyService 回调网页端控制播放状态 */
     public static void dispatchMediaAction(final String act) {
@@ -79,6 +82,12 @@ public class MainActivity extends Activity {
         webView = new WebView(this);
         webView.setBackgroundColor(Color.parseColor("#090A0D"));
         setContentView(webView);
+        novelTts = new NovelTtsController(this, (id, event, detail) -> {
+            if (!isFinishing() && isTrustedNovelPage()) {
+                webView.evaluateJavascript("window.__nhNovelTtsEvent && window.__nhNovelTtsEvent("
+                        + JSONObject.quote(id) + "," + JSONObject.quote(event) + "," + JSONObject.quote(detail) + ")", null);
+            }
+        });
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -94,6 +103,12 @@ public class MainActivity extends Activity {
 
         webView.addJavascriptInterface(new NovaBridge(), "NovaNative");
         webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                if (novelTts != null) novelTts.stop();
+                super.onPageStarted(view, url, favicon);
+            }
+
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 if (request != null && request.isForMainFrame()) {
@@ -178,6 +193,13 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean isTrustedNovelPage() {
+        if (webView == null || webView.getUrl() == null) return false;
+        Uri uri = Uri.parse(webView.getUrl());
+        return "https".equals(uri.getScheme()) && "kouyibaba.github.io".equals(uri.getHost())
+                && uri.getPath() != null && uri.getPath().startsWith("/novahub-web/");
+    }
+
     /** 主文档加载失败时呈现可视暗黑重试页，避免纯黑屏 */
     private void showErrorFallback(WebView view, String reason) {
         String safeReason = reason.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
@@ -225,6 +247,25 @@ public class MainActivity extends Activity {
 
     /** 提供给前端网页的原生控制桥（全屏、富媒体通知栏、硬件亮度、系统音量、自动更新） */
     public class NovaBridge {
+        @JavascriptInterface
+        public void speakNovel(final String text, final String id, final float rate, final float pitch) {
+            runOnUiThread(() -> {
+                if (novelTts != null && isTrustedNovelPage()) novelTts.speak(text, id, rate, pitch);
+            });
+        }
+
+        @JavascriptInterface
+        public void stopNovelSpeech() {
+            runOnUiThread(() -> { if (novelTts != null) novelTts.stop(); });
+        }
+
+        @JavascriptInterface
+        public void openTtsSettings() {
+            runOnUiThread(() -> {
+                if (novelTts != null && isTrustedNovelPage()) novelTts.openSettings();
+            });
+        }
+
         @JavascriptInterface
         public void setFullscreen(final boolean enter) {
             runOnUiThread(() -> {
@@ -343,6 +384,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (novelTts != null) novelTts.shutdown();
         MediaNotifyService.clear(this);
         super.onDestroy();
     }

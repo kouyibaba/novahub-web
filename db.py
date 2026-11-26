@@ -103,18 +103,37 @@ def _hash_pwd(password, salt):
     return base64.b64encode(dk).decode("ascii")
 
 
-def _sign_token(user_id, username, ttl_days=30):
+def _sign_token(user_id, username, ttl_days=30, role=None, credential_version=None):
     """签发轻量 HMAC-SHA256 Token（有效期默认 30 天）。"""
     payload = {
         "uid": int(user_id),
         "u": username,
         "exp": int(time.time()) + ttl_days * 86400,
+        "cv": _user_credential_version(user_id) if credential_version is None else credential_version,
     }
+    if role:
+        payload["role"] = role
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     p_b64 = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     sig = hmac.new(_get_secret().encode("utf-8"), p_b64.encode("ascii"), hashlib.sha256).digest()
     s_b64 = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
     return f"{p_b64}.{s_b64}"
+
+
+def _credential_version(value):
+    return hmac.new(_get_secret().encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _user_credential_version(user_id):
+    with _DB_LOCK, _conn() as c:
+        row = c.execute("SELECT pwd_hash, salt FROM users WHERE id=?", (int(user_id),)).fetchone()
+    return _credential_version(row["salt"] + "$" + row["pwd_hash"]) if row else ""
+
+
+def _admin_credential_version():
+    with _DB_LOCK, _conn() as c:
+        row = c.execute("SELECT value FROM site_config WHERE key='admin_pwd_hash'").fetchone()
+    return _credential_version(row["value"]) if row else ""
 
 
 def _format_user(row):
@@ -152,7 +171,8 @@ def register_user(username, password):
             raise ValueError("该账号已被注册")
         row = c.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
     user = _format_user(row)
-    return user, _sign_token(user["id"], user["username"])
+    return user, _sign_token(user["id"], user["username"],
+                             credential_version=_credential_version(row["salt"] + "$" + row["pwd_hash"]))
 
 
 def login_user(username, password):
@@ -164,10 +184,11 @@ def login_user(username, password):
     if not row or not hmac.compare_digest(row["pwd_hash"], _hash_pwd(p, row["salt"])):
         raise ValueError("账号或密码错误")
     user = _format_user(row)
-    return user, _sign_token(user["id"], user["username"])
+    return user, _sign_token(user["id"], user["username"],
+                             credential_version=_credential_version(row["salt"] + "$" + row["pwd_hash"]))
 
 
-def verify_token(token):
+def verify_token(token, role=None):
     """校验 Bearer Token，返回最新用户状态字典，无效则返回 None。"""
     if not token or "." not in token:
         return None
@@ -179,7 +200,7 @@ def verify_token(token):
             return None
         pad = "=" * ((4 - len(p_b64) % 4) % 4)
         payload = json.loads(base64.urlsafe_b64decode(p_b64 + pad).decode("utf-8"))
-        if int(payload.get("exp", 0)) < int(time.time()):
+        if int(payload.get("exp", 0)) <= int(time.time()):
             return None
         uid = int(payload["uid"])
     except Exception:
@@ -187,7 +208,22 @@ def verify_token(token):
 
     with _DB_LOCK, _conn() as c:
         row = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-    return _format_user(row) if row else None
+    if not row or payload.get("role") != role or not hmac.compare_digest(
+        str(payload.get("cv", "")), _credential_version(row["salt"] + "$" + row["pwd_hash"])
+    ):
+        return None
+    return _format_user(row)
+
+
+def sign_media_ticket(token):
+    """Six-hour read-only media ticket for native video/HLS requests."""
+    user = verify_token(token)
+    if not user:
+        raise ValueError("请先重新登录账号")
+    encoded = token.split(".", 1)[0]
+    payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+    return _sign_token(user["id"], user["username"], ttl_days=0.25, role="media",
+                       credential_version=payload["cv"])
 
 
 def generate_codes(count, days, note=""):
@@ -320,9 +356,22 @@ def set_admin_password(old_password, new_password):
         )
 
 
-def sign_admin_token(ttl_days=7):
+def login_admin(password):
+    """Bind the issued session to the exact password snapshot that was checked."""
+    with _DB_LOCK, _conn() as c:
+        row = c.execute("SELECT value FROM site_config WHERE key='admin_pwd_hash'").fetchone()
+    if not row or "$" not in row["value"]:
+        raise ValueError("管理员密码错误")
+    salt, expected = row["value"].split("$", 1)
+    if not hmac.compare_digest(expected, _hash_pwd((password or "").strip(), salt)):
+        raise ValueError("管理员密码错误")
+    return sign_admin_token(credential_version=_credential_version(row["value"]))
+
+
+def sign_admin_token(ttl_days=7, credential_version=None):
     """签发独立管理员 Token（与普通用户 Token 隔离）。"""
-    payload = {"role": "admin", "exp": int(time.time()) + ttl_days * 86400}
+    payload = {"role": "admin", "exp": int(time.time()) + ttl_days * 86400,
+               "cv": _admin_credential_version() if credential_version is None else credential_version}
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     p_b64 = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     sig = hmac.new(_get_secret().encode("utf-8"), p_b64.encode("ascii"), hashlib.sha256).digest()
@@ -342,7 +391,9 @@ def verify_admin_token(token):
             return False
         pad = "=" * ((4 - len(p_b64) % 4) % 4)
         payload = json.loads(base64.urlsafe_b64decode(p_b64 + pad).decode("utf-8"))
-        return payload.get("role") == "admin" and int(payload.get("exp", 0)) >= int(time.time())
+        return (payload.get("role") == "admin"
+                and int(payload.get("exp", 0)) > int(time.time())
+                and hmac.compare_digest(str(payload.get("cv", "")), _admin_credential_version()))
     except Exception:
         return False
 

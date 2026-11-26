@@ -9,13 +9,12 @@ import hashlib
 import hmac
 import html
 import http.server
-import ipaddress
+from html.parser import HTMLParser
 import json
 import os
 import re
 import shutil
 import socket
-import ssl
 import subprocess
 import sys
 import threading
@@ -24,6 +23,9 @@ import urllib.parse
 import urllib.request
 
 import db
+import safe_http
+import source_probe
+import backup_db
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("PORT", "8765"))
@@ -31,9 +33,7 @@ ENGINE_PORT = int(os.environ.get("NOVEL_ENGINE_PORT", "18423"))
 ENGINE_URL = f"http://127.0.0.1:{ENGINE_PORT}"
 NOVEL_DATA_DIR = os.path.join(ROOT, "novel_engine")
 
-CTX = ssl.create_default_context()
-CTX.check_hostname = False
-CTX.verify_mode = ssl.CERT_NONE
+CTX = safe_http.TLS_CONTEXT
 
 UA_DESKTOP = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 UA_MOBILE = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Mobile Safari/537.36"
@@ -52,11 +52,6 @@ _PREFETCHING_BOOKS = set()
 # 轻量滑动窗口 IP 限流器
 _RATE_BUCKETS = collections.defaultdict(collections.deque)
 _RATE_LOCK = threading.Lock()
-
-# 禁止静态直出的敏感扩展名与路径前缀
-_FORBIDDEN_EXTS = (".py", ".pyc", ".db", ".db-wal", ".db-shm", ".log", ".yml", ".yaml", ".conf", ".exe")
-_FORBIDDEN_PREFIXES = ("/novel_engine/", "/__pycache__/")
-
 
 def _check_rate_limit(ip, bucket, limit, window_sec=60):
     """基于客户端 IP 的轻量滑动窗口限流。"""
@@ -100,18 +95,7 @@ def _ops_safe_path(p):
 def _is_safe_proxy_target(target_url):
     """防 SSRF 校验：拒绝代理内网与环回保留地址。"""
     try:
-        parsed = urllib.parse.urlparse(target_url)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
-            return False
-        host = parsed.hostname.lower()
-        if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
-            return False
-        try:
-            ip = ipaddress.ip_address(host)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                return False
-        except ValueError:
-            pass
+        safe_http.resolve_public(target_url)
         return True
     except Exception:
         return False
@@ -119,14 +103,8 @@ def _is_safe_proxy_target(target_url):
 
 def _http_get_full(url, headers=None, timeout=8, max_bytes=4_194_304):
     """发起通用 HTTP/HTTPS GET 请求并返回状态码、字节流、Content-Type 与重定向后的最终 URL。"""
-    req = urllib.request.Request(url, headers=headers or {"User-Agent": UA_DESKTOP})
-    with urllib.request.urlopen(req, timeout=timeout, context=CTX) as resp:
-        return (
-            resp.status,
-            resp.read(max_bytes),
-            resp.headers.get("Content-Type", "application/json; charset=utf-8"),
-            resp.geturl(),
-        )
+    return safe_http.request(url, headers=headers or {"User-Agent": UA_DESKTOP},
+                             timeout=timeout, max_bytes=max_bytes)
 
 
 def _http_get_bytes(url, headers=None, timeout=8, max_bytes=4_194_304):
@@ -364,11 +342,32 @@ def _prefetch_next_chapters_async(book_id, chapters, from_idx, count=4):
 def _sanitize_chapter_html(raw_html):
     if not raw_html:
         return ""
-    cleaned = re.sub(r"<script[\s\S]*?</script>", "", raw_html, flags=re.I)
-    if "<p" not in cleaned and "<div" not in cleaned:
-        paras = [f"<p>{html.escape(line.strip())}</p>" for line in cleaned.splitlines() if line.strip()]
-        return "\n".join(paras)
-    return cleaned
+    class ChapterParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts = []
+            self.blocked = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style", "iframe", "object"):
+                self.blocked += 1
+            elif not self.blocked and tag in ("p", "div", "br"):
+                self.parts.append("\n")
+
+        def handle_endtag(self, tag):
+            if tag in ("script", "style", "iframe", "object"):
+                self.blocked = max(0, self.blocked - 1)
+            elif not self.blocked and tag in ("p", "div"):
+                self.parts.append("\n")
+
+        def handle_data(self, text):
+            if not self.blocked:
+                self.parts.append(text)
+
+    parser = ChapterParser()
+    parser.feed(raw_html)
+    return "\n".join(f"<p>{html.escape(line.strip())}</p>"
+                     for line in "".join(parser.parts).splitlines() if line.strip())
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -379,6 +378,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass
+
+    def send_head(self):
+        # One allowlist shared by inherited GET and HEAD; no directory listing.
+        path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+        allowed = {"/", "/index.html", "/admin.html", "/app.js", "/style.css",
+                   "/manifest.json", "/icon.svg", "/endpoint.json", "/apk-version.json",
+                   "/apk/novahub-latest.apk"}
+        relative = path[5:] if path.startswith("/docs/") else path
+        translated = self.translate_path(self.path)
+        if (relative not in allowed or "\\" in path or ".." in path.split("/")
+                or os.path.realpath(translated) != os.path.abspath(translated)):
+            self.send_error(403, "Forbidden")
+            return None
+        return super().send_head()
+
+    def list_directory(self, path):
+        self.send_error(403, "Directory listing disabled")
+        return None
 
     def _client_ip(self):
         xf = self.headers.get("X-Forwarded-For") or self.headers.get("X-Real-IP")
@@ -391,6 +408,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if auth.lower().startswith("bearer "):
             return db.verify_token(auth[7:].strip())
         return None
+
+    def _media_user(self, qs):
+        return self._current_user() or db.verify_token((qs.get("ticket") or [""])[0], role="media")
 
     def _is_admin(self):
         auth = self.headers.get("Authorization") or ""
@@ -598,9 +618,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_json({"error": "尝试过于频繁，请 1 分钟后再试"}, 429)
         try:
             body = self._read_json_body(4096)
-            if not db.verify_admin_password(body.get("password")):
-                return self.send_json({"error": "管理员密码错误"}, 401)
-            self.send_json({"token": db.sign_admin_token()})
+            self.send_json({"token": db.login_admin(body.get("password"))})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 401)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
 
@@ -713,6 +733,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # ---------- 音乐曲库网关 ----------
     def handle_kuwo(self, qs):
         act = qs.get("act", [""])[0]
+        if act == "url":
+            user = self._current_user()
+            if not user:
+                return self.send_json({"error": "请先登录账号"}, 401)
+            bitrate = (qs.get("br") or ["128"])[0]
+            if bitrate not in ("128", "192", "320", "999"):
+                return self.send_json({"error": "无效音质"}, 400)
+            if bitrate in ("320", "999") and not user["is_pro"]:
+                return self.send_json({"error": "该音质需要 Pro 会员"}, 403)
         try:
             if act == "search":
                 q = urllib.parse.quote(qs.get("q", [""])[0])
@@ -753,7 +782,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
             if act == "url":
                 rid = urllib.parse.quote(qs.get("id", [""])[0])
-                br_in = qs.get("br", ["320"])[0]
+                br_in = qs.get("br", ["128"])[0]
                 # 高码率逐级降级至 128kmp3，并统一升级 HTTPS 避免浏览器混合内容拦截
                 br_chains = {
                     "999": ["2000kflac", "320kmp3", "192kmp3", "128kmp3"],
@@ -802,6 +831,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     # ---------- 直播流 HLS 跨域重写代理 ----------
     def handle_live_m3u8(self, qs):
+        if not self._media_user(qs):
+            return self.send_json({"error": "请先登录账号"}, 401)
         target = (qs.get("url") or [""])[0].strip()
         if not _is_safe_proxy_target(target):
             return self.send_json({"error": "Invalid live url"}, 400)
@@ -824,7 +855,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return raw_ref
                 path_low = urllib.parse.urlparse(abs_u).path.lower()
                 route = "/api/live/m3u8" if (is_playlist_hint or path_low.endswith(".m3u8") or ".m3u8" in path_low) else "/api/live/seg"
-                return f"{route}?url={urllib.parse.quote(abs_u, safe='')}"
+                ticket = (qs.get("ticket") or [""])[0]
+                suffix = "&ticket=" + urllib.parse.quote(ticket, safe="") if ticket else ""
+                return f"{route}?url={urllib.parse.quote(abs_u, safe='')}{suffix}"
 
             out_lines = []
             prev_line = ""
@@ -854,6 +887,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({"error": str(e)}, 502)
 
     def handle_live_seg(self, qs):
+        if not self._media_user(qs):
+            return self.send_json({"error": "请先登录账号"}, 401)
         target = (qs.get("url") or [""])[0].strip()
         if not _is_safe_proxy_target(target):
             return self.send_json({"error": "Invalid seg url"}, 400)
@@ -879,7 +914,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if id_match and ensure_novel_engine():
             bid = id_match.group(1)
             try:
-                _, pb, _ = _http_get_bytes(f"{ENGINE_URL}/api/preview/{bid}", timeout=6)
+                # Fixed loopback engine endpoint; never use the public proxy here.
+                with urllib.request.urlopen(f"{ENGINE_URL}/api/preview/{bid}", timeout=6) as response:
+                    pb = response.read(4_194_304)
                 info = json.loads(pb.decode("utf-8", "ignore"))
                 if info.get("book_id") or info.get("book_name"):
                     return self.send_json({
@@ -1025,6 +1062,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         if p == "/api/config":
             return self.send_json(db.get_public_config())
+        if p == "/api/sources/live":
+            return self.send_json(source_probe.snapshot())
+        if p == "/api/media/ticket":
+            user = self._current_user()
+            if not user:
+                return self.send_json({"error": "请先登录账号"}, 401)
+            try:
+                ticket = db.sign_media_ticket(self.headers.get("Authorization", "")[7:].strip())
+            except ValueError as exc:
+                return self.send_json({"error": str(exc)}, 401)
+            return self.send_json({"ticket": ticket})
         if p == "/api/auth/me":
             return self.handle_auth_me()
         if p == "/api/sync":
@@ -1068,11 +1116,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": str(e)}, 502)
             return
 
-        # 拦截对后端源码、SQLite 数据库与引擎目录的静态访问
-        low_p = p.lower()
-        if low_p.endswith(_FORBIDDEN_EXTS) or any(low_p.startswith(pre) for pre in _FORBIDDEN_PREFIXES):
-            return self.send_json({"error": "Forbidden"}, 403)
-
+        # send_head enforces the shared public-asset allowlist for GET and HEAD.
         super().do_GET()
 
     def do_PUT(self):
@@ -1081,30 +1125,33 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_json({"error": "Not found"}, 404)
         if not self._is_same_origin_request():
             return self.send_json({"error": "Forbidden origin"}, 403)
+        if not self._current_user():
+            return self.send_json({"error": "请先登录账号"}, 401)
         qs = urllib.parse.parse_qs(parsed.query)
         target = qs.get("url", [""])[0]
         if not _is_safe_proxy_target(target):
             return self.send_json({"error": "Invalid target url"}, 400)
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self.send_json({"error": "Invalid Content-Length"}, 400)
+        if n < 0 or n > 1_048_576:
+            return self.send_json({"error": "请求体过大"}, 413)
         body = self.rfile.read(n) if n else b""
         try:
-            req = urllib.request.Request(
-                target,
-                data=body,
-                method="PUT",
+            status, resp_body, ctype, _ = safe_http.request(
+                target, body=body, method="PUT", timeout=20, max_bytes=100000,
                 headers={
                     "User-Agent": "Mozilla/5.0",
                     "Content-Type": self.headers.get("Content-Type", "application/json"),
                     "Authorization": self.headers.get("Authorization", ""),
                 },
             )
-            with urllib.request.urlopen(req, timeout=20, context=CTX) as r:
-                resp_body = r.read(100000)
-                self.send_response(r.status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(resp_body)))
-                self.end_headers()
-                self.wfile.write(resp_body)
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.end_headers()
+            self.wfile.write(resp_body)
         except Exception as e:
             self.send_json({"error": str(e)}, 502)
 
@@ -1116,6 +1163,8 @@ class ThreadedHTTPServer(http.server.ThreadingHTTPServer):
 
 if __name__ == "__main__":
     db.init_db()
+    source_probe.start()
+    backup_db.start_scheduler(db.DB_PATH, os.environ.get("NOVAHUB_BACKUP_DIR", os.path.join(os.path.dirname(db.DB_PATH), "backups")))
     _start_cold_cache_cleaner(ttl_days=30)
     threading.Thread(target=ensure_novel_engine, daemon=True).start()
     print(f"NovaHub Gateway listening on http://0.0.0.0:{PORT}")

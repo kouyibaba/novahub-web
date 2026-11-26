@@ -16,6 +16,21 @@ const NH = {
   cfg: get("nh_site_cfg", { ad_enabled: false, ad_title: "", ad_desc: "", ad_url: "", ad_btn: "了解 Pro", sponsor_tip: "" }),
 };
 const isProUser = () => !!(NH.user && NH.user.is_pro);
+// Media API requests need the same account token as nhApi, including Pages routing.
+const _mediaFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  if (NH.token && typeof input === "string") {
+    const target = new URL(input, location.href);
+    const apiOrigin = window.__NH_API_BASE__ ? new URL(window.__NH_API_BASE__).origin : location.origin;
+    if ((target.origin === location.origin || target.origin === apiOrigin) &&
+        (target.pathname === "/kw" || target.pathname.startsWith("/api/live/"))) {
+      const headers = new Headers(init.headers || {});
+      if (!headers.has("Authorization")) headers.set("Authorization", "Bearer " + NH.token);
+      init = { ...init, headers };
+    }
+  }
+  return _mediaFetch(input, init);
+};
 const SYNC_KEYS = [
   K.SOURCE, K.LIKE, K.HISTORY, "channels", "music_favs", "music_fav_groups",
   "music_hist", "m_br", "progress", "novel_shelf", "novel_hist", "novel_prog",
@@ -692,7 +707,8 @@ const M_BR_OPTS = [
   { v: "320", label: "极高 320k" },
   { v: "999", label: "无损 FLAC" },
 ];
-let mBr = get("m_br", "320");
+let mBr = get("m_br", "192");
+if (!isProUser() && !["128", "192"].includes(mBr)) mBr = "192";
 const brSelectHtml = () => `<select id="mBrSel" class="ui-select">${M_BR_OPTS.map((o) => `<option value="${o.v}" ${mBr === o.v ? "selected" : ""}>${o.label}</option>`).join("")}</select>`;
 async function changeBr(newBr) {
   if ((newBr === "320" || newBr === "999") && !NH.user?.is_pro) {
@@ -766,7 +782,8 @@ async function matchExactKuwo(song, brOverride = null) {
 }
 
 async function resolveSongUrl(song, brOverride = null) {
-  const br = brOverride || mBr;
+  const selectedBr = brOverride || mBr;
+  const br = !isProUser() && !["128", "192"].includes(selectedBr) ? "192" : selectedBr;
   if (song.source === "kuwo" && song.id) {
     try {
       const r = await fetch(`/kw?act=url&id=${encodeURIComponent(song.id)}&br=${encodeURIComponent(br)}`);
@@ -1599,7 +1616,7 @@ function renderMusicFav() {
   };
   paintMusicList($("#mFavList"), shown);
   if (shown.length) {
-    $("#mFavList").querySelectorAll(".m-item").forEach((row, idx) => {
+    $("#mFavList").querySelectorAll(".m-row").forEach((row, idx) => {
       const btn = document.createElement("button");
       btn.className = "m-act";
       btn.title = "移动分组";
@@ -1955,6 +1972,7 @@ function renderEpisodes() {
   }, P._epState || (P._epState = { page: null, reversed: false }), false);
 }
 function destroyPlayers() {
+  P.mountToken = (P.mountToken || 0) + 1;
   if (P.hls) { P.hls.destroy(); P.hls = null; }
   if (P.flv) { P.flv.destroy(); P.flv = null; }
   const v = $("#video"); v.removeAttribute("src"); v.load();
@@ -1969,9 +1987,24 @@ function tip(msg, isHtml = false) {
   else el.textContent = msg || "";
   el.style.display = msg ? "flex" : "none";
 }
-function mountSource(url, seekTime = 0, _proxyTried = false) {
+async function mountSource(url, seekTime = 0, _proxyTried = false) {
   destroyPlayers();
   stopMusicForVideo();
+  const mountToken = P.mountToken;
+  const playbackTarget = new URL(url, location.href);
+  const gatewayOrigin = window.__NH_API_BASE__ ? new URL(window.__NH_API_BASE__).origin : location.origin;
+  if (playbackTarget.pathname === "/api/live/m3u8" && playbackTarget.origin === gatewayOrigin) {
+    try {
+      const result = await nhApi("/api/media/ticket");
+      if (mountToken !== P.mountToken) return;
+      const target = playbackTarget;
+      target.searchParams.set("ticket", result.ticket);
+      url = target.href;
+    } catch (err) {
+      if (mountToken === P.mountToken) tip("播放授权失败，请重新登录后重试");
+      return;
+    }
+  }
   const v = $("#video");
   if (seekTime > 1 && !P.isLive) {
     let seekDone = false;
@@ -2602,7 +2635,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.7</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.3</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -2757,7 +2790,10 @@ function renderMe() {
   $("#goWebdav").onclick = () => go("webdav");
   $("#clearAll").onclick = async () => {
     if (await modal("清空本机数据", "将重置所有自定义源、观看进度、影视片单、音乐收藏与小说书架，确定继续？")) {
-      [K.SOURCE, K.LIKE, K.HISTORY, K.WEBDAV, "channels", "music_favs", "music_hist", "progress", "novel_shelf", "novel_hist", "novel_prog", "novel_cfg"].forEach((k) => localStorage.removeItem(k));
+      [K.SOURCE, K.LIKE, K.HISTORY, K.WEBDAV, "channels", "music_favs", "music_fav_groups", "music_hist", "progress", "novel_shelf", "novel_hist", "novel_prog", "novel_cfg"].forEach((k) => {
+        delete _mem[k];
+        localStorage.removeItem(k);
+      });
       sources = DEFAULT_SOURCES.slice(); channels = DEFAULT_CHANNELS.slice();
       ensureLocalAuth(); renderMe(); toast("本机数据已重置");
     }
@@ -3180,8 +3216,9 @@ function syncReaderShelfBtn() {
   $("#readerShelfBtn").innerHTML = `${ico(on ? "bookmarkFill" : "bookmark")} ${on ? "已藏" : "加书架"}`;
 }
 
-async function loadReaderChapter(index, restoreRatio = 0) {
+async function loadReaderChapter(index, restoreRatio = 0, fromTts = false) {
   if (!R.book || !R.chapters.length) return;
+  if (!fromTts) stopNovelTts();
   index = Math.max(1, Math.min(R.chapters.length, index));
   R.index = index;
   const myToken = ++R.token;
@@ -3199,7 +3236,7 @@ async function loadReaderChapter(index, restoreRatio = 0) {
 
   try {
     const d = await fetchSingleChapter(R.book.book_id, index);
-    if (myToken !== R.token) return;
+    if (myToken !== R.token) return false;
 
     $("#readerChSub").textContent = `${d.title} · ${index}/${R.chapters.length}`;
     $("#readerArticle").innerHTML = `<h2>${esc(d.title)}</h2>${d.content}`;
@@ -3226,8 +3263,9 @@ async function loadReaderChapter(index, restoreRatio = 0) {
     if (index < R.chapters.length) {
       fetchSingleChapter(R.book.book_id, index + 1).catch(() => {});
     }
+    return true;
   } catch (e) {
-    if (myToken !== R.token) return;
+    if (myToken !== R.token) return false;
     $("#readerArticle").innerHTML = `
       <h2>${esc(chMeta ? chMeta.title : `第${index}章`)}</h2>
       <div class="empty" style="padding:36px 0">
@@ -3236,6 +3274,7 @@ async function loadReaderChapter(index, restoreRatio = 0) {
       </div>`;
     const btn = $("#rRetryBtn");
     if (btn) btn.onclick = () => loadReaderChapter(index, restoreRatio);
+    return false;
   }
 }
 
@@ -3631,7 +3670,8 @@ async function cloudSyncPull(silent = false) {
     restore(d.sync.data);
     sources = get(K.SOURCE, DEFAULT_SOURCES);
     channels = get("channels", DEFAULT_CHANNELS);
-    mBr = get("m_br", "320");
+    mBr = get("m_br", "192");
+    if (!isProUser() && !["128", "192"].includes(mBr)) mBr = "192";
     if (!silent) {
       toast("已从云端恢复全部片单、书架与阅读进度");
       renderMe();
@@ -3752,63 +3792,175 @@ async function togglePipLyrics() {
 /* ============ 小说 Web Speech TTS 语音听书 ============ */
 let ttsSpeaking = false;
 let ttsToken = 0;
+let _novelSpeechRun = null;
+let _novelSpeechResume = null;
+let _novelSpeechPending = null;
+let _novelSpeechDelay = null;
 
-function stopNovelTts() {
+function buildNovelSpeechSegments(paragraphs) {
+  const segments = [];
+  for (const paragraph of paragraphs) {
+    const chars = Array.from(String(paragraph).trim());
+    let text = "";
+    const add = () => {
+      const value = text.trim();
+      text = "";
+      if (!value) return;
+      // Small punctuation-based changes; the installed voice supplies the timbre.
+      const question = /[？?][”’」』"]*$/.test(value);
+      const excited = /[！!][”’」』"]*$/.test(value);
+      const trailing = /(?:…|\.\.\.)[”’」』"]*$/.test(value);
+      segments.push({ text: value, rate: trailing ? 0.92 : question ? 0.98 : excited ? 1.06 : 1.0,
+        pitch: question ? 1.04 : excited ? 1.02 : 1.0, pauseMs: trailing ? 420 : 200 });
+    };
+    const before = segments.length;
+    for (let i = 0; i < chars.length; i++) {
+      text += chars[i];
+      const closing = /[”’」』"]/.test(chars[i + 1] || "");
+      if (text.length >= 160 || (!closing && /[。！？!?；;…][”’」』"]*$/.test(text))) add();
+    }
+    add();
+    if (segments.length > before) segments[segments.length - 1].pauseMs = 380;
+  }
+  return segments;
+}
+
+function novelSpeechKey() {
+  return `${R.book?.book_id || ""}:${R.index}`;
+}
+
+function syncNovelSpeechButton() {
+  const btn = $("#rTtsBtn");
+  if (!btn) return;
+  btn.classList[ttsSpeaking ? "add" : "remove"]("speaking");
+  btn.innerHTML = `${ico(ttsSpeaking ? "pause" : "volume")} ${ttsSpeaking ? "暂停" : _novelSpeechResume ? "续听" : "听书"}`;
+}
+
+function stopNovelTts(keepPosition = false) {
+  _novelSpeechResume = keepPosition && _novelSpeechRun ? { ..._novelSpeechRun } : null;
   ttsToken++;
   ttsSpeaking = false;
+  _novelSpeechRun = null;
+  if (_novelSpeechDelay) {
+    clearTimeout(_novelSpeechDelay.timer);
+    _novelSpeechDelay.resolve();
+    _novelSpeechDelay = null;
+  }
+  if (_novelSpeechPending) _novelSpeechPending.finish(new Error("cancelled"));
+  try { window.NovaNative?.stopNovelSpeech?.(); } catch {}
   try { window.speechSynthesis?.cancel(); } catch {}
-  const btn = $("#rTtsBtn");
-  if (btn) {
-    btn.classList.remove("speaking");
-    btn.innerHTML = `${ico("volume")} 听书`;
+  syncNovelSpeechButton();
+}
+
+window.__nhNovelTtsEvent = (id, event, detail) => {
+  const pending = _novelSpeechPending;
+  if (!pending || pending.id !== id) return;
+  if (event === "done") pending.finish();
+  else if (event === "error") pending.finish(new Error(detail || "synthesis_failed"));
+};
+
+function speakNovelSegment(segment, run) {
+  return new Promise((resolve, reject) => {
+    const id = `novel-${run.token}-${run.index}`;
+    const timer = setTimeout(() => finish(new Error("speech_timeout")), 90000);
+    const finish = (err) => {
+      if (!_novelSpeechPending || _novelSpeechPending.id !== id) return;
+      clearTimeout(timer);
+      _novelSpeechPending = null;
+      err ? reject(err) : resolve();
+    };
+    _novelSpeechPending = { id, finish };
+    try {
+      if (run.native) {
+        window.NovaNative.speakNovel(segment.text, id, segment.rate, segment.pitch);
+      } else {
+        const utterance = new SpeechSynthesisUtterance(segment.text);
+        utterance.lang = "zh-CN";
+        utterance.rate = segment.rate;
+        utterance.pitch = segment.pitch;
+        const voice = window.speechSynthesis.getVoices?.().find(v => /^zh[-_](CN|Hans)/i.test(v.lang));
+        if (voice) utterance.voice = voice;
+        utterance.onend = () => finish();
+        utterance.onerror = (event) => finish(new Error(event.error || "synthesis_failed"));
+        window.speechSynthesis.speak(utterance);
+      }
+    } catch (err) { finish(err); }
+  });
+}
+
+async function runNovelSpeech(run) {
+  try {
+    while (ttsSpeaking && run.token === ttsToken) {
+      if (run.index >= run.segments.length) {
+        if (R.index >= R.chapters.length) {
+          stopNovelTts();
+          toast("全书朗读完毕");
+          return;
+        }
+        const next = R.index + 1;
+        const loaded = await loadReaderChapter(next, 0, true);
+        if (!ttsSpeaking || run.token !== ttsToken) return;
+        if (!loaded || R.index !== next) throw new Error("chapter_failed");
+        run.segments = buildNovelSpeechSegments([...document.querySelectorAll("#readerArticle p")].map(p => p.textContent));
+        run.key = novelSpeechKey();
+        run.index = 0;
+        if (!run.segments.length) throw new Error("chapter_failed");
+      }
+      const segment = run.segments[run.index];
+      await speakNovelSegment(segment, run);
+      if (!ttsSpeaking || run.token !== ttsToken) return;
+      run.index++;
+      await new Promise(resolve => {
+        const timer = setTimeout(() => {
+          _novelSpeechDelay = null;
+          resolve();
+        }, segment.pauseMs);
+        _novelSpeechDelay = { timer, resolve };
+      });
+    }
+  } catch (err) {
+    if (run.token !== ttsToken) return;
+    stopNovelTts(err.message !== "chapter_failed");
+    if (err.message === "missing_voice" || err.message === "init_failed") {
+      toast("系统缺少可用的离线中文语音，请在语音设置中安装中文语音包", 4000);
+      if (window.NovaNative?.openTtsSettings) {
+        modal("安装免费中文语音", "请在系统文字转语音设置中选择支持中文的语音引擎，并下载离线中文语音包。完成后返回本页，点击续听。确定打开系统设置？").then(ok => {
+          if (ok) window.NovaNative.openTtsSettings();
+        });
+      }
+    } else {
+      toast(err.message === "chapter_failed" ? "下一章加载失败，听书已暂停，请重新加载章节" : "朗读失败，已保留位置，可点击续听重试", 3200);
+    }
   }
 }
 
 function toggleNovelTts() {
-  if (!("speechSynthesis" in window)) return toast("当前浏览器不支持语音听书");
   if (ttsSpeaking) {
-    stopNovelTts();
-    toast("已停止语音听书");
+    stopNovelTts(true);
     return;
   }
-  const paras = [...document.querySelectorAll("#readerArticle p")].map((p) => p.textContent.trim()).filter(Boolean);
-  if (!paras.length) return toast("当前章节暂无可朗读正文");
-
-  ttsSpeaking = true;
-  const myTok = ++ttsToken;
-  const btn = $("#rTtsBtn");
-  if (btn) {
-    btn.classList.add("speaking");
-    btn.innerHTML = `${ico("pause")} 停读`;
+  const native = typeof window.NovaNative?.speakNovel === "function";
+  if (window.NovaNative && !native) return toast("请安装支持免费原生听书的新版 APK", 3200);
+  if (!native && !("speechSynthesis" in window)) {
+    return toast("当前浏览器不支持语音听书");
   }
-  toast("开始语音听书，读完自动连播下一章");
-
-  let idx = 0;
-  const speakNext = () => {
-    if (!ttsSpeaking || myTok !== ttsToken) return;
-    if (idx >= paras.length) {
-      if (R.index < R.chapters.length) {
-        loadReaderChapter(R.index + 1, 0).then(() => {
-          if (ttsSpeaking && myTok === ttsToken) {
-            ttsSpeaking = false;
-            setTimeout(toggleNovelTts, 350);
-          }
-        });
-      } else {
-        stopNovelTts();
-        toast("全书朗读完毕");
-      }
-      return;
-    }
-    const u = new SpeechSynthesisUtterance(paras[idx++]);
-    u.lang = "zh-CN";
-    u.rate = 1.1;
-    u.onend = () => { if (myTok === ttsToken && ttsSpeaking) speakNext(); };
-    u.onerror = () => { if (myTok === ttsToken && ttsSpeaking) speakNext(); };
-    window.speechSynthesis.speak(u);
-  };
+  const key = novelSpeechKey();
+  const saved = _novelSpeechResume?.key === key ? _novelSpeechResume : null;
+  const segments = saved ? saved.segments : buildNovelSpeechSegments([...document.querySelectorAll("#readerArticle p")].map(p => p.textContent));
+  if (!segments.length) return toast("当前章节暂无可朗读正文");
+  // Invalidate asynchronous song loading as well as pausing any current audio.
+  mPlayToken++;
+  try { audioEl.pause(); } catch {}
+  try { $("#video")?.pause(); } catch {}
+  try { window.NovaNative?.stopNovelSpeech?.(); } catch {}
   try { window.speechSynthesis.cancel(); } catch {}
-  speakNext();
+  const run = { key, segments, index: saved ? saved.index : 0, native, token: ++ttsToken };
+  _novelSpeechRun = run;
+  _novelSpeechResume = null;
+  ttsSpeaking = true;
+  syncNovelSpeechButton();
+  toast(native ? "免费系统听书已开启，读完自动续章" : "开始听书，读完自动续章");
+  runNovelSpeech(run);
 }
 
 async function dismissSplash(bootAt) {
