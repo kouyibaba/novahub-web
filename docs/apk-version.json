@@ -1,10 +1,10 @@
 {
-  "versionCode": 5,
-  "versionName": "2.4.2",
+  "versionCode": 6,
+  "versionName": "2.4.3",
   "force": false,
-  "notes": "全新设计应用内升级提示与下载进度弹窗（深曜石黑与暖琥珀金圆角卡片）\n优化更新日志排版、百分比大字与实时下载字节进度条展示\n延续通知栏实时歌词、总时长可拖动进度条与专辑封面体验",
-  "sha256": "1c1130ae260abeb13e21f98b7c0e71cd8c8a7496ffa6b89a9b864523f36f1da7",
-  "size": 33751,
+  "notes": "新增免费原生中文听书，使用手机已安装的离线中文语音\n支持按句暂停续听、自动续章及标点语气和停顿调整\n语音包缺失时引导打开系统设置，修复朗读出错跳段和续章失败重复朗读\n全新设计应用内升级提示与下载进度弹窗（深曜石黑与暖琥珀金圆角卡片）\n优化更新日志排版、百分比大字与实时下载字节进度条展示\n延续通知栏实时歌词、总时长可拖动进度条与专辑封面体验",
+  "sha256": "170c3b15f2359124ea8c14eed30ba120468260efd7eba2694f3488b9bf82cfec",
+  "size": 38727,
   "url": "https://kouyibaba.github.io/novahub-web/apk/novahub-latest.apk",
-  "fallback_url": "https://github.com/kouyibaba/novahub-web/releases/download/v2.4.2/NovaHub-v2.4.2.apk"
+  "fallback_url": "https://github.com/kouyibaba/novahub-web/releases/download/v2.4.3/NovaHub-v2.4.3.apk"
 }
