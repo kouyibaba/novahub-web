@@ -80,6 +80,7 @@ const IC = {
   crown: `<svg class="svg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 8 4.5 4 4.5-6 4.5 6L21 8l-2 10H5L3 8Z"/></svg>`,
   pip: `<svg class="svg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="15" rx="2"/><rect x="11.5" y="10.5" width="7" height="5.5" rx="1" fill="currentColor" stroke="none"/></svg>`,
   volume: `<svg class="svg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.8a9 9 0 0 1 0 12.4"/></svg>`,
+  sun: `<svg class="svg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M2.5 12H5M19 12h2.5M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg>`,
 };
 const ico = (name) => IC[name] || "";
 window._imgPh = (el, iconName, cls) => {
@@ -925,11 +926,64 @@ audioEl.onerror = async () => {
   }
   handleMusicError();
 };
+function paintRange(el, pct, bufPct = 0) {
+  if (!el) return;
+  const p = Math.max(0, Math.min(100, Number(pct) || 0)).toFixed(2) + "%";
+  const b = Math.max(0, Math.min(100, Number(bufPct) || 0)).toFixed(2) + "%";
+  el.style.setProperty("--p", p);
+  el.style.setProperty("--b", b);
+}
+
+function getBufferedPct(media) {
+  try {
+    if (!media || !isFinite(media.duration) || media.duration <= 0 || !media.buffered?.length) return 0;
+    const end = media.buffered.end(media.buffered.length - 1);
+    return (end / media.duration) * 100;
+  } catch { return 0; }
+}
+
+/** 同步媒体通知状态至 Android 原生前台通知栏（如在 APK 壳内） */
+function syncNativeMedia(title, artist, isPlaying, mediaType = "audio") {
+  if (window.NovaNative && typeof window.NovaNative.updateMediaNotification === "function") {
+    try { window.NovaNative.updateMediaNotification(String(title || "NovaHub"), String(artist || ""), !!isPlaying, mediaType); } catch {}
+  }
+}
+
+function clearNativeMedia() {
+  if (window.NovaNative && typeof window.NovaNative.clearMediaNotification === "function") {
+    try { window.NovaNative.clearMediaNotification(); } catch {}
+  }
+}
+
+/** 供原生 Android 通知栏按钮回调操控当前网页播放 */
+window.__nhMediaAction = (act) => {
+  const layer = $("#playerLayer");
+  const isVideoActive = layer && !layer.classList.contains("hidden");
+  if (isVideoActive) {
+    const v = $("#video");
+    if (!v) return;
+    if (act === "play_pause") { v.paused ? v.play().catch(() => {}) : v.pause(); }
+    else if (act === "prev" && P.eps.length > 1 && P.idx > 0) { P.idx -= 1; renderEpisodes(); mountSource(P.eps[P.idx].url); }
+    else if (act === "next" && P.eps.length > 1 && P.idx + 1 < P.eps.length) { P.idx += 1; renderEpisodes(); mountSource(P.eps[P.idx].url); }
+    else if (act === "close") { v.pause(); clearNativeMedia(); }
+    return;
+  }
+  if (!curSong) { clearNativeMedia(); return; }
+  if (act === "play_pause") { audioEl.paused ? audioEl.play().catch(() => {}) : audioEl.pause(); }
+  else if (act === "prev") { const pi = nextMusicIdx(-1); if (pi >= 0) playSongFromList(musicQueue, pi, currentRoute === "m_player"); }
+  else if (act === "next") { const ni = nextMusicIdx(1); if (ni >= 0) playSongFromList(musicQueue, ni, currentRoute === "m_player"); }
+  else if (act === "close") { audioEl.pause(); clearNativeMedia(); }
+};
+
 audioEl.onloadedmetadata = () => {
+  const dur = isFinite(audioEl.duration) && audioEl.duration > 0 ? audioEl.duration : 0;
+  const pct = dur ? (audioEl.currentTime / dur) * 100 : 0;
   if (currentRoute === "m_player") {
-    const dur = isFinite(audioEl.duration) && audioEl.duration > 0 ? audioEl.duration : 0;
     const seek = $("#mSeek"), curT = $("#mCurTime"), durT = $("#mDurTime");
-    if (seek && !seek._dragging) seek.value = dur ? String(Math.round((audioEl.currentTime / dur) * 1000)) : "0";
+    if (seek && !seek._dragging) {
+      seek.value = dur ? String(Math.round(pct * 10)) : "0";
+      paintRange(seek, pct, getBufferedPct(audioEl));
+    }
     if (curT) curT.textContent = fmt(audioEl.currentTime || 0);
     if (durT) durT.textContent = fmt(dur);
   }
@@ -970,8 +1024,12 @@ audioEl.ontimeupdate = () => {
   }
   const dur = isFinite(audioEl.duration) && audioEl.duration > 0 ? audioEl.duration : 0;
   if (currentRoute === "m_player" && dur) {
+    const pct = (audioEl.currentTime / dur) * 100;
     const seek = $("#mSeek");
-    if (seek && !seek._dragging) seek.value = String(Math.round((audioEl.currentTime / dur) * 1000));
+    if (seek && !seek._dragging) {
+      seek.value = String(Math.round(pct * 10));
+      paintRange(seek, pct, getBufferedPct(audioEl));
+    }
     const curT = $("#mCurTime"), durT = $("#mDurTime");
     if (curT) curT.textContent = fmt(audioEl.currentTime || 0);
     if (durT) durT.textContent = fmt(dur);
@@ -997,7 +1055,9 @@ function syncMediaSessionTitle() {
 }
 
 function syncMediaSessionState() {
-  if (!("mediaSession" in navigator) || !curSong) return;
+  if (!curSong) return;
+  syncNativeMedia(curSong.name || "未知歌曲", curSong.artist || "NovaHub 音乐", !audioEl.paused, "audio");
+  if (!("mediaSession" in navigator)) return;
   try {
     const artUrl = curSong.pic || new URL("icon.svg", location.href).href;
     const artType = artUrl.endsWith(".svg") ? "image/svg+xml" : "image/jpeg";
@@ -1357,7 +1417,12 @@ function renderMusicPlayer() {
   $("#mNextBtn").onclick = () => { const ni = nextMusicIdx(1); if (ni >= 0) playSongFromList(musicQueue, ni, true); };
   $("#mListBtn").onclick = openMusicQueueSheet;
   const sk = $("#mSeek");
-  sk.oninput = () => { sk._dragging = true; if (isFinite(audioEl.duration) && audioEl.duration > 0) $("#mCurTime").textContent = fmt((sk.value / 1000) * audioEl.duration); };
+  paintRange(sk, dur ? (audioEl.currentTime / dur) * 100 : 0, getBufferedPct(audioEl));
+  sk.oninput = () => {
+    sk._dragging = true;
+    paintRange(sk, sk.value / 10, getBufferedPct(audioEl));
+    if (isFinite(audioEl.duration) && audioEl.duration > 0) $("#mCurTime").textContent = fmt((sk.value / 1000) * audioEl.duration);
+  };
   sk.onchange = () => { sk._dragging = false; if (isFinite(audioEl.duration) && audioEl.duration > 0) { audioEl.currentTime = (sk.value / 1000) * audioEl.duration; syncAudioPositionState(); } };
 }
 
@@ -1541,6 +1606,57 @@ async function openSource(src, _fromBack) {
   }
 }
 
+/**
+ * 统一渲染电视剧/直播分段选集组件（超过 20 集自动按 20 集分页，支持正倒序切换）
+ */
+function renderPagedEpisodes(container, eps, activeIdx, onSelect, stateObj, showTitle = true) {
+  if (!container) return;
+  if (!eps || !eps.length) { container.innerHTML = ""; return; }
+  const st = stateObj || { page: null, reversed: false };
+  const pageSize = 20;
+  const total = eps.length;
+  const order = eps.map((_, idx) => idx);
+  if (st.reversed) order.reverse();
+
+  const totalPages = Math.ceil(total / pageSize);
+  let curPos = activeIdx >= 0 ? order.indexOf(activeIdx) : 0;
+  if (curPos < 0) curPos = 0;
+  if (st.page == null || st.page < 0 || st.page >= totalPages) {
+    st.page = Math.floor(curPos / pageSize);
+  }
+  const start = st.page * pageSize;
+  const slice = order.slice(start, start + pageSize);
+
+  const rangesHtml = totalPages > 1 ? `<div class="ep-range-bar">${Array.from({ length: totalPages }, (_, p) => {
+    const sIdx = p * pageSize, eIdx = Math.min(total - 1, (p + 1) * pageSize - 1);
+    const label = st.reversed ? `${order[sIdx] + 1}-${order[eIdx] + 1}` : `${sIdx + 1}-${eIdx + 1}`;
+    return `<button class="m-chip ${p === st.page ? "active" : ""}" data-epage="${p}" type="button">${label}</button>`;
+  }).join("")}</div>` : "";
+
+  const headHtml = (showTitle || total > 10) ? `
+    <div class="ep-head-bar">
+      <div class="section-title" style="margin:0">选集 (${total})</div>
+      <button class="btn ghost ep-rev-btn" style="padding:4px 10px;font-size:12px" type="button">${ico("sort")} ${st.reversed ? "倒序" : "正序"}</button>
+    </div>` : "";
+
+  container.innerHTML = `${headHtml}${rangesHtml}<div class="ep-wrap">${slice.map((origIdx) => `<div class="ep ${origIdx === activeIdx ? "active" : ""}" data-i="${origIdx}">${esc(eps[origIdx].name)}</div>`).join("")}</div>`;
+
+  container.querySelector(".ep-rev-btn")?.addEventListener("click", () => {
+    st.reversed = !st.reversed;
+    st.page = 0;
+    renderPagedEpisodes(container, eps, activeIdx, onSelect, st, showTitle);
+  });
+  container.querySelectorAll("[data-epage]").forEach((btn) => {
+    btn.onclick = () => {
+      st.page = +btn.dataset.epage;
+      renderPagedEpisodes(container, eps, activeIdx, onSelect, st, showTitle);
+    };
+  });
+  container.querySelectorAll(".ep").forEach((el) => {
+    el.onclick = () => onSelect(+el.dataset.i);
+  });
+}
+
 /* 详情 + 播放 */
 async function openDetail(v, _fromBack) {
   if (!_fromBack) pushView(() => openDetail(v, true));
@@ -1577,12 +1693,11 @@ async function openDetail(v, _fromBack) {
           <button class="btn ghost" id="btnLike">${ico(liked ? "heartFill" : "heart")} ${liked ? "已收藏" : "收藏"}</button>
         </div>
       </div>
-      <div class="section-title">剧集选集 (${eps.length})</div>
-      <div class="ep-wrap" id="eps"></div>`;
-    $("#eps").innerHTML = eps.map((e, i) => `<div class="ep" data-i="${i}">${esc(e.name)}</div>`).join("");
+      <div id="eps" style="margin-top:12px"></div>`;
     const vodKey = src.id + ":" + v.id;
     const saved = getProgress(vodKey);
-    $("#eps").querySelectorAll(".ep").forEach((el) => el.onclick = () => play(v.name + " · " + eps[el.dataset.i].name, eps[el.dataset.i].url, eps, +el.dataset.i, vodKey, 0));
+    const activeEpIdx = saved && saved.idx < eps.length ? saved.idx : -1;
+    renderPagedEpisodes($("#eps"), eps, activeEpIdx, (i) => play(v.name + " · " + eps[i].name, eps[i].url, eps, i, vodKey, 0), { page: null, reversed: false }, true);
     const playSaved = () => {
       if (!eps.length) return toast("暂无可用播放源");
       const idx = saved && saved.idx < eps.length ? saved.idx : 0;
@@ -1711,8 +1826,8 @@ async function doSearch(q, _fromBack) {
 }
 
 /* ============ 视频播放器 ============ */
-const P = { hls: null, flv: null, eps: [], idx: 0, title: "", vodKey: "" };
-function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0) {
+const P = { hls: null, flv: null, eps: [], idx: 0, title: "", vodKey: "", isLive: false, _epState: null };
+function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0, isLive = false) {
   if (!NH.user) {
     toast("请先登录账号后观看（5 秒免费注册）");
     if (typeof openAuthModal === "function") openAuthModal("login");
@@ -1721,8 +1836,12 @@ function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0) {
   stopMusicForVideo();
   const layer = $("#playerLayer");
   const wasHidden = layer.classList.contains("hidden");
-  P.title = title; P.eps = eps; P.idx = idx; P.vodKey = vodKey;
+  P.title = title; P.eps = eps; P.idx = idx; P.vodKey = vodKey; P.isLive = !!isLive;
+  P._epState = { page: null, reversed: false };
   $("#playerTitle").textContent = title;
+  $("#seek")?.classList.toggle("hidden", P.isLive);
+  $("#timeText")?.classList.toggle("hidden", P.isLive);
+  $("#liveBadge")?.classList.toggle("hidden", !P.isLive);
   layer.classList.remove("hidden");
   document.body.style.overflow = "hidden";
   if (wasHidden) {
@@ -1734,12 +1853,14 @@ function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0) {
   mountSource(url, seekTime);
 }
 function renderEpisodes() {
-  $("#epList").innerHTML = P.eps.length > 1
-    ? `<div class="ep-wrap">${P.eps.map((e, i) => `<div class="ep ${i === P.idx ? "active" : ""}" data-i="${i}">${esc(e.name)}</div>`).join("")}</div>` : "";
-  $("#epList").querySelectorAll(".ep").forEach((el) => el.onclick = () => {
-    P.idx = +el.dataset.i; renderEpisodes(); mountSource(P.eps[P.idx].url);
-    $("#playerTitle").textContent = P.title.replace(/ · .*$/, "") + " · " + P.eps[P.idx].name;
-  });
+  const el = $("#epList");
+  if (!P.eps || P.eps.length <= 1) { if (el) el.innerHTML = ""; return; }
+  renderPagedEpisodes(el, P.eps, P.idx, (i) => {
+    P.idx = i;
+    renderEpisodes();
+    mountSource(P.eps[i].url);
+    $("#playerTitle").textContent = P.title.replace(/ · .*$/, "") + " · " + P.eps[i].name;
+  }, P._epState || (P._epState = { page: null, reversed: false }), false);
 }
 function destroyPlayers() {
   if (P.hls) { P.hls.destroy(); P.hls = null; }
@@ -1748,6 +1869,7 @@ function destroyPlayers() {
   if ("mediaSession" in navigator && !curSong) {
     try { navigator.mediaSession.playbackState = "none"; } catch {}
   }
+  if (!curSong) clearNativeMedia();
 }
 function tip(msg, isHtml = false) {
   const el = $("#playerTip");
@@ -1755,11 +1877,11 @@ function tip(msg, isHtml = false) {
   else el.textContent = msg || "";
   el.style.display = msg ? "flex" : "none";
 }
-function mountSource(url, seekTime = 0) {
+function mountSource(url, seekTime = 0, _proxyTried = false) {
   destroyPlayers();
   stopMusicForVideo();
   const v = $("#video");
-  if (seekTime > 1) {
+  if (seekTime > 1 && !P.isLive) {
     let seekDone = false;
     const applySeek = () => {
       if (seekDone) return;
@@ -1772,10 +1894,11 @@ function mountSource(url, seekTime = 0) {
     v.addEventListener("loadedmetadata", applySeek, { once: true });
     v.addEventListener("canplay", applySeek, { once: true });
   }
-  const isHls = /\.m3u8(\?|$)/i.test(url);
+  const isHls = /\.m3u8(\?|$)/i.test(url) || url.includes("/api/live/m3u8");
   const isFlv = /\.flv(\?|$)/i.test(url);
   const isMp4 = /\.(mp4|mkv|webm|ts)(\?|$)/i.test(url);
   $("#qualitySel").innerHTML = "<option>自动</option>";
+  paintRange($("#seek"), 0, 0);
   tip("正在缓冲视频流…");
   if (isHls && window.Hls && Hls.isSupported()) {
     P.hls = new Hls({ maxBufferLength: 30 });
@@ -1787,6 +1910,15 @@ function mountSource(url, seekTime = 0) {
     });
     P.hls.on(Hls.Events.ERROR, (_e, d) => {
       if (!d.fatal) return;
+      // 直播或网络跨域错误自动切至平板 /api/live/m3u8 重写代理秒播
+      if (!_proxyTried && !url.includes("/api/live/m3u8") && (P.isLive || d.type === Hls.ErrorTypes.NETWORK_ERROR)) {
+        const base = window.__NH_API_BASE__ || (location.protocol.startsWith("http") && !location.hostname.endsWith("github.io") ? "" : "");
+        if (base || !location.hostname.endsWith("github.io")) {
+          tip("直连受限，正经由节点转发直播流…");
+          mountSource(`${base}/api/live/m3u8?url=${encodeURIComponent(url)}`, seekTime, true);
+          return;
+        }
+      }
       if (v.canPlayType("application/vnd.apple.mpegurl")) {
         destroyPlayers();
         v.src = url;
@@ -1886,21 +2018,23 @@ function updateFsRotate() {
   layer.classList.toggle("fs-rotate", window.innerHeight > window.innerWidth);
 }
 
-/** 同步视频播放至手机状态栏 / 锁屏 MediaSession */
+/** 同步视频播放至手机状态栏 / 锁屏 MediaSession 及 APK 原生通知栏 */
 function syncVideoMediaSession() {
   const layer = $("#playerLayer");
   const v = $("#video");
-  if (!("mediaSession" in navigator) || !layer || layer.classList.contains("hidden") || !P.title) return;
+  if (!layer || layer.classList.contains("hidden") || !P.title) return;
+  syncNativeMedia(P.title, P.isLive ? "电视直播" : "NovaHub 影院", !!(v && !v.paused), "video");
+  if (!("mediaSession" in navigator)) return;
   try {
     const artUrl = new URL("icon.svg", location.href).href;
     navigator.mediaSession.playbackState = v && !v.paused ? "playing" : "paused";
     navigator.mediaSession.metadata = new MediaMetadata({
       title: P.title,
-      artist: "NovaHub 影院",
+      artist: P.isLive ? "电视直播" : "NovaHub 影院",
       album: "NovaHub · 星隅",
       artwork: [{ src: artUrl, sizes: "any", type: "image/svg+xml" }],
     });
-    if (v && isFinite(v.duration) && v.duration > 0 && typeof navigator.mediaSession.setPositionState === "function") {
+    if (v && !P.isLive && isFinite(v.duration) && v.duration > 0 && typeof navigator.mediaSession.setPositionState === "function") {
       navigator.mediaSession.setPositionState({
         duration: v.duration,
         playbackRate: v.playbackRate || 1,
@@ -1910,7 +2044,7 @@ function syncVideoMediaSession() {
     navigator.mediaSession.setActionHandler("play", () => v && v.play().catch(() => {}));
     navigator.mediaSession.setActionHandler("pause", () => v && v.pause());
     navigator.mediaSession.setActionHandler("seekto", (d) => {
-      if (v && d.seekTime != null && isFinite(v.duration)) {
+      if (v && !P.isLive && d.seekTime != null && isFinite(v.duration)) {
         v.currentTime = d.seekTime;
         syncVideoMediaSession();
       }
@@ -2014,126 +2148,264 @@ $("#btnFs").onclick = () => {
   v.addEventListener("loadedmetadata", syncVideoMediaSession);
   v.addEventListener("seeked", syncVideoMediaSession);
 })();
-$("#seek").addEventListener("input", (e) => { const v = $("#video"); if (v.duration) v.currentTime = (e.target.value / 1000) * v.duration; });
+$("#seek").addEventListener("input", (e) => {
+  const v = $("#video");
+  if (!v.duration || P.isLive) return;
+  v.currentTime = (e.target.value / 1000) * v.duration;
+  paintRange(e.target, e.target.value / 10, getBufferedPct(v));
+});
 let _lastPaused = null;
 setInterval(() => {
-  const v = $("#video"); if (!v.duration) return;
-  $("#seek").value = String((v.currentTime / v.duration) * 1000);
-  $("#timeText").textContent = fmt(v.currentTime) + " / " + fmt(v.duration);
-  if (P.vodKey && Math.floor(v.currentTime) % 5 === 0) saveProgress(P.vodKey, P.idx, v.currentTime);
+  const v = $("#video");
+  if (!v) return;
   if (_lastPaused !== v.paused) {
     _lastPaused = v.paused;
     $("#btnPlay").innerHTML = ico(v.paused ? "play" : "pause");
   }
+  if (!v.duration || !isFinite(v.duration) || P.isLive) return;
+  const pct = (v.currentTime / v.duration) * 100;
+  const sk = $("#seek");
+  if (sk) {
+    sk.value = String(Math.round(pct * 10));
+    paintRange(sk, pct, getBufferedPct(v));
+  }
+  $("#timeText").textContent = fmt(v.currentTime) + " / " + fmt(v.duration);
+  if (P.vodKey && Math.floor(v.currentTime) % 5 === 0) saveProgress(P.vodKey, P.idx, v.currentTime);
 }, 500);
 function fmt(s) {
   s = isFinite(s) && s > 0 ? Math.floor(s) : 0;
   return String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
 }
 
-/* 播放器手势：左右滑动控制前进/后退，全屏轻点画面显隐控制栏 */
+/* 播放器全屏及竖屏通用手势：左半屏上下调亮度，右半屏上下调声音，左右滑动快进/后退，轻点显隐控制栏 */
 (() => {
   const box = $(".player-box");
   const v = $("#video");
-  let sx = 0, sy = 0, startTime = 0, targetTime = -1, swiping = false;
+  const hud = $("#playerHud");
+  const dimmer = $("#playerDimmer");
+  let _hudTimer = null;
+  let _curBright = 1.0;
+  let sx = 0, sy = 0, startTime = 0, startBright = 1.0, startVol = 1.0, targetTime = -1;
+  let gestureMode = "", isLeftHalf = true;
+
+  const showHud = (iconName, text, pct) => {
+    if (!hud) return;
+    clearTimeout(_hudTimer);
+    hud.innerHTML = `<div class="player-hud-row">${ico(iconName)}<span>${esc(text)}</span></div><div class="player-hud-bar"><i style="width:${Math.max(0, Math.min(100, pct))}%"></i></div>`;
+    hud.classList.remove("hidden");
+  };
+  const hideHudSoon = () => {
+    clearTimeout(_hudTimer);
+    _hudTimer = setTimeout(() => hud?.classList.add("hidden"), 700);
+  };
+
   box.addEventListener("click", (e) => {
     if (e.target.closest("button") || Date.now() - _lastBoxSwipeAt < 250) return;
     if ($("#playerLayer")?.classList.contains("is-fs")) toggleFsControls();
   });
   box.addEventListener("touchstart", (e) => {
-    if (e.touches.length !== 1 || !v.duration) return;
-    sx = e.touches[0].clientX;
-    sy = e.touches[0].clientY;
-    startTime = v.currentTime;
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0];
+    sx = t.clientX;
+    sy = t.clientY;
+    startTime = v.currentTime || 0;
     targetTime = -1;
-    swiping = false;
+    gestureMode = "";
+    const rect = box.getBoundingClientRect();
+    const rotated = $("#playerLayer")?.classList.contains("fs-rotate");
+    const relX = rotated ? (t.clientY - rect.top) / Math.max(rect.height, 1) : (t.clientX - rect.left) / Math.max(rect.width, 1);
+    isLeftHalf = relX < 0.5;
+    if (window.NovaNative && typeof window.NovaNative.getBrightness === "function") {
+      try {
+        const nb = window.NovaNative.getBrightness();
+        if (nb >= 0 && nb <= 1) _curBright = nb;
+      } catch {}
+    }
+    startBright = _curBright;
+    if (window.NovaNative && typeof window.NovaNative.getVolume === "function") {
+      try {
+        const nv = window.NovaNative.getVolume();
+        startVol = nv >= 0 && nv <= 1 ? nv : (v.volume || 1);
+      } catch { startVol = v.volume || 1; }
+    } else {
+      startVol = v.volume ?? 1;
+    }
   }, { passive: true });
   box.addEventListener("touchmove", (e) => {
-    if (e.touches.length !== 1 || !v.duration) return;
+    if (e.touches.length !== 1) return;
     const rotated = $("#playerLayer")?.classList.contains("fs-rotate");
     const rawDx = e.touches[0].clientX - sx;
     const rawDy = e.touches[0].clientY - sy;
     const dx = rotated ? rawDy : rawDx;
     const dy = rotated ? -rawDx : rawDy;
-    if (!swiping && Math.abs(dx) > 15 && Math.abs(dx) > Math.abs(dy)) swiping = true;
-    if (!swiping) return;
+
+    if (!gestureMode) {
+      if (Math.abs(dx) < 14 && Math.abs(dy) < 14) return;
+      if (Math.abs(dx) > Math.abs(dy)) {
+        if (P.isLive || !v.duration) return;
+        gestureMode = "seek";
+      } else {
+        gestureMode = isLeftHalf ? "bright" : "vol";
+      }
+    }
     e.preventDefault();
-    const delta = Math.round((dx / Math.max(rotated ? box.clientHeight : box.clientWidth, 300)) * 120);
-    targetTime = Math.max(0, Math.min(v.duration, startTime + delta));
-    const diff = Math.round(targetTime - startTime);
-    tip(
-      `<span style="display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--accent)">${ico(diff >= 0 ? "forward" : "rewind")} ${diff >= 0 ? "+" : ""}${diff}s (${fmt(targetTime)} / ${fmt(v.duration)})</span>`,
-      true
-    );
+    if (gestureMode === "seek") {
+      const delta = Math.round((dx / Math.max(rotated ? box.clientHeight : box.clientWidth, 300)) * 120);
+      targetTime = Math.max(0, Math.min(v.duration, startTime + delta));
+      const diff = Math.round(targetTime - startTime);
+      tip(
+        `<span style="display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--accent)">${ico(diff >= 0 ? "forward" : "rewind")} ${diff >= 0 ? "+" : ""}${diff}s (${fmt(targetTime)} / ${fmt(v.duration)})</span>`,
+        true
+      );
+    } else if (gestureMode === "bright") {
+      const span = Math.max((rotated ? box.clientWidth : box.clientHeight) * 0.72, 180);
+      _curBright = Math.max(0.15, Math.min(1.0, startBright - dy / span));
+      if (window.NovaNative && typeof window.NovaNative.setBrightness === "function") {
+        try { window.NovaNative.setBrightness(_curBright); } catch {}
+      } else if (dimmer) {
+        dimmer.style.opacity = ((1 - _curBright) * 0.85).toFixed(2);
+      }
+      showHud("sun", `亮度 ${Math.round(_curBright * 100)}%`, _curBright * 100);
+    } else if (gestureMode === "vol") {
+      const span = Math.max((rotated ? box.clientWidth : box.clientHeight) * 0.72, 180);
+      const nextVol = Math.max(0, Math.min(1, startVol - dy / span));
+      if (window.NovaNative && typeof window.NovaNative.setVolume === "function") {
+        try { window.NovaNative.setVolume(nextVol); } catch {}
+      } else {
+        v.muted = nextVol === 0;
+        v.volume = nextVol;
+      }
+      showHud("volume", `音量 ${Math.round(nextVol * 100)}%`, nextVol * 100);
+    }
   }, { passive: false });
   box.addEventListener("touchend", () => {
-    if (swiping && targetTime >= 0 && v.duration) {
-      v.currentTime = targetTime;
-      _lastBoxSwipeAt = Date.now();
+    if (gestureMode === "seek") {
+      if (targetTime >= 0 && v.duration) v.currentTime = targetTime;
+      tip("");
     }
-    if (swiping) tip("");
-    swiping = false;
+    if (gestureMode) {
+      _lastBoxSwipeAt = Date.now();
+      hideHudSoon();
+    }
+    gestureMode = "";
   });
 })();
 
-/* ============ 直播（m3u8 频道） ============ */
+/* ============ 直播（高清 HTTPS 实测频道 + 分类 + 代理容灾） ============ */
+const LIVE_CATS = ["全部", "央视纪录", "地方卫视", "新闻资讯", "电影文旅", "少儿自然", "自定义"];
 const DEFAULT_CHANNELS = [
-  { name: "CCTV-1 综合", url: "https://live-hls-web-aje.getaj.net/AJE/index.m3u8" },
-  { name: "CCTV-13 新闻", url: "http://ivi.bupt.edu.cn/hls/cctv13.m3u8" },
-  { name: "CCTV-1 备用", url: "http://ivi.bupt.edu.cn/hls/cctv1hd.m3u8" },
-  { name: "CCTV-3 综艺", url: "http://ivi.bupt.edu.cn/hls/cctv3hd.m3u8" },
-  { name: "CCTV-5 体育", url: "http://ivi.bupt.edu.cn/hls/cctv5hd.m3u8" },
-  { name: "CCTV-6 电影", url: "http://ivi.bupt.edu.cn/hls/cctv6hd.m3u8" },
-  { name: "CCTV-8 电视剧", url: "http://ivi.bupt.edu.cn/hls/cctv8hd.m3u8" },
-  { name: "北京卫视", url: "http://ivi.bupt.edu.cn/hls/btv1hd.m3u8" },
-  { name: "湖南卫视", url: "http://ivi.bupt.edu.cn/hls/hunanhd.m3u8" },
-  { name: "浙江卫视", url: "http://ivi.bupt.edu.cn/hls/zjhd.m3u8" },
-  { name: "江苏卫视", url: "http://ivi.bupt.edu.cn/hls/jshd.m3u8" },
-  { name: "东方卫视", url: "http://ivi.bupt.edu.cn/hls/dfhd.m3u8" },
+  { name: "CCTV-9 纪录", cat: "央视纪录", url: "https://xykt-fix.github.io/Y77.m3u8" },
+  { name: "CCTV+ 1", cat: "央视纪录", url: "https://cd-live-stream.news.cctvplus.com/live/smil:CHANNEL1.smil/playlist.m3u8" },
+  { name: "CCTV+ 2", cat: "央视纪录", url: "https://cd-live-stream.news.cctvplus.com/live/smil:CHANNEL2.smil/playlist.m3u8" },
+  { name: "CCTV-4 欧洲", cat: "央视纪录", url: "https://r.eu.cdn-redge.media/livehls/oeu/mt/live/cctv_4/live.livx/playlist.m3u8" },
+  { name: "发现中国 1080P", cat: "央视纪录", url: "https://fastlive.cctvplus.com/out/v1/8442c3bfd4c64a3984389328f6087879/index.m3u8" },
+  { name: "行游中国 1080P", cat: "央视纪录", url: "https://fastlive.cctvplus.com/out/v1/ca6f9297b7314a63959435028af287fc/index.m3u8" },
+  { name: "河北卫视 4K", cat: "地方卫视", url: "https://event.pull.hebtv.com/live/live101.m3u8" },
+  { name: "浙江国际 1080P", cat: "地方卫视", url: "https://ali-m-l.cztv.com/channels/lantian/channel10/1080p.m3u8" },
+  { name: "广州综合", cat: "地方卫视", url: "https://tencentplaybusiness.gztv.com/live/zonghes.m3u8" },
+  { name: "安徽卫视 1080P", cat: "地方卫视", url: "https://restream.pdtvhd.com/memfs/c1cd2ed0-3b2b-4c25-af98-a7fb0b1eb130.m3u8" },
+  { name: "湖南经视", cat: "地方卫视", url: "https://p8.vzan.com/slowlive/415983998730568937/live.m3u8" },
+  { name: "西藏汉语", cat: "地方卫视", url: "https://pili-live-hls-zdzz-tv.zzxwcm.cn/zdzz-tv/nqzh.m3u8" },
+  { name: "白城综合", cat: "地方卫视", url: "https://stream2.jlntv.cn/baicheng1/sd/live.m3u8" },
+  { name: "CGTN 国际 1080P", cat: "新闻资讯", url: "https://amg00405-rakutentv-cgtn-rakuten-i9tar.amagi.tv/master.m3u8" },
+  { name: "CGTN 财经 1080P", cat: "新闻资讯", url: "https://fastlive.cctvplus.com/out/v1/2b3d8a0c805d437f9dc85b764c2ac599/index.m3u8" },
+  { name: "兰州新闻综合", cat: "新闻资讯", url: "https://liveplus.lzr.com.cn/xwzh/HD/live.m3u8" },
+  { name: "安顺新闻综合", cat: "新闻资讯", url: "https://hplayer1.juyun.tv/camera/154379194.m3u8" },
+  { name: "TTV 新闻", cat: "新闻资讯", url: "https://live.wcetv.com/hls/master-ttvnews.m3u8" },
+  { name: "哈尔滨影视", cat: "电影文旅", url: "https://stream.hrbtv.net/yspd/playlist.m3u8" },
+  { name: "兰州文旅", cat: "电影文旅", url: "https://liveplus.lzr.com.cn/wlpd/HD/live.m3u8" },
+  { name: "Love Nature 1080P", cat: "电影文旅", url: "https://mumbai-edge.smartplaytv.in/LoveNature/index.m3u8" },
+  { name: "金砖中文 1080P", cat: "电影文旅", url: "https://chibrics.mediacdn.ru/cdn/brics/chinese/playlist.m3u8" },
+  { name: "BabyFirst 少儿", cat: "少儿自然", url: "https://cdn.fast.jwp.services/v1/channel/1_jB6940Ei_TvhvIHDL/manifest.m3u8" },
+  { name: "大爱电视 HD", cat: "少儿自然", url: "https://pull.daaiplus.com/live-DAAIPLUS/live-DAAIPLUS_HD.m3u8" },
 ];
-const CH_VER = "20261123-v2";
+const CH_VER = "20261126-v4";
 let channels = get("channels", null);
 if (!channels || !channels.length || get("ch_ver", "") !== CH_VER) {
-  const customCh = (channels || []).filter((c) => !c.url.includes("live.example.com"));
+  const customCh = (channels || []).filter((c) => !c.url.includes("live.example.com") && !c.url.includes("ivi.bupt.edu.cn"));
   const seen = new Set(DEFAULT_CHANNELS.map((c) => c.url));
-  channels = DEFAULT_CHANNELS.concat(customCh.filter((c) => !seen.has(c.url)));
+  channels = DEFAULT_CHANNELS.concat(customCh.filter((c) => !seen.has(c.url)).map((c) => ({ ...c, cat: c.cat || "自定义" })));
   set("channels", channels);
   set("ch_ver", CH_VER);
 }
 const saveChannels = () => set("channels", channels);
+let curLiveCat = "全部";
+
+function parseM3uLines(txt) {
+  const lines = String(txt || "").split(/\r?\n/);
+  const list = [];
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i].trim();
+    if (ln.startsWith("#EXTINF")) {
+      const gm = ln.match(/group-title="([^"]*)"/i);
+      const grp = gm ? gm[1].trim() : "";
+      const nm = ln.split(",").slice(1).join(",").trim() || "频道" + (list.length + 1);
+      const u = (lines[i + 1] || "").trim();
+      if (u && !u.startsWith("#")) {
+        list.push({ name: nm, url: u, cat: LIVE_CATS.includes(grp) ? grp : "自定义" });
+        i++;
+      }
+    } else if (ln && !ln.startsWith("#") && /^https?:\/\//i.test(ln)) {
+      list.push({ name: "频道" + (list.length + 1), url: ln, cat: "自定义" });
+    }
+  }
+  return list;
+}
 
 function renderLive() {
+  const counts = {};
+  channels.forEach((c) => {
+    const k = c.cat || "自定义";
+    counts[k] = (counts[k] || 0) + 1;
+  });
+  const activeCat = curLiveCat === "全部" || counts[curLiveCat] ? curLiveCat : "全部";
+  curLiveCat = activeCat;
+  const shown = activeCat === "全部" ? channels : channels.filter((c) => (c.cat || "自定义") === activeCat);
+  const catsHtml = LIVE_CATS.filter((cat) => cat === "全部" || counts[cat] > 0).map((cat) => {
+    const n = cat === "全部" ? channels.length : counts[cat];
+    return `<button class="m-chip ${activeCat === cat ? "active" : ""}" data-lcat="${cat}" type="button">${cat} (${n})</button>`;
+  }).join("");
   $("#view").innerHTML = `
-    <div class="section-title">${ico("tv")} 电视直播频道 (${channels.length})</div>
+    <div class="section-title">${ico("tv")} 高清直播频道 (${shown.length})</div>
+    <div class="live-cat-bar" id="liveCatBar">${catsHtml}</div>
     <div class="ch-grid" id="chGrid"></div>
-    <button class="btn ghost block" id="addCh">${ico("plus")} 添加频道 / 导入 M3U 列表</button>
-    <div class="hint">支持 m3u8 与 flv 直播流；支持直接粘贴标准 #EXTINF M3U 列表文本批量解析。</div>`;
-  $("#chGrid").innerHTML = channels.map((c, i) => `<div class="ch" data-i="${i}"><span class="dot"></span><span>${esc(c.name)}</span></div>`).join("") || `<div class="empty">暂无直播频道</div>`;
+    <button class="btn ghost block" id="addCh">${ico("plus")} 添加频道 / 导入 M3U 订阅链接</button>
+    <div class="hint">已收录实测 HTTPS 频道，若遇跨域限制将自动经平板节点转发秒播；支持 M3U 订阅 URL 或文本批量导入。</div>`;
+  $("#liveCatBar")?.querySelectorAll(".m-chip").forEach((b) => {
+    b.onclick = () => { curLiveCat = b.dataset.lcat || "全部"; renderLive(); };
+  });
+  $("#chGrid").innerHTML = shown.map((c, i) => `<div class="ch" data-i="${i}"><span class="dot"></span><span>${esc(c.name)}</span></div>`).join("") || `<div class="empty">当前分类暂无频道</div>`;
   $("#chGrid").querySelectorAll(".ch").forEach((el) => el.onclick = () => {
-    const c = channels[+el.dataset.i]; play(c.name, c.url, channels.map((x) => ({ name: x.name, url: x.url })), +el.dataset.i);
+    const c = shown[+el.dataset.i];
+    play(c.name, c.url, shown.map((x) => ({ name: x.name, url: x.url })), +el.dataset.i, "", 0, true);
   });
   $("#addCh").onclick = async () => {
-    if (!(await modal("添加频道 / 导入 M3U", `
+    if (!(await modal("添加频道 / 导入 M3U 订阅", `
       <div class="form" style="margin:0;border:none;padding:0">
-        <label>频道名称</label><input id="mName" placeholder="如 CCTV-5">
-        <label>播放地址</label><input id="mUrl" placeholder="https://...m3u8 或 flv">
+        <label>M3U 订阅链接（可选，自动拉取并按分类归档）</label><input id="mSubUrl" placeholder="https://.../cn.m3u">
+        <label>频道名称（单个添加）</label><input id="mName" placeholder="如 CCTV-9">
+        <label>播放地址（m3u8 / flv）</label><input id="mUrl" placeholder="https://...m3u8">
         <label>或粘贴 M3U 列表文本</label><textarea id="mM3u" placeholder="#EXTINF:-1,频道名&#10;https://...m3u8"></textarea>
       </div>`))) return;
-    const name = $("#mName")?.value.trim(), url = $("#mUrl")?.value.trim(), m3u = $("#mM3u")?.value.trim();
-    if (m3u) {
-      const lines = m3u.split(/\r?\n/); let added = 0;
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].startsWith("#EXTINF")) {
-          const nm = lines[i].split(",").slice(1).join(",").trim() || "频道" + (added + 1);
-          const u = (lines[i + 1] || "").trim();
-          if (u && !u.startsWith("#")) { channels.push({ name: nm, url: u }); added++; i++; }
-        } else if (lines[i].trim() && !lines[i].startsWith("#")) {
-          channels.push({ name: "频道" + (added + 1), url: lines[i].trim() }); added++;
-        }
-      }
-      saveChannels(); renderLive(); toast(`已导入 ${added} 个频道`);
+    const subUrl = $("#mSubUrl")?.value.trim(), name = $("#mName")?.value.trim(), url = $("#mUrl")?.value.trim(), m3u = $("#mM3u")?.value.trim();
+    if (subUrl) {
+      toast("正在拉取订阅列表…");
+      try {
+        const txt = await fetchText(subUrl, 10000);
+        const parsed = parseM3uLines(txt);
+        const seen = new Set(channels.map((x) => x.url));
+        const fresh = parsed.filter((x) => !seen.has(x.url));
+        channels = channels.concat(fresh);
+        saveChannels(); renderLive(); toast(`已导入 ${fresh.length} 个新频道`);
+      } catch (e) { toast("订阅拉取失败：" + e.message); }
+    } else if (m3u) {
+      const parsed = parseM3uLines(m3u);
+      const seen = new Set(channels.map((x) => x.url));
+      const fresh = parsed.filter((x) => !seen.has(x.url));
+      channels = channels.concat(fresh);
+      saveChannels(); renderLive(); toast(`已导入 ${fresh.length} 个频道`);
     } else if (name && url) {
-      channels.push({ name, url }); saveChannels(); renderLive(); toast("频道已添加");
+      channels.push({ name, url, cat: "自定义" }); saveChannels(); renderLive(); toast("频道已添加");
     } else toast("请填写完整信息");
   };
 }
@@ -2230,7 +2502,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.5</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.3.6</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -2283,12 +2555,23 @@ function renderMe() {
 
     <div class="section-title">数据维护</div>
     <div class="group">
+      ${window.NovaNative && typeof window.NovaNative.checkUpdate === "function" ? `<div class="row" id="checkApkUpdate"><span class="r-ico">${ico("download")}</span><div class="r-main"><div class="r-title">检查客户端 APK 更新</div><div class="r-sub" id="apkVerSub">正在读取原生壳版本…</div></div><span class="r-arrow">${ico("chevronRight")}</span></div>` : ""}
       <div class="row" id="goWebdav"><span class="r-ico">${ico("cloud")}</span><div class="r-main"><div class="r-title">WebDAV 与本地文件备份</div></div><span class="r-arrow">${ico("chevronRight")}</span></div>
       <div class="row danger" id="clearAll"><span class="r-ico">${ico("trash")}</span><div class="r-main"><div class="r-title">重置并清空本机缓存数据</div></div><span class="r-arrow">${ico("chevronRight")}</span></div>
     </div>
 
     <div class="section-title">版本信息</div>
     <div class="hint">NovaHub · 星隅 — 私人影视放映、黑胶听音与精品小说阅读终端。<br>内置高清影视片库、无损音乐曲库与流式在线小说阅读引擎。</div>`;
+
+  if ($("#checkApkUpdate") && window.NovaNative) {
+    try {
+      const ver = window.NovaNative.getAppVersion ? window.NovaNative.getAppVersion() : "已安装";
+      $("#apkVerSub").textContent = `当前客户端壳版本：${ver}`;
+    } catch {}
+    $("#checkApkUpdate").onclick = () => {
+      try { window.NovaNative.checkUpdate(); } catch { toast("触发更新检查失败"); }
+    };
+  }
 
   if (!u) {
     $("#btnLoginOpen").onclick = openAuthModal;
@@ -3095,6 +3378,7 @@ function syncModeFab() {
 const NH = {
   token: get("nh_token", ""),
   user: get("nh_user", null),
+  offline: false,
   cfg: get("nh_site_cfg", { ad_enabled: false, ad_title: "", ad_desc: "", ad_url: "", ad_btn: "了解 Pro", sponsor_tip: "" }),
 };
 const isProUser = () => !!(NH.user && NH.user.is_pro);
@@ -3104,7 +3388,11 @@ async function nhApi(path, method = "GET", body = null) {
   if (NH.token) headers["Authorization"] = "Bearer " + NH.token;
   const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+  if (!r.ok) {
+    const err = new Error(d.error || ("HTTP " + r.status));
+    err.status = r.status;
+    throw err;
+  }
   return d;
 }
 
@@ -3112,6 +3400,7 @@ async function loadSiteConfig() {
   try {
     const cfg = await nhApi("/api/config");
     NH.cfg = cfg;
+    NH.offline = false;
     set("nh_site_cfg", cfg);
     if (currentRoute === "home" || currentRoute === "n_store") routes[currentRoute]();
   } catch {}
@@ -3121,12 +3410,23 @@ async function refreshAuthUser() {
   if (!NH.token) return;
   try {
     const d = await nhApi("/api/auth/me");
+    NH.offline = false;
     NH.user = d.user || null;
     if (!NH.user) { NH.token = ""; set("nh_token", ""); }
     set("nh_user", NH.user);
     if (NH.user) await cloudSyncPull(true);
     if (currentRoute === "me" || currentRoute === "home" || currentRoute === "n_store" || currentRoute === "m_fav" || currentRoute === "n_shelf") routes[currentRoute]();
-  } catch {}
+  } catch (err) {
+    // 仅明确返回 401 时注销，网络波动/节点重连时保留本地快照进入只读离线态
+    if (err && err.status === 401) {
+      NH.token = ""; NH.user = null;
+      set("nh_token", ""); set("nh_user", null);
+      if (currentRoute === "me") renderMe();
+    } else if (NH.user) {
+      NH.offline = true;
+      toast("节点正在重连，已保持本地登录态与离线能力", 2400);
+    }
+  }
 }
 
 function renderAdSlotHtml() {

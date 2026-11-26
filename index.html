@@ -57,7 +57,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261125-v235">
+<link rel="stylesheet" href="style.css?v=20261125-v236">
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
 <style>
@@ -133,7 +133,9 @@
   </div>
   <div class="player-box">
     <video id="video" playsinline webkit-playsinline x5-video-player-type="h5"></video>
+    <div id="playerDimmer" class="player-dimmer" aria-hidden="true"></div>
     <div id="playerTip" class="player-tip"></div>
+    <div id="playerHud" class="player-hud hidden" aria-hidden="true"></div>
     <button id="btnBoxFs" class="player-box-fs" type="button" aria-label="全屏播放"></button>
   </div>
   <div class="player-ctrl">
@@ -141,6 +143,7 @@
       <button id="btnPlay" aria-label="播放/暂停"></button>
       <input id="seek" type="range" min="0" max="1000" value="0">
       <span id="timeText">00:00 / 00:00</span>
+      <span id="liveBadge" class="live-badge hidden"><i></i> LIVE 直播中</span>
     </div>
     <div class="player-ctrl-tools">
       <div class="player-ctrl-left">
@@ -234,6 +237,6 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="app.js?v=20261125-v235"></script>
+<script src="app.js?v=20261125-v236"></script>
 </body>
 </html>

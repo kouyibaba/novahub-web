@@ -221,19 +221,35 @@ button, input, select, textarea { font-family: inherit; }
 .form input:focus, .form textarea:focus, .form select:focus { outline: none; border-color: var(--accent); }
 .hint { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.55; }
 
-/* 定制精细进度滑块 */
+/* 定制高可见度三段式进度滑块（已播高亮 + 已缓冲浅条 + 清晰底轨） */
 input[type="range"] {
   -webkit-appearance: none; appearance: none;
-  height: 4px; border-radius: 99px;
-  background: rgba(255, 255, 255, 0.15);
+  height: 5px; border-radius: 99px;
+  --p: 0%;
+  --b: 0%;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0%,
+    var(--accent) var(--p),
+    rgba(255, 255, 255, 0.42) var(--p),
+    rgba(255, 255, 255, 0.42) max(var(--p), var(--b)),
+    rgba(255, 255, 255, 0.24) max(var(--p), var(--b)),
+    rgba(255, 255, 255, 0.24) 100%
+  );
   outline: none; cursor: pointer;
+  margin: 7px 0;
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none;
-  width: 13px; height: 13px; border-radius: 50%;
+  width: 15px; height: 15px; border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 10px rgba(229, 184, 105, 0.55);
+  box-shadow: 0 0 10px rgba(229, 184, 105, 0.72), 0 1px 4px rgba(0, 0, 0, 0.6);
   border: 2px solid #FFF;
+  transition: transform 0.14s ease, box-shadow 0.14s ease;
+}
+input[type="range"]:active::-webkit-slider-thumb {
+  transform: scale(1.24);
+  box-shadow: 0 0 14px rgba(229, 184, 105, 0.95), 0 2px 6px rgba(0, 0, 0, 0.75);
 }
 
 /* 视频播放器全屏浮层 */
@@ -1635,3 +1651,104 @@ body.in-mplayer {
   min-height: 160px;
   overflow-y: auto;
 }
+
+/* ============ v2.3.6 亮度暗幕、手势HUD、直播徽章与分段选集 ============ */
+.player-dimmer {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  transition: opacity 0.08s linear;
+}
+.player-hud {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 9;
+  min-width: 148px;
+  padding: 10px 16px;
+  border-radius: 14px;
+  background: rgba(12, 13, 18, 0.84);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(229, 184, 105, 0.28);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  pointer-events: none;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+}
+.player-hud.hidden { display: none; }
+.player-hud-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.player-hud-bar {
+  width: 112px;
+  height: 4px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.2);
+  overflow: hidden;
+}
+.player-hud-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  background: var(--accent);
+}
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(60, 203, 127, 0.14);
+  border: 1px solid rgba(60, 203, 127, 0.35);
+  color: var(--emerald);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.live-badge i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--emerald);
+  box-shadow: 0 0 8px var(--emerald);
+}
+.live-badge.hidden { display: none; }
+.ep-head-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ep-range-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0 10px;
+}
+.ep-range-bar::-webkit-scrollbar { display: none; }
+.ep-range-bar .m-chip { flex-shrink: 0; }
+.live-cat-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0 10px;
+}
+.live-cat-bar::-webkit-scrollbar { display: none; }
+.live-cat-bar .m-chip { flex-shrink: 0; }

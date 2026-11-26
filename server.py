@@ -90,11 +90,21 @@ def _is_safe_proxy_target(target_url):
         return False
 
 
-def _http_get_bytes(url, headers=None, timeout=8, max_bytes=4_194_304):
-    """发起通用 HTTP/HTTPS GET 请求并返回字节流与 Content-Type（带体积上限）。"""
+def _http_get_full(url, headers=None, timeout=8, max_bytes=4_194_304):
+    """发起通用 HTTP/HTTPS GET 请求并返回状态码、字节流、Content-Type 与重定向后的最终 URL。"""
     req = urllib.request.Request(url, headers=headers or {"User-Agent": UA_DESKTOP})
     with urllib.request.urlopen(req, timeout=timeout, context=CTX) as resp:
-        return resp.status, resp.read(max_bytes), resp.headers.get("Content-Type", "application/json; charset=utf-8")
+        return (
+            resp.status,
+            resp.read(max_bytes),
+            resp.headers.get("Content-Type", "application/json; charset=utf-8"),
+            resp.geturl(),
+        )
+
+
+def _http_get_bytes(url, headers=None, timeout=8, max_bytes=4_194_304):
+    """发起通用 HTTP/HTTPS GET 请求并返回字节流与 Content-Type（带体积上限）。"""
+    return _http_get_full(url, headers=headers, timeout=timeout, max_bytes=max_bytes)[:3]
 
 
 def _find_engine_binary():
@@ -614,6 +624,75 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_json({"error": str(e)}, 502)
 
+    # ---------- 直播流 HLS 跨域重写代理 ----------
+    def handle_live_m3u8(self, qs):
+        target = (qs.get("url") or [""])[0].strip()
+        if not _is_safe_proxy_target(target):
+            return self.send_json({"error": "Invalid live url"}, 400)
+        try:
+            status, data, ctype, final_url = _http_get_full(
+                target, headers={"User-Agent": UA_MOBILE}, timeout=8, max_bytes=2_097_152
+            )
+            txt = data.decode("utf-8", "ignore")
+            if "#EXTM3U" not in txt:
+                self.send_response(status)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            def rewrite_ref(raw_ref: str, is_playlist_hint: bool = False) -> str:
+                abs_u = urllib.parse.urljoin(final_url, raw_ref.strip())
+                if not _is_safe_proxy_target(abs_u):
+                    return raw_ref
+                path_low = urllib.parse.urlparse(abs_u).path.lower()
+                route = "/api/live/m3u8" if (is_playlist_hint or path_low.endswith(".m3u8") or ".m3u8" in path_low) else "/api/live/seg"
+                return f"{route}?url={urllib.parse.quote(abs_u, safe='')}"
+
+            out_lines = []
+            prev_line = ""
+            for line in txt.splitlines():
+                s = line.strip()
+                if not s:
+                    out_lines.append("")
+                    continue
+                if s.startswith("#"):
+                    if 'URI="' in s:
+                        hint = s.startswith("#EXT-X-MEDIA")
+                        s = re.sub(r'URI="([^"]+)"', lambda m: f'URI="{rewrite_ref(m.group(1), hint)}"', s)
+                    out_lines.append(s)
+                    prev_line = s
+                    continue
+                is_sub = prev_line.startswith("#EXT-X-STREAM-INF")
+                out_lines.append(rewrite_ref(s, is_sub))
+                prev_line = s
+
+            body = ("\n".join(out_lines) + "\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 502)
+
+    def handle_live_seg(self, qs):
+        target = (qs.get("url") or [""])[0].strip()
+        if not _is_safe_proxy_target(target):
+            return self.send_json({"error": "Invalid seg url"}, 400)
+        try:
+            status, data, ctype, _ = _http_get_full(
+                target, headers={"User-Agent": UA_MOBILE}, timeout=10, max_bytes=12_582_912
+            )
+            self.send_response(status)
+            self.send_header("Content-Type", ctype or "video/mp2t")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 502)
+
     # ---------- 小说实时在线直读网关 ----------
     def handle_novel_search(self, qs):
         raw_q = (qs.get("q") or [""])[0].strip()
@@ -776,6 +855,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.handle_novel_book(qs)
         if p == "/api/novel/chapter":
             return self.handle_novel_chapter(qs)
+
+        if p == "/api/live/m3u8":
+            return self.handle_live_m3u8(qs)
+        if p == "/api/live/seg":
+            return self.handle_live_seg(qs)
 
         if p == "/proxy":
             if not self._is_same_origin_request():
