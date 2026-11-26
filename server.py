@@ -5,6 +5,8 @@
 import ast
 import collections
 import glob
+import hashlib
+import hmac
 import html
 import http.server
 import ipaddress
@@ -68,6 +70,31 @@ def _check_rate_limit(ip, bucket, limit, window_sec=60):
             return False
         dq.append(now)
         return True
+
+
+# ---------- 远程运维通道（HMAC 签名鉴权，删除密钥文件即整体关闭） ----------
+OPS_KEY_FILE = os.path.expanduser("~/.novahub_ops_key")
+OPS_HOME = os.path.realpath(os.path.expanduser("~"))
+_OPS_FAILS = collections.defaultdict(collections.deque)
+_OPS_SEEN = {}
+
+
+def _ops_key():
+    """读取运维密钥，缺失或过短则视为通道关闭。"""
+    try:
+        with open(OPS_KEY_FILE, "r", encoding="utf-8") as f:
+            k = f.read().strip()
+        return k if len(k) >= 32 else ""
+    except OSError:
+        return ""
+
+
+def _ops_safe_path(p):
+    """将路径限制在 Termux 家目录内，防止越界读写。"""
+    full = os.path.realpath(os.path.join(OPS_HOME, os.path.expanduser(p or "")))
+    if full != OPS_HOME and not full.startswith(OPS_HOME + os.sep):
+        raise ValueError("路径越界")
+    return full
 
 
 def _is_safe_proxy_target(target_url):
@@ -403,6 +430,93 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
+
+    def _ops_auth(self, route, file_arg, body):
+        """校验运维请求签名：时间戳 5 分钟窗口 + 防重放 + 失败封禁。返回错误文本或 None。"""
+        ip = self._client_ip()
+        now = time.time()
+        with _RATE_LOCK:
+            dq = _OPS_FAILS[ip]
+            while dq and now - dq[0] > 600:
+                dq.popleft()
+            if len(dq) >= 8:
+                return "失败次数过多，已临时封禁"
+        key = _ops_key()
+        if not key:
+            return "运维通道未启用"
+        ts = self.headers.get("X-Ops-Ts") or ""
+        sig = (self.headers.get("X-Ops-Sig") or "").lower()
+        ok = False
+        try:
+            if abs(now - int(ts)) <= 300:
+                msg = f"{ts}\n{self.command}\n{route}\n{file_arg}\n{hashlib.sha256(body).hexdigest()}"
+                exp = hmac.new(key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
+                ok = hmac.compare_digest(exp, sig)
+        except ValueError:
+            ok = False
+        with _RATE_LOCK:
+            if not ok:
+                _OPS_FAILS[ip].append(now)
+                return "签名校验失败"
+            for s, t in list(_OPS_SEEN.items()):
+                if now - t > 600:
+                    del _OPS_SEEN[s]
+            if sig in _OPS_SEEN:
+                return "重放请求被拒绝"
+            _OPS_SEEN[sig] = now
+        return None
+
+    def handle_ops(self, route):
+        """远程运维：exec 执行命令 / upload 上传文件 / download 下载文件。"""
+        n = int(self.headers.get("Content-Length") or 0)
+        if n < 0 or n > 50 * 1024 * 1024:
+            return self.send_json({"error": "请求体过大"}, 413)
+        body = self.rfile.read(n) if n else b""
+        file_arg = urllib.parse.unquote(self.headers.get("X-Ops-File") or "")
+        err = self._ops_auth(route, file_arg, body)
+        if err:
+            return self.send_json({"error": err}, 403)
+        try:
+            if route == "/api/ops/exec":
+                req = json.loads(body.decode("utf-8") or "{}")
+                cmd = str(req.get("cmd") or "")
+                cwd = _ops_safe_path(req.get("cwd") or "novahub")
+                if req.get("detach"):
+                    log_f = open(os.path.join(OPS_HOME, ".novahub_ops_detach.log"), "ab")
+                    subprocess.Popen(cmd, shell=True, cwd=cwd, stdin=subprocess.DEVNULL,
+                                     stdout=log_f, stderr=log_f, start_new_session=True)
+                    return self.send_json({"ok": True, "detached": True})
+                timeout = max(1, min(300, int(req.get("timeout") or 60)))
+                r = subprocess.run(cmd, shell=True, cwd=cwd, stdin=subprocess.DEVNULL,
+                                   capture_output=True, timeout=timeout)
+                lim = 256 * 1024
+                return self.send_json({
+                    "code": r.returncode,
+                    "stdout": r.stdout[-lim:].decode("utf-8", "replace"),
+                    "stderr": r.stderr[-lim:].decode("utf-8", "replace"),
+                })
+            fpath = _ops_safe_path(file_arg)
+            if route == "/api/ops/upload":
+                os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                tmp = fpath + ".ops_tmp"
+                with open(tmp, "wb") as f:
+                    f.write(body)
+                os.replace(tmp, fpath)
+                return self.send_json({"ok": True, "path": fpath, "size": len(body)})
+            if route == "/api/ops/download":
+                with open(fpath, "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            return self.send_json({"error": "Not found"}, 404)
+        except subprocess.TimeoutExpired:
+            return self.send_json({"error": "命令执行超时"}, 504)
+        except Exception as e:
+            return self.send_json({"error": str(e)}, 400)
 
     def send_json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -900,6 +1014,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.handle_admin_user_vip()
         if p == "/api/admin/user/reset-pwd":
             return self.handle_admin_user_reset_pwd()
+        if p.startswith("/api/ops/"):
+            return self.handle_ops(p)
         self.send_json({"error": "Not found"}, 404)
 
     def do_GET(self):
@@ -917,6 +1033,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.handle_admin_dashboard()
         if p == "/api/admin/users":
             return self.handle_admin_users(qs)
+        if p == "/api/ops/download":
+            return self.handle_ops(p)
         if p == "/kw":
             return self.handle_kuwo(qs)
         if p == "/api/novel/search":
