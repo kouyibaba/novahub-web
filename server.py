@@ -493,7 +493,69 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def handle_admin_dashboard(self):
         if not self._is_admin():
             return self.send_json({"error": "未授权"}, 401)
-        self.send_json(db.get_admin_dashboard(100))
+        data = db.get_admin_dashboard(200)
+        tunnel_url = ""
+        t_path = os.path.join(ROOT, ".current_tunnel_url")
+        if os.path.exists(t_path):
+            try:
+                with open(t_path, "r", encoding="utf-8") as f:
+                    tunnel_url = f.read().strip()
+            except Exception:
+                pass
+        data["server_time"] = int(time.time())
+        data["tunnel_url"] = tunnel_url
+        self.send_json(data)
+
+    def handle_admin_users(self, qs):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        q = (qs.get("q") or [""])[0]
+        status = (qs.get("status") or ["all"])[0]
+        try:
+            limit = int((qs.get("limit") or ["200"])[0])
+        except ValueError:
+            limit = 200
+        self.send_json({"users": db.list_admin_users(q, status, limit)})
+
+    def handle_admin_user_vip(self):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        try:
+            body = self._read_json_body(4096)
+            user = db.admin_set_user_vip(
+                body.get("user_id"),
+                body.get("action"),
+                body.get("days") or 0,
+            )
+            self.send_json({"ok": True, "user": user})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    def handle_admin_user_reset_pwd(self):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        try:
+            body = self._read_json_body(4096)
+            db.admin_reset_user_password(body.get("user_id"), body.get("new_password"))
+            self.send_json({"ok": True})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    def handle_admin_delete_code(self):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        try:
+            body = self._read_json_body(4096)
+            db.delete_unused_code(body.get("code"))
+            self.send_json({"ok": True})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
 
     def handle_admin_gen_codes(self):
         if not self._is_admin():
@@ -828,10 +890,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.handle_admin_login()
         if p == "/api/admin/codes":
             return self.handle_admin_gen_codes()
+        if p == "/api/admin/codes/delete":
+            return self.handle_admin_delete_code()
         if p == "/api/admin/config":
             return self.handle_admin_config()
         if p == "/api/admin/password":
             return self.handle_admin_password()
+        if p == "/api/admin/user/vip":
+            return self.handle_admin_user_vip()
+        if p == "/api/admin/user/reset-pwd":
+            return self.handle_admin_user_reset_pwd()
         self.send_json({"error": "Not found"}, 404)
 
     def do_GET(self):
@@ -847,6 +915,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.handle_sync_get()
         if p == "/api/admin/dashboard":
             return self.handle_admin_dashboard()
+        if p == "/api/admin/users":
+            return self.handle_admin_users(qs)
         if p == "/kw":
             return self.handle_kuwo(qs)
         if p == "/api/novel/search":

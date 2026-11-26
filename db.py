@@ -347,14 +347,18 @@ def verify_admin_token(token):
         return False
 
 
-def get_admin_dashboard(limit=80):
-    """汇总站长后台统计指标、卡密台账与站点配置。"""
+def get_admin_dashboard(limit=200):
+    """汇总站长后台统计指标、卡密台账、近期注册用户与站点配置。"""
     now = int(time.time())
     with _DB_LOCK, _conn() as c:
         total_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         pro_users = c.execute("SELECT COUNT(*) FROM users WHERE vip_expire_at > ?", (now,)).fetchone()[0]
         unused_codes = c.execute("SELECT COUNT(*) FROM redeem_codes WHERE used_by IS NULL").fetchone()[0]
         used_codes = c.execute("SELECT COUNT(*) FROM redeem_codes WHERE used_by IS NOT NULL").fetchone()[0]
+        synced_users = c.execute("SELECT COUNT(*) FROM user_sync").fetchone()[0]
+        recent_rows = c.execute(
+            "SELECT id, username, vip_expire_at, created_at FROM users ORDER BY created_at DESC LIMIT 6"
+        ).fetchall()
         rows = c.execute(
             """
             SELECT rc.code, rc.days, rc.note, rc.used_at, rc.created_at, u.username AS used_by_name
@@ -365,6 +369,19 @@ def get_admin_dashboard(limit=80):
             """,
             (int(limit),),
         ).fetchall()
+    db_size_bytes = 0
+    for suffix in ("", "-wal"):
+        p = DB_PATH + suffix
+        if os.path.exists(p):
+            try:
+                db_size_bytes += os.path.getsize(p)
+            except OSError:
+                pass
+    recent_users = []
+    for ur in recent_rows:
+        fmt_u = _format_user(ur)
+        fmt_u["created_at"] = ur["created_at"]
+        recent_users.append(fmt_u)
     codes = [
         {
             "code": r["code"],
@@ -383,7 +400,98 @@ def get_admin_dashboard(limit=80):
             "pro_users": pro_users,
             "unused_codes": unused_codes,
             "used_codes": used_codes,
+            "synced_users": synced_users,
+            "db_size_bytes": db_size_bytes,
         },
+        "recent_users": recent_users,
         "codes": codes,
         "config": get_public_config(),
     }
+
+
+def list_admin_users(query="", status="all", limit=200):
+    """分页检索平台注册用户列表及其 Pro 状态与云端同步时间。"""
+    now = int(time.time())
+    q = (query or "").strip()
+    where = []
+    params = []
+    if q:
+        where.append("u.username LIKE ?")
+        params.append(f"%{q}%")
+    if status == "pro":
+        where.append("u.vip_expire_at > ?")
+        params.append(now)
+    elif status == "free":
+        where.append("u.vip_expire_at <= ?")
+        params.append(now)
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    params.append(max(1, min(500, int(limit))))
+    sql = f"""
+        SELECT u.id, u.username, u.vip_expire_at, u.created_at, us.updated_at AS last_sync_at
+        FROM users u
+        LEFT JOIN user_sync us ON u.id = us.user_id
+        {where_sql}
+        ORDER BY u.created_at DESC
+        LIMIT ?
+    """
+    with _DB_LOCK, _conn() as c:
+        rows = c.execute(sql, params).fetchall()
+    result = []
+    for r in rows:
+        item = _format_user(r)
+        item["created_at"] = r["created_at"]
+        item["last_sync_at"] = r["last_sync_at"] or 0
+        result.append(item)
+    return result
+
+
+def admin_set_user_vip(user_id, action, days=0):
+    """管理员手工赠送/续期或取消指定用户的 Pro 会员资格。"""
+    uid = int(user_id)
+    now = int(time.time())
+    with _DB_LOCK, _conn() as c:
+        row = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        if not row:
+            raise ValueError("用户不存在")
+        if action == "add":
+            d = int(days)
+            if d < 1 or d > 36500:
+                raise ValueError("天数范围需在 1 ~ 36500 之间")
+            base_ts = max(now, int(row["vip_expire_at"] or 0))
+            new_exp = base_ts + d * 86400
+        elif action == "clear":
+            new_exp = 0
+        else:
+            raise ValueError("不支持的操作类型")
+        c.execute("UPDATE users SET vip_expire_at=? WHERE id=?", (new_exp, uid))
+        updated = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    return _format_user(updated)
+
+
+def admin_reset_user_password(user_id, new_password):
+    """管理员重置指定用户登录密码（PBKDF2-SHA256 加盐哈希）。"""
+    uid = int(user_id)
+    np = (new_password or "").strip()
+    if len(np) < 6 or len(np) > 64:
+        raise ValueError("新密码长度需为 6~64 位")
+    salt = secrets.token_hex(16)
+    pwd_hash = _hash_pwd(np, salt)
+    with _DB_LOCK, _conn() as c:
+        cur = c.execute("UPDATE users SET pwd_hash=?, salt=? WHERE id=?", (pwd_hash, salt, uid))
+        if cur.rowcount == 0:
+            raise ValueError("用户不存在")
+
+
+def delete_unused_code(code_str):
+    """事务作废并删除尚未核销的卡密。"""
+    code = (code_str or "").strip().upper()
+    if not code:
+        raise ValueError("请指定卡密")
+    with _DB_LOCK, _conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT used_by FROM redeem_codes WHERE code=?", (code,)).fetchone()
+        if not row:
+            raise ValueError("卡密不存在")
+        if row["used_by"] is not None:
+            raise ValueError("已核销的卡密不可删除")
+        c.execute("DELETE FROM redeem_codes WHERE code=?", (code,))
