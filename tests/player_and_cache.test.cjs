@@ -70,6 +70,11 @@ test('player UI includes +30s, +1m, next episode, fullscreen episode drawer, ski
   assert.ok(htmlSource.includes('id="accessGateLayer"'));
   assert.ok(appSource.includes('function syncAccessGate('));
   assert.ok(appSource.includes('getDeviceFingerprint'));
+  assert.ok(appSource.includes('setGateMsg('));
+  const cssSource = fs.readFileSync('style.css', 'utf8');
+  const toastZ = Number((cssSource.match(/\.toast\s*\{[^}]*z-index:\s*(\d+)/) || [])[1] || 0);
+  const gateZ = Number((cssSource.match(/\.access-gate-layer\s*\{[^}]*z-index:\s*(\d+)/) || [])[1] || 0);
+  assert.ok(toastZ > gateZ, '.toast z-index must exceed .access-gate-layer');
 });
 
 test('tv.html big-screen cast receiver parses cleanly', () => {

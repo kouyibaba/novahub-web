@@ -118,6 +118,23 @@ class CatalogTests(unittest.TestCase):
         with mock.patch.object(self.cat, '_api', return_value=[row]), mock.patch.object(self.cat, '_request', return_value=(200, b'<html>blocked</html>', '', 'https://cdn.example/x.m3u8')):
             with self.assertRaises(ValueError): self.cat._probe(self.cat.sources()[0])
 
+    def test_episodes_prefers_high_definition_and_paused_source_recovers(self):
+        row = {
+            'vod_play_from': 'sdline$$$1080P蓝光',
+            'vod_play_url': '第1集$https://cdn.example/sd/1.mp4#第2集$https://cdn.example/sd/2.mp4$$$第1集$https://cdn.example/1080/1.m3u8#第2集$https://cdn.example/1080/2.m3u8',
+        }
+        eps = catalog.Catalog._episodes(row)
+        self.assertEqual(len(eps), 2)
+        self.assertIn('1080/1.m3u8', eps[0]['url'])
+
+        with self.cat.connection() as c:
+            c.execute("UPDATE catalog_sources SET state='paused', failures=3, checked_at=999999 WHERE id='a'")
+        with mock.patch.object(self.cat, '_probe', return_value=(True, 80)):
+            self.cat.check_sources(now=1000, force=True)
+        src_a = next(x for x in self.cat.sources() if x['id'] == 'a')
+        self.assertEqual(src_a['state'], 'active')
+        self.assertTrue(src_a['enabled'])
+
     def test_multiple_promotions_rollback_to_previous_whole_batch(self):
         self.cat.ingest([{'api': 'https://b.example/api.php'}, {'api': 'https://c.example/api.php'}])
         with mock.patch.object(self.cat, '_probe', return_value=(True, 10)):

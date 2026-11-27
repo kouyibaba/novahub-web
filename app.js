@@ -3516,7 +3516,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px;flex-wrap:wrap">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${badgeCls}">${badgeText}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.5.0</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.5.1</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -4679,12 +4679,26 @@ function handleExpiredAccessAction() {
 }
 
 let _gateTab = "login";
-function syncAccessGate() {
+let _gateRenderedMode = "";
+function setGateMsg(msg, isOk = false) {
+  const box = $("#gateMsg");
+  if (!box) return;
+  if (!msg) {
+    box.classList.add("hidden");
+    box.textContent = "";
+    return;
+  }
+  box.textContent = msg;
+  box.classList.toggle("ok", !!isOk);
+  box.classList.remove("hidden");
+}
+function syncAccessGate(forceRedraw = false) {
   const layer = $("#accessGateLayer");
   if (!layer) return;
   const gateOn = isAccessGateEnabled();
   const needLock = gateOn && (!NH.user ? true : (typeof NH.user.has_access === "boolean" ? !NH.user.has_access : (_authVerifiedOnce && !hasActiveAccess())));
   if (!needLock) {
+    _gateRenderedMode = "";
     layer.classList.add("hidden");
     layer.innerHTML = "";
     document.body.classList.remove("gate-locked");
@@ -4698,12 +4712,19 @@ function syncAccessGate() {
   } catch {}
   document.body.classList.add("gate-locked");
   layer.classList.remove("hidden");
+  const nextMode = NH.user ? `expired:${NH.user.username || ""}` : "guest";
+  if (!forceRedraw && _gateRenderedMode === nextMode && layer.firstElementChild) {
+    return;
+  }
+  _gateRenderedMode = nextMode;
   renderAccessGate(layer);
 }
 
 function renderAccessGate(layer) {
   const trialDays = Number(NH.cfg?.trial_days ?? 3);
   if (!NH.user) {
+    const prevUser = $("#gateAuthUser")?.value || "";
+    const prevPwd = $("#gateAuthPwd")?.value || "";
     const isReg = _gateTab === "register";
     layer.innerHTML = `
       <div class="gate-card">
@@ -4725,9 +4746,10 @@ function renderAccessGate(layer) {
         </div>
         <div class="form" style="margin:0;border:none;padding:0">
           <label>账号（3~24 位字符）</label>
-          <input id="gateAuthUser" placeholder="请输入账号" autocomplete="username">
+          <input id="gateAuthUser" placeholder="请输入账号" autocomplete="username" value="${esc(prevUser)}">
           <label>密码（6 位以上）</label>
-          <input id="gateAuthPwd" type="password" placeholder="请输入密码" autocomplete="${isReg ? "new-password" : "current-password"}">
+          <input id="gateAuthPwd" type="password" placeholder="请输入密码" autocomplete="${isReg ? "new-password" : "current-password"}" value="${esc(prevPwd)}">
+          <div id="gateMsg" class="gate-msg hidden" role="alert"></div>
           <button type="button" id="gateAuthSubmit" class="btn primary" style="width:100%;margin-top:14px">${isReg ? (trialDays > 0 ? `立即注册并开启 ${trialDays} 天体验` : "注册账号") : "立即登录"}</button>
         </div>
         <div class="gate-guide-box" style="margin-top:14px">
@@ -4740,7 +4762,22 @@ function renderAccessGate(layer) {
     const doSubmit = async () => {
       const username = $("#gateAuthUser")?.value.trim();
       const password = $("#gateAuthPwd")?.value.trim();
-      if (!username || !password) return toast("请填写完整账号与密码");
+      setGateMsg("");
+      if (!username || !password) {
+        setGateMsg("请填写完整账号与密码");
+        toast("请填写完整账号与密码");
+        return;
+      }
+      if (isReg && (username.length < 3 || username.length > 24)) {
+        setGateMsg("账号长度需为 3~24 位字符");
+        toast("账号长度需为 3~24 位字符");
+        return;
+      }
+      if (isReg && password.length < 6) {
+        setGateMsg("密码长度至少需要 6 位");
+        toast("密码长度至少需要 6 位");
+        return;
+      }
       const btn = $("#gateAuthSubmit");
       if (btn) { btn.disabled = true; btn.textContent = isReg ? "注册中…" : "登录中…"; }
       try {
@@ -4756,7 +4793,7 @@ function renderAccessGate(layer) {
         if (isReg) await cloudSyncPush(true).catch(() => {});
         else await cloudSyncPull(true).catch(() => {});
         if (typeof refreshNotifications === "function") refreshNotifications(true);
-        syncAccessGate();
+        syncAccessGate(true);
         if (isReg && d.user?.trial_notice) toast(d.user.trial_notice, 2800);
         else toast(isReg ? "注册并登录成功" : "登录成功");
         if (hasActiveAccess()) {
@@ -4764,7 +4801,9 @@ function renderAccessGate(layer) {
           else renderHome();
         }
       } catch (e) {
-        toast(e.message || "操作失败", 2400);
+        const errMsg = e?.message || "网络连接失败，请确认节点在线后重试";
+        setGateMsg(errMsg);
+        toast(errMsg, 2600);
         if (btn) { btn.disabled = false; btn.textContent = isReg ? (trialDays > 0 ? `立即注册并开启 ${trialDays} 天体验` : "注册账号") : "立即登录"; }
       }
     };
@@ -4800,6 +4839,7 @@ function renderAccessGate(layer) {
       <div class="form" style="margin:0;border:none;padding:0">
         <label>兑换卡密</label>
         <input id="gateRedeemIn" placeholder="例如：NH-XXXX-XXXX-XXXX" style="text-transform:uppercase;letter-spacing:.08em">
+        <div id="gateMsg" class="gate-msg hidden" role="alert"></div>
         <button type="button" id="gateRedeemBtn" class="btn primary" style="width:100%;margin-top:12px">立即兑换并解锁</button>
       </div>
       <div class="gate-guide-box">
@@ -4815,19 +4855,25 @@ function renderAccessGate(layer) {
 
   $("#gateRedeemBtn").onclick = async () => {
     const code = $("#gateRedeemIn")?.value.trim();
-    if (!code) return toast("请输入有效卡密");
+    setGateMsg("");
+    if (!code) {
+      setGateMsg("请输入有效卡密");
+      return toast("请输入有效卡密");
+    }
     const btn = $("#gateRedeemBtn");
     if (btn) { btn.disabled = true; btn.textContent = "核销解锁中…"; }
     try {
       const d = await nhApi("/api/vip/redeem", "POST", { code });
       NH.user = d.user;
       set("nh_user", d.user);
-      syncAccessGate();
+      syncAccessGate(true);
       toast(`解锁成功！已激活 ${d.days} 天畅享权益`, 2600);
       if (typeof routes[currentRoute] === "function") routes[currentRoute]();
       else renderHome();
     } catch (e) {
-      toast(e.message || "卡密无效", 2500);
+      const errMsg = e?.message || "卡密无效或网络异常";
+      setGateMsg(errMsg);
+      toast(errMsg, 2500);
       if (btn) { btn.disabled = false; btn.textContent = "立即兑换并解锁"; }
     }
   };

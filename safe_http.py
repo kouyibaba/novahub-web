@@ -19,15 +19,18 @@ def resolve_public(url):
             or "%" in parsed.hostname):
         raise ValueError("Invalid target URL")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    addresses = []
+    addresses_v4 = []
+    addresses_v6 = []
     for entry in socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM):
         address = entry[4][0]
         ip = ipaddress.ip_address(address)
         mapped = getattr(ip, "ipv4_mapped", None)
         if not ip.is_global or ip.is_multicast or (mapped and (not mapped.is_global or mapped.is_multicast)):
             raise ValueError("Private or reserved target address")
-        if address not in addresses:
-            addresses.append(address)
+        bucket = addresses_v4 if ip.version == 4 else addresses_v6
+        if address not in bucket:
+            bucket.append(address)
+    addresses = addresses_v4 + addresses_v6
     if not addresses:
         raise ValueError("No public target address")
     return parsed, port, addresses
@@ -47,9 +50,12 @@ def request(url, headers=None, timeout=8, max_bytes=4_194_304, method="GET", bod
 
         def connect_pinned(_destination, timeout=timeout, source_address=None):
             last_error = None
-            for address in addresses:
+            total = len(addresses)
+            for idx, address in enumerate(addresses):
                 try:
-                    return socket.create_connection((address, port), remaining(), source_address)
+                    left = remaining()
+                    step_to = min(left, 2.2) if (idx + 1 < total and left > 2.2) else left
+                    return socket.create_connection((address, port), step_to, source_address)
                 except OSError as exc:
                     last_error = exc
             raise last_error or OSError("No target address")

@@ -94,3 +94,12 @@
   - 新增全屏门禁层 `#accessGateLayer`，未登录直接展示登录/注册双标签页，到期直接锁屏并提供卡密输入激活、购卡外链与客服二维码展示；体验期展示剩余时间横幅与卡密解锁入口。
 - **管理后台升级（`admin.html` 及 `docs/admin.html`）**：
   - 总览新增体验/到期人数统计；用户筛选新增 `Pro 已解锁` / `体验中` / `已到期` / `永久豁免`；支持手工补发体验、切换豁免、清零锁定；发卡新增 `3天体验卡` 与 `7天周卡`；新增门禁与体验参数热配置卡片。
+
+## 7. v2.5.1 增量修复：门禁交互修复与视频源恢复/高清优选（2026-11-27 续）
+- **登录/注册门禁页无响应修复（`style.css`、`app.js`、`index.html` 及 `docs/`）**：
+  - `.modal` 提升至 `z-index: 9500`、`.toast` 提升至 `z-index: 10050`，解决原先被 `#accessGateLayer (9000)` 遮挡提示的问题；
+  - `syncAccessGate()` 仅在模式变化或强刷新时重绘，切 Tab 保留输入，新增 `#gateMsg` 内联错误提示框。
+- **视频源连通率恢复与高清线路优选（`safe_http.py`、`catalog.py`）**：
+  - `safe_http.resolve_public` 优先尝试 IPv4，多地址轮询分片超时（`2.2s`），防止平板 IPv6 不通拖垮连接；
+  - `catalog.check_sources` 缩短 `paused` 重检冷却（`1800s`），已存在过的 `paused` 源探活 1 次即可自愈恢复 `active`；`start_job` 触发强制全检；
+  - `catalog._episodes` 结合 `vod_play_from` 与 URL 画质关键词（`4K/蓝光/1080/超清/m3u8`）在完整集数基础上优先选中高清线路。

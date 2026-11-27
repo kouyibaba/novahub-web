@@ -307,13 +307,13 @@ class Catalog:
             c.execute('UPDATE catalog_sources SET completeness=?,media_ok=1 WHERE id=?', (len(episodes),source['id']))
         return True, (time.monotonic() - start) * 1000
 
-    def check_sources(self, now=None):
+    def check_sources(self, now=None, force=False):
         now = int(time.time() if now is None else now)
         saved_previous = False
         before = [{'id': s['id'], 'state': s['state']} for s in self.sources()]
         for source in self.sources():
             if source['disabled']: continue
-            if source['state'] == 'paused' and now - source['checked_at'] < 21600: continue
+            if not force and source['state'] == 'paused' and now - source['checked_at'] < 1800: continue
             try: ok, latency = self._probe(source); error = ''
             except BusyError: return
             except Exception as exc: ok = False; latency = 4000; error = type(exc).__name__
@@ -324,7 +324,8 @@ class Catalog:
                     failures = 0
                     if not first: first = now; success = 1
                     elif now - first >= 1800: success = max(2, success + 1)
-                    if state != 'active' and success >= 2:
+                    # 曾经活跃过的 paused 源探活一次恢复即切回 active；新 candidate 仍需间隔 30 分钟双轮校验
+                    if state == 'paused' or (state != 'active' and success >= 2):
                         if not saved_previous:
                             c.execute("INSERT INTO catalog_meta VALUES('previous',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(before),))
                             saved_previous = True
@@ -434,8 +435,9 @@ class Catalog:
     @staticmethod
     def _episodes(row):
         groups = str(row.get('vod_play_url') or '').split('$$$')
+        from_names = str(row.get('vod_play_from') or '').split('$$$')
         parsed = []
-        for group in groups[:12]:
+        for idx, group in enumerate(groups[:12]):
             episodes = []
             for value in group.split('#')[:1000]:
                 title, sep, url = value.partition('$')
@@ -444,8 +446,18 @@ class Catalog:
                 try: url = normalize_url(url)
                 except ValueError: continue
                 episodes.append({'n': title[:80], 'url': url})
-            if episodes: parsed.append(episodes)
-        return max(parsed, key=len, default=[])
+            if not episodes: continue
+            label = (from_names[idx] if idx < len(from_names) else '').lower()
+            sample_u = episodes[0]['url'].lower()
+            hint = f"{label} {sample_u}"
+            hd_score = 0
+            if any(k in hint for k in ('4k', '2160', 'uhd')): hd_score += 5
+            elif any(k in hint for k in ('1080', '蓝光', 'bluray', 'fhd')): hd_score += 4
+            elif any(k in hint for k in ('超清', '720', 'hd')): hd_score += 2
+            if '.m3u8' in sample_u: hd_score += 1
+            parsed.append((len(episodes), hd_score, episodes))
+        if not parsed: return []
+        return max(parsed, key=lambda x: (x[0], x[1]))[2]
 
     def detail(self, sid, vod_id, owner=0):
         source = self.resolve(sid, owner)
@@ -488,7 +500,7 @@ class Catalog:
         def work():
             try:
                 if action == 'refresh': self.refresh_subscriptions(force=True)
-                self.check_sources()
+                self.check_sources(force=True)
                 self.last_job['error'] = ''
             except Exception as exc: self.last_job['error'] = type(exc).__name__
             finally:

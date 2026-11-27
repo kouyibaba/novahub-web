@@ -61,6 +61,15 @@ class SafeHttpTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "too large"):
                 safe_http.request("http://public.example/", max_bytes=4)
 
+    def test_resolve_public_prefers_ipv4_before_ipv6(self):
+        fake = [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:4700:3034::1", 443, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("104.21.41.102", 443)),
+        ]
+        with mock.patch.object(socket, "getaddrinfo", return_value=fake):
+            _, _, addrs = safe_http.resolve_public("https://public.example/api.php")
+        self.assertEqual(addrs, ["104.21.41.102", "2606:4700:3034::1"])
+
 
 if __name__ == "__main__":
     unittest.main()
