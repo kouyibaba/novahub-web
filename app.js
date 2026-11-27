@@ -18,6 +18,15 @@ const NH = {
 const isProUser = () => !!(NH.user && NH.user.is_pro);
 const isAppClient = () => !!(window.NovaNative && typeof window.NovaNative.getAppVersion === "function");
 const getDeviceId = () => {
+  try {
+    if (typeof window !== "undefined" && window.NovaNative && typeof window.NovaNative.getDeviceFingerprint === "function") {
+      const fp = String(window.NovaNative.getDeviceFingerprint() || "").trim();
+      if (fp) {
+        try { localStorage.setItem("nh_device_id", JSON.stringify(fp)); } catch {}
+        return fp;
+      }
+    }
+  } catch {}
   let id = get("nh_device_id", "");
   if (!id) {
     id = "d_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -43,7 +52,8 @@ window.fetch = (input, init = {}) => {
     const target = new URL(input, location.href);
     const apiOrigin = window.__NH_API_BASE__ ? new URL(window.__NH_API_BASE__).origin : location.origin;
     if ((target.origin === location.origin || target.origin === apiOrigin) &&
-        (target.pathname === "/kw" || target.pathname.startsWith("/api/live/") || target.pathname.startsWith("/api/media/"))) {
+        (target.pathname === "/kw" || target.pathname.startsWith("/api/live/") || target.pathname.startsWith("/api/media/") ||
+         target.pathname.startsWith("/api/vod/") || target.pathname.startsWith("/api/novel/") || target.pathname.startsWith("/api/notifications"))) {
       const headers = new Headers(init.headers || {});
       if (!headers.has("Authorization")) headers.set("Authorization", "Bearer " + NH.token);
       init = { ...init, headers };
@@ -1013,10 +1023,12 @@ function pauseVideoForAudio() {
 
 async function playSongFromList(list, idx, openPlayerView = false) {
   if (!NH.user) {
-    toast("请先登录账号后收听（5 秒免费注册）");
-    if (typeof openAuthModal === "function") openAuthModal("login");
+    toast("请先登录账号后收听");
+    if (typeof syncAccessGate === "function") syncAccessGate();
+    else if (typeof openAuthModal === "function") openAuthModal("login");
     return;
   }
+  if (typeof handleExpiredAccessAction === "function" && !handleExpiredAccessAction()) return;
   const song = list[idx];
   if (!song) return;
   pauseVideoForAudio();
@@ -1461,6 +1473,7 @@ function renderMusicDiscover() {
   const albumCnt = new Set(filtered.map((x) => (x.album || "单曲收录").trim())).size;
   const relArtists = mIsSearch ? extractArtistsFromSongs(filtered, 8) : [];
   $("#view").innerHTML = `
+    ${typeof renderTrialBannerHtml === "function" ? renderTrialBannerHtml() : ""}
     <div class="m-chips">${MUSIC_CHARTS.map((c) => `<button class="m-chip ${!mIsSearch && curChart === c.id ? "active" : ""}" data-id="${c.id}">${c.name}</button>`).join("")}</div>
     ${mIsSearch ? `
       <div class="m-search-bar">
@@ -1817,6 +1830,7 @@ function renderHome() {
   const cachedItems = _homeVodCache.items;
   const hasCached = cachedItems.length > 0;
   $('#view').innerHTML=`
+    ${typeof renderTrialBannerHtml === "function" ? renderTrialBannerHtml() : ""}
     ${rows.length?`<div class="section-title" style="justify-content:space-between"><span>${ico('clock')} 继续观看</span><div><button class="btn ghost" id="manageHistory">管理</button><button class="btn ghost" id="clearHistory">清空</button></div></div><div class="grid" id="histGrid"></div>`:''}
     ${renderAdSlotHtml('home')}
     ${likes.length?`<div class="section-title">${ico('heart')} 我的片单</div><div class="grid" id="likeGrid"></div>`:''}
@@ -1833,6 +1847,7 @@ function renderHome() {
     paintGrid($('#homeGrid'), cachedItems);
   }
   const loadHome = (force = false) => {
+    if (typeof isAccessGateEnabled === "function" && isAccessGateEnabled() && !hasActiveAccess()) return;
     const btn = $('#refreshHomeVod');
     if (btn && force) { btn.disabled = true; btn.textContent = '刷新中…'; }
     fetchHomeVod(force).then((items) => {
@@ -2152,10 +2167,12 @@ function syncVodToolButtons() {
 
 function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0, isLive = false) {
   if (!NH.user) {
-    toast("请先登录账号后观看（5 秒免费注册）");
-    if (typeof openAuthModal === "function") openAuthModal("login");
+    toast("请先登录账号后观看");
+    if (typeof syncAccessGate === "function") syncAccessGate();
+    else if (typeof openAuthModal === "function") openAuthModal("login");
     return;
   }
+  if (typeof handleExpiredAccessAction === "function" && !handleExpiredAccessAction()) return;
   stopMusicForVideo();
   const layer = $("#playerLayer");
   const wasHidden = layer.classList.contains("hidden");
@@ -3466,19 +3483,40 @@ function restore(obj) {
 function renderMe() {
   const u = NH.user;
   const pro = isProUser();
-  const expText = pro
-    ? `Pro 会员生效中 · 剩余 ${u.remain_days} 天`
-    : (u ? "当前为标准免费版 · 开通 Pro 享站内免广告与高码率音乐" : "登录账号开启云端多端同步与 Pro 会员权益");
+  const accStatus = getAccessStatus();
+  const remainTxt = u && u.access_remain_sec ? formatAccessRemain(u.access_remain_sec) : "";
+  let badgeCls = "gray";
+  let badgeText = "未登录";
+  let expText = "登录或注册账号，立享新用户免费体验";
+  if (u) {
+    if (accStatus === "active") {
+      badgeCls = "";
+      badgeText = "PRO 已解锁";
+      expText = `Pro 会员生效中 · 剩余 ${u.remain_days} 天（免推广 + 无损音质）`;
+    } else if (accStatus === "exempt") {
+      badgeCls = "";
+      badgeText = "永久豁免";
+      expText = "老用户永久畅享版 · 兑换 Pro 卡密可额外享免推广与无损音质";
+    } else if (accStatus === "trial") {
+      badgeCls = "";
+      badgeText = "体验中";
+      expText = `新用户全功能体验中 · 剩余 ${remainTxt || (u.trial_remain_days + " 天")}（兑换卡密可叠加延长）`;
+    } else {
+      badgeCls = "gray";
+      badgeText = "已到期";
+      expText = "免费体验期已结束 · 请兑换卡密解锁全部影视、音乐与小说功能";
+    }
+  }
 
   $("#view").innerHTML = `
     <div class="vip-card">
       <div class="vip-top">
-        <div class="vip-ava">${ico(pro ? "crown" : "user")}</div>
+        <div class="vip-ava">${ico(pro || accStatus === "exempt" ? "crown" : "user")}</div>
         <div style="flex:1;min-width:0">
-          <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
+          <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px;flex-wrap:wrap">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
-            <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.9</span>
+            <span class="badge ${badgeCls}">${badgeText}</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.5.0</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -3766,6 +3804,7 @@ async function searchNovel(q) {
 
 function renderNovelStore() {
   $("#view").innerHTML = `
+    ${typeof renderTrialBannerHtml === "function" ? renderTrialBannerHtml() : ""}
     <div class="m-chips">${NOVEL_CATS.map((c) => `<button class="m-chip ${!novelIsSearch && curNovelCat === c.id ? "active" : ""}" data-cat="${esc(c.id)}">${esc(c.name)}</button>`).join("")}</div>
     ${renderAdSlotHtml('novel')}
     <div class="section-title" style="justify-content:space-between">
@@ -4090,6 +4129,7 @@ async function loadReaderChapter(index, restoreRatio = 0, fromTts = false) {
 }
 
 function openNovelReader(book, chapters, index = 1) {
+  if (typeof handleExpiredAccessAction === "function" && !handleExpiredAccessAction()) return;
   const wasHidden = $("#readerLayer").classList.contains("hidden");
   R.book = book;
   R.chapters = chapters;
@@ -4336,8 +4376,14 @@ async function nhApi(path, method = "GET", body = null) {
   const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) {
+    if (r.status === 403 && d.code === "ACCESS_EXPIRED" && NH.user) {
+      NH.user = { ...NH.user, has_access: false, access_status: "expired", is_pro: false };
+      set("nh_user", NH.user);
+      if (typeof syncAccessGate === "function") syncAccessGate();
+    }
     const err = new Error(d.error || ("HTTP " + r.status));
     err.status = r.status;
+    err.code = d.code || "";
     throw err;
   }
   return d;
@@ -4560,23 +4606,245 @@ async function loadSiteConfig() {
     NH.cfg = cfg;
     NH.offline = false;
     set("nh_site_cfg", cfg);
-    if (!viewStack.length && (currentRoute === "home" || currentRoute === "n_store")) routes[currentRoute]();
+    if (typeof syncAccessGate === "function") syncAccessGate();
+    if (!viewStack.length && hasActiveAccess() && (currentRoute === "home" || currentRoute === "n_store" || currentRoute === "m_discover")) {
+      routes[currentRoute]();
+    }
   } catch {}
 }
 
+let _authVerifiedOnce = false;
 async function refreshAuthUser() {
-  if (!NH.token) return;
+  if (!NH.token) {
+    _authVerifiedOnce = true;
+    if (typeof syncAccessGate === "function") syncAccessGate();
+    return;
+  }
   const result = await authSession.refresh();
+  _authVerifiedOnce = true;
   if (result === 'valid') {
+    if (typeof syncAccessGate === "function") syncAccessGate();
     if (typeof sendPresenceHeartbeat === 'function') sendPresenceHeartbeat();
     if (typeof refreshNotifications === 'function') refreshNotifications(true);
     await cloudSyncPull(true);
-    if (!viewStack.length && ["me","home","n_store","m_fav","n_shelf"].includes(currentRoute)) routes[currentRoute]();
+    if (!viewStack.length && hasActiveAccess() && ["me","home","n_store","m_fav","n_shelf"].includes(currentRoute)) routes[currentRoute]();
   } else if (result === 'invalid') {
+    if (typeof syncAccessGate === "function") syncAccessGate();
     if (currentRoute === 'me') renderMe();
   } else if (result === 'offline' && NH.user) {
+    if (typeof syncAccessGate === "function") syncAccessGate();
     toast("节点正在重连，已保持本地登录态与离线能力", 2400);
   }
+}
+
+/* ============ v2.5.0 强门禁控制（未解锁全站锁屏 + 体验倒计时引导 + 卡密解锁） ============ */
+const isAccessGateEnabled = () => NH.cfg?.access_gate_enabled !== false;
+function getAccessStatus() {
+  const u = NH.user;
+  if (!u) return "guest";
+  if (u.access_status) return u.access_status;
+  if (u.is_pro) return "active";
+  if (u.access_exempt) return "exempt";
+  return "expired";
+}
+function hasActiveAccess() {
+  if (!NH.user) return false;
+  if (!isAccessGateEnabled()) return true;
+  if (typeof NH.user.has_access === "boolean") return NH.user.has_access;
+  // 兼容刚从老版本升级上来的本地缓存，待首次 /api/auth/me 校验完成后再做精准锁定
+  if (!_authVerifiedOnce) return true;
+  return !!(NH.user.is_pro || NH.user.access_exempt);
+}
+function formatAccessRemain(sec) {
+  const s = Math.max(0, Number(sec) || 0);
+  if (s >= 86400) return `${Math.ceil(s / 86400)} 天`;
+  if (s >= 3600) return `${Math.max(1, Math.floor(s / 3600))} 小时`;
+  return `${Math.max(1, Math.ceil(s / 60))} 分钟`;
+}
+function renderTrialBannerHtml() {
+  if (!NH.user || !isAccessGateEnabled()) return "";
+  if (getAccessStatus() !== "trial") return "";
+  const remain = formatAccessRemain(NH.user.access_remain_sec || ((NH.user.trial_remain_days || 1) * 86400));
+  return `<div class="trial-banner">
+    <div>新用户体验期剩余 <strong>${esc(remain)}</strong> · 兑换卡密享长期畅享与免推广</div>
+    <button type="button" class="trial-banner-btn" onclick="openRedeemModal()">兑换卡密</button>
+  </div>`;
+}
+function handleExpiredAccessAction() {
+  if (!hasActiveAccess()) {
+    syncAccessGate();
+    return false;
+  }
+  return true;
+}
+
+let _gateTab = "login";
+function syncAccessGate() {
+  const layer = $("#accessGateLayer");
+  if (!layer) return;
+  const gateOn = isAccessGateEnabled();
+  const needLock = gateOn && (!NH.user ? true : (typeof NH.user.has_access === "boolean" ? !NH.user.has_access : (_authVerifiedOnce && !hasActiveAccess())));
+  if (!needLock) {
+    layer.classList.add("hidden");
+    layer.innerHTML = "";
+    document.body.classList.remove("gate-locked");
+    return;
+  }
+  // 锁定时立刻中止正在播放的视频、音频与朗读
+  try {
+    if (!$("#playerLayer")?.classList.contains("hidden")) closePlayer(true);
+    if (!$("#readerLayer")?.classList.contains("hidden")) closeReader();
+    stopMusicForVideo();
+  } catch {}
+  document.body.classList.add("gate-locked");
+  layer.classList.remove("hidden");
+  renderAccessGate(layer);
+}
+
+function renderAccessGate(layer) {
+  const trialDays = Number(NH.cfg?.trial_days ?? 3);
+  if (!NH.user) {
+    const isReg = _gateTab === "register";
+    layer.innerHTML = `
+      <div class="gate-card">
+        <div class="gate-brand">
+          <div class="gate-brand-ico">${ico("brand")}</div>
+          <div>
+            <div class="gate-title">NovaHub · 星隅</div>
+            <div style="font-size:11.5px;color:var(--muted)">私人高清影视 · 无损音乐 · 精品小说</div>
+          </div>
+        </div>
+        <div class="gate-sub">
+          ${trialDays > 0
+            ? `请登录账号使用。新用户注册立享 <strong style="color:var(--accent)">${trialDays} 天全功能免费体验</strong>（同设备限领 1 次）。`
+            : "本站点已开启会员授权访问，请登录已有账号并兑换卡密解锁全部内容。"}
+        </div>
+        <div class="gate-tabs">
+          <button type="button" class="gate-tab ${!isReg ? "active" : ""}" data-gtab="login">账号登录</button>
+          <button type="button" class="gate-tab ${isReg ? "active" : ""}" data-gtab="register">新用户注册${trialDays > 0 ? ` · 送${trialDays}天` : ""}</button>
+        </div>
+        <div class="form" style="margin:0;border:none;padding:0">
+          <label>账号（3~24 位字符）</label>
+          <input id="gateAuthUser" placeholder="请输入账号" autocomplete="username">
+          <label>密码（6 位以上）</label>
+          <input id="gateAuthPwd" type="password" placeholder="请输入密码" autocomplete="${isReg ? "new-password" : "current-password"}">
+          <button type="button" id="gateAuthSubmit" class="btn primary" style="width:100%;margin-top:14px">${isReg ? (trialDays > 0 ? `立即注册并开启 ${trialDays} 天体验` : "注册账号") : "立即登录"}</button>
+        </div>
+        <div class="gate-guide-box" style="margin-top:14px">
+          ${esc(NH.cfg?.redeem_guide_tip || "已拥有卡密？请先注册或登录账号后输入卡密即可解锁。")}
+        </div>
+      </div>`;
+    layer.querySelectorAll("[data-gtab]").forEach((btn) => {
+      btn.onclick = () => { _gateTab = btn.dataset.gtab; renderAccessGate(layer); };
+    });
+    const doSubmit = async () => {
+      const username = $("#gateAuthUser")?.value.trim();
+      const password = $("#gateAuthPwd")?.value.trim();
+      if (!username || !password) return toast("请填写完整账号与密码");
+      const btn = $("#gateAuthSubmit");
+      if (btn) { btn.disabled = true; btn.textContent = isReg ? "注册中…" : "登录中…"; }
+      try {
+        const d = await nhApi(isReg ? "/api/auth/register" : "/api/auth/login", "POST", {
+          username,
+          password,
+          device_id: getDeviceId(),
+          client_type: isAppClient() ? "app" : "web",
+          device_info: getDeviceInfo(),
+        });
+        authSession.apply(d.token, d.user);
+        _authVerifiedOnce = true;
+        if (isReg) await cloudSyncPush(true).catch(() => {});
+        else await cloudSyncPull(true).catch(() => {});
+        if (typeof refreshNotifications === "function") refreshNotifications(true);
+        syncAccessGate();
+        if (isReg && d.user?.trial_notice) toast(d.user.trial_notice, 2800);
+        else toast(isReg ? "注册并登录成功" : "登录成功");
+        if (hasActiveAccess()) {
+          if (typeof routes[currentRoute] === "function") routes[currentRoute]();
+          else renderHome();
+        }
+      } catch (e) {
+        toast(e.message || "操作失败", 2400);
+        if (btn) { btn.disabled = false; btn.textContent = isReg ? (trialDays > 0 ? `立即注册并开启 ${trialDays} 天体验` : "注册账号") : "立即登录"; }
+      }
+    };
+    $("#gateAuthSubmit").onclick = doSubmit;
+    $("#gateAuthPwd").onkeydown = (e) => { if (e.key === "Enter") doSubmit(); };
+    return;
+  }
+
+  // 已登录但体验已到期：全屏卡密解锁锁屏
+  let buyUrl = "";
+  try {
+    if (NH.cfg?.redeem_buy_url && new URL(NH.cfg.redeem_buy_url).protocol === "https:") buyUrl = NH.cfg.redeem_buy_url;
+  } catch {}
+  let qrImg = "";
+  try {
+    if (NH.cfg?.redeem_qr_image && new URL(NH.cfg.redeem_qr_image).protocol === "https:") qrImg = NH.cfg.redeem_qr_image;
+  } catch {}
+
+  layer.innerHTML = `
+    <div class="gate-card">
+      <div class="gate-brand">
+        <div class="gate-brand-ico">${ico("crown")}</div>
+        <div>
+          <div class="gate-title">体验已到期 · 兑换卡密解锁</div>
+          <div style="font-size:12px;color:var(--muted)">当前账号：${esc(NH.user.username)}</div>
+        </div>
+      </div>
+      <div class="gate-sub">
+        ${NH.user.trial_source === "denied_dup_device"
+          ? "当前设备已使用过新用户免费体验，请输入兑换卡密后继续使用全部影视、音乐与小说功能。"
+          : "您的免费体验时间已结束，输入兑换卡密即可立即解封全部内容与权益。"}
+      </div>
+      <div class="form" style="margin:0;border:none;padding:0">
+        <label>兑换卡密</label>
+        <input id="gateRedeemIn" placeholder="例如：NH-XXXX-XXXX-XXXX" style="text-transform:uppercase;letter-spacing:.08em">
+        <button type="button" id="gateRedeemBtn" class="btn primary" style="width:100%;margin-top:12px">立即兑换并解锁</button>
+      </div>
+      <div class="gate-guide-box">
+        <div>${esc(NH.cfg?.redeem_guide_tip || "请联系站长获取兑换卡密后在此输入激活。")}</div>
+        ${buyUrl ? `<button type="button" id="gateBuyBtn" class="btn ghost" style="width:100%;margin-top:10px">前往获取卡密 / 活动领码</button>` : ""}
+        ${qrImg ? `<img class="gate-qr-img" src="${esc(qrImg)}" alt="客服或领码二维码" loading="lazy">` : ""}
+      </div>
+      <div class="gate-foot-actions">
+        <button type="button" id="gateRefreshBtn" class="btn ghost" style="flex:1">刷新权限状态</button>
+        <button type="button" id="gateLogoutBtn" class="btn ghost" style="flex:1">切换账号</button>
+      </div>
+    </div>`;
+
+  $("#gateRedeemBtn").onclick = async () => {
+    const code = $("#gateRedeemIn")?.value.trim();
+    if (!code) return toast("请输入有效卡密");
+    const btn = $("#gateRedeemBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "核销解锁中…"; }
+    try {
+      const d = await nhApi("/api/vip/redeem", "POST", { code });
+      NH.user = d.user;
+      set("nh_user", d.user);
+      syncAccessGate();
+      toast(`解锁成功！已激活 ${d.days} 天畅享权益`, 2600);
+      if (typeof routes[currentRoute] === "function") routes[currentRoute]();
+      else renderHome();
+    } catch (e) {
+      toast(e.message || "卡密无效", 2500);
+      if (btn) { btn.disabled = false; btn.textContent = "立即兑换并解锁"; }
+    }
+  };
+  $("#gateRedeemIn").onkeydown = (e) => { if (e.key === "Enter") $("#gateRedeemBtn").click(); };
+  $("#gateBuyBtn")?.addEventListener("click", () => {
+    window.open(buyUrl, "_blank", "noopener,noreferrer");
+  });
+  $("#gateRefreshBtn").onclick = async () => {
+    await refreshAuthUser();
+    if (hasActiveAccess()) toast("授权状态已更新，欢迎回来");
+    else toast("当前仍未解锁，请先兑换卡密");
+  };
+  $("#gateLogoutBtn").onclick = () => {
+    if (typeof sendPresenceLogout === "function") sendPresenceLogout();
+    authSession.clear();
+    syncAccessGate();
+  };
 }
 
 function renderAdSlotHtml(slot = 'home') {
@@ -4619,12 +4887,20 @@ async function openAuthModal() {
   const isReg = !!$("#authIsReg")?.checked;
   if (!username || !password) return toast("请填写完整账号与密码");
   try {
-    const d = await nhApi(isReg ? "/api/auth/register" : "/api/auth/login", "POST", { username, password });
+    const d = await nhApi(isReg ? "/api/auth/register" : "/api/auth/login", "POST", {
+      username,
+      password,
+      device_id: getDeviceId(),
+      client_type: isAppClient() ? "app" : "web",
+      device_info: getDeviceInfo(),
+    });
     authSession.apply(d.token, d.user);
     if (isReg) await cloudSyncPush(true);
     else await cloudSyncPull(true);
     if (typeof refreshNotifications === "function") refreshNotifications(true);
-    toast(isReg ? "注册并登录成功" : "登录成功");
+    if (typeof syncAccessGate === "function") syncAccessGate();
+    if (isReg && d.user?.trial_notice) toast(d.user.trial_notice, 2800);
+    else toast(isReg ? "注册并登录成功" : "登录成功");
     if (routes[currentRoute]) routes[currentRoute](); else renderMe();
   } catch (e) {
     toast(e.message, 2400);
@@ -4645,8 +4921,9 @@ async function openRedeemModal() {
     const d = await nhApi("/api/vip/redeem", "POST", { code });
     NH.user = d.user;
     set("nh_user", d.user);
-    toast(`兑换成功！已增加 ${d.days} 天 Pro 权益`, 2600);
-    renderMe();
+    if (typeof syncAccessGate === "function") syncAccessGate();
+    toast(`兑换成功！已增加 ${d.days} 天畅享权益`, 2600);
+    if (routes[currentRoute]) routes[currentRoute](); else renderMe();
   } catch (e) {
     toast(e.message, 2600);
   }
@@ -5188,3 +5465,4 @@ _bootReady = true;
 dismissSplash(_bootAt);
 loadSiteConfig();
 refreshAuthUser();
+if (typeof syncAccessGate === "function") syncAccessGate();

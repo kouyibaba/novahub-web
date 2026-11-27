@@ -32,6 +32,12 @@ DEFAULT_SITE_CONFIG = {
     "ad_slots": "home,novel",
     "ad_provider": "manual",
     "sponsor_tip": "Pro 支持站内广告豁免、高码率音乐与会员标识；音质以曲源实际提供为准。账号云同步与系统听书向普通用户开放。",
+    "access_gate_enabled": "1",
+    "trial_days": "3",
+    "trial_max_per_ip_day": "2",
+    "redeem_guide_tip": "请联系站长获取兑换卡密，或在下方活动入口领取体验码。输入卡密后立即解锁全部影视、无损音乐与小说功能。",
+    "redeem_buy_url": "",
+    "redeem_qr_image": "",
 }
 
 
@@ -109,8 +115,29 @@ def init_db():
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_user_notif_user ON user_notifications(user_id, read_at, created_at);
+            CREATE TABLE IF NOT EXISTS trial_grants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                device_id TEXT NOT NULL DEFAULT '',
+                ip TEXT NOT NULL DEFAULT '',
+                days INTEGER NOT NULL DEFAULT 3,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_trial_grants_dev ON trial_grants(device_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_trial_grants_ip ON trial_grants(ip, created_at);
             """
         )
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+        if "trial_expire_at" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN trial_expire_at INTEGER NOT NULL DEFAULT 0")
+        if "trial_source" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN trial_source TEXT NOT NULL DEFAULT ''")
+        if "access_exempt" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN access_exempt INTEGER NOT NULL DEFAULT 0")
+        if not c.execute("SELECT 1 FROM site_config WHERE key='trial_schema_v1'").fetchone():
+            # 存量老用户全部自动豁免，确保平滑过渡，仅对新注册账号启用体验倒计时与强门禁
+            c.execute("UPDATE users SET access_exempt=1, trial_source='legacy_exempt' WHERE access_exempt=0")
+            c.execute("INSERT INTO site_config(key, value) VALUES('trial_schema_v1', '1')")
         # 初始化持久化签名密钥与默认管理员密码（NovaAdmin888，支持环境变量或后台随时修改）
         row = c.execute("SELECT value FROM site_config WHERE key='jwt_secret'").fetchone()
         if not row:
@@ -182,21 +209,71 @@ def _admin_credential_version():
     return _credential_version(row["value"]) if row else ""
 
 
-def _format_user(row):
-    """格式化用户公开字段并计算 Pro 会员有效状态。"""
+def _get_gate_settings(conn=None):
+    """读取强门禁开关、默认体验天数与同 IP 日限额配置。"""
+    def _read(c):
+        rows = c.execute(
+            "SELECT key, value FROM site_config WHERE key IN ('access_gate_enabled', 'trial_days', 'trial_max_per_ip_day')"
+        ).fetchall()
+        m = {r["key"]: r["value"] for r in rows}
+        gate_on = m.get("access_gate_enabled", DEFAULT_SITE_CONFIG["access_gate_enabled"]) == "1"
+        try:
+            t_days = max(0, min(30, int(m.get("trial_days", DEFAULT_SITE_CONFIG["trial_days"]))))
+        except ValueError:
+            t_days = 3
+        try:
+            max_ip = max(1, min(50, int(m.get("trial_max_per_ip_day", DEFAULT_SITE_CONFIG["trial_max_per_ip_day"]))))
+        except ValueError:
+            max_ip = 2
+        return gate_on, t_days, max_ip
+
+    if conn is not None:
+        return _read(conn)
+    with _DB_LOCK, _conn() as c:
+        return _read(c)
+
+
+def _format_user(row, gate_enabled=None):
+    """格式化用户公开字段，统一计算卡密正式态 / 体验态 / 豁免态 / 到期锁定态。"""
     now = int(time.time())
+    keys = row.keys() if hasattr(row, "keys") else ()
     exp = int(row["vip_expire_at"] or 0)
+    trial_exp = int(row["trial_expire_at"] or 0) if "trial_expire_at" in keys else 0
+    trial_src = str(row["trial_source"] or "") if "trial_source" in keys else ""
+    exempt = bool(row["access_exempt"]) if "access_exempt" in keys else False
+    if gate_enabled is None:
+        gate_enabled, _, _ = _get_gate_settings()
+
+    if exp > now:
+        status = "active"
+    elif exempt:
+        status = "exempt"
+    elif trial_exp > now:
+        status = "trial"
+    else:
+        status = "expired"
+
+    access_exp = max(exp, trial_exp)
+    remain_sec = max(0, access_exp - now) if access_exp > now else 0
     return {
         "id": row["id"],
         "username": row["username"],
         "vip_expire_at": exp,
         "is_pro": exp > now,
         "remain_days": max(0, (exp - now + 86399) // 86400) if exp > now else 0,
+        "trial_expire_at": trial_exp,
+        "trial_source": trial_src,
+        "trial_remain_days": max(0, (trial_exp - now + 86399) // 86400) if trial_exp > now else 0,
+        "access_exempt": exempt,
+        "access_expire_at": access_exp,
+        "access_remain_sec": remain_sec,
+        "access_status": status,
+        "has_access": (not gate_enabled) or (status != "expired"),
     }
 
 
-def register_user(username, password):
-    """注册新账号并返回用户信息与登录 Token。"""
+def register_user(username, password, device_id="", ip=""):
+    """注册新账号；满足设备与 IP 防刷校验时自动授予新用户免费体验期。"""
     u = (username or "").strip()
     p = (password or "").strip()
     if len(u) < 3 or len(u) > 24:
@@ -204,19 +281,60 @@ def register_user(username, password):
     if len(p) < 6 or len(p) > 64:
         raise ValueError("密码长度需为 6~64 位")
 
+    dev = str(device_id or "")[:80].strip()
+    cip = str(ip or "")[:64].strip()
     salt = secrets.token_hex(16)
     pwd_hash = _hash_pwd(p, salt)
     now = int(time.time())
+    trial_granted = False
+    trial_notice = ""
+
     with _DB_LOCK, _conn() as c:
+        gate_enabled, t_days, max_ip = _get_gate_settings(c)
+        trial_exp = 0
+        trial_src = ""
+        if t_days > 0:
+            dup_dev = False
+            if len(dev) >= 6:
+                dup_dev = bool(c.execute("SELECT 1 FROM trial_grants WHERE device_id=? LIMIT 1", (dev,)).fetchone())
+            ip_exceeded = False
+            if not dup_dev and cip:
+                cnt_ip = c.execute(
+                    "SELECT COUNT(*) FROM trial_grants WHERE ip=? AND created_at>=?",
+                    (cip, now - 86400),
+                ).fetchone()[0]
+                if cnt_ip >= max_ip:
+                    ip_exceeded = True
+            if dup_dev:
+                trial_src = "denied_dup_device"
+                trial_notice = "当前设备已领取过新用户免费体验，请直接兑换卡密解锁"
+            elif ip_exceeded:
+                trial_src = "denied_ip_limit"
+                trial_notice = "当前网络今日体验名额已满，请直接兑换卡密解锁"
+            else:
+                trial_exp = now + t_days * 86400
+                trial_src = "register"
+                trial_granted = True
+                trial_notice = f"已赠送 {t_days} 天全功能免费体验"
+
         try:
             cur = c.execute(
-                "INSERT INTO users(username, pwd_hash, salt, vip_expire_at, created_at) VALUES(?, ?, ?, 0, ?)",
-                (u, pwd_hash, salt, now),
+                "INSERT INTO users(username, pwd_hash, salt, vip_expire_at, trial_expire_at, trial_source, access_exempt, created_at) "
+                "VALUES(?, ?, ?, 0, ?, ?, 0, ?)",
+                (u, pwd_hash, salt, trial_exp, trial_src, now),
             )
         except sqlite3.IntegrityError:
             raise ValueError("该账号已被注册")
-        row = c.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
-    user = _format_user(row)
+        uid = cur.lastrowid
+        if trial_granted:
+            c.execute(
+                "INSERT INTO trial_grants(user_id, device_id, ip, days, created_at) VALUES(?, ?, ?, ?, ?)",
+                (uid, dev, cip, t_days, now),
+            )
+        row = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    user = _format_user(row, gate_enabled=gate_enabled)
+    user["trial_granted"] = trial_granted
+    user["trial_notice"] = trial_notice
     return user, _sign_token(user["id"], user["username"],
                              credential_version=_credential_version(row["salt"] + "$" + row["pwd_hash"]))
 
@@ -325,7 +443,8 @@ def redeem_code(user_id, code_str):
         if not u_row:
             raise ValueError("用户不存在")
         days = int(row["days"])
-        base_ts = max(now, int(u_row["vip_expire_at"] or 0))
+        trial_exp = int(u_row["trial_expire_at"] or 0) if "trial_expire_at" in u_row.keys() else 0
+        base_ts = max(now, int(u_row["vip_expire_at"] or 0), trial_exp)
         new_exp = base_ts + days * 86400
         c.execute("UPDATE redeem_codes SET used_by=?, used_at=? WHERE code=?", (int(user_id), now, code))
         c.execute("UPDATE users SET vip_expire_at=? WHERE id=?", (new_exp, int(user_id)))
@@ -638,6 +757,14 @@ def get_public_config():
     cfg = dict(DEFAULT_SITE_CONFIG)
     for r in rows:
         cfg[r["key"]] = r["value"]
+    try:
+        trial_days = max(0, min(30, int(cfg.get("trial_days", "3"))))
+    except ValueError:
+        trial_days = 3
+    try:
+        max_ip = max(1, min(50, int(cfg.get("trial_max_per_ip_day", "2"))))
+    except ValueError:
+        max_ip = 2
     return {
         "ad_enabled": cfg.get("ad_enabled") == "1",
         "ad_title": cfg.get("ad_title", ""),
@@ -648,6 +775,12 @@ def get_public_config():
         "ad_slots": [x for x in cfg.get("ad_slots", "home,novel").split(',') if x in ('home','novel')],
         "ad_provider": cfg.get("ad_provider", "manual"),
         "sponsor_tip": cfg.get("sponsor_tip", ""),
+        "access_gate_enabled": cfg.get("access_gate_enabled", "1") == "1",
+        "trial_days": trial_days,
+        "trial_max_per_ip_day": max_ip,
+        "redeem_guide_tip": cfg.get("redeem_guide_tip", DEFAULT_SITE_CONFIG["redeem_guide_tip"]),
+        "redeem_buy_url": cfg.get("redeem_buy_url", ""),
+        "redeem_qr_image": cfg.get("redeem_qr_image", ""),
     }
 
 
@@ -657,16 +790,34 @@ def configure_site(body):
     for key in DEFAULT_SITE_CONFIG:
         if key not in body: continue
         value = body[key]
-        if key == 'ad_enabled':
-            if not isinstance(value, bool): raise ValueError('广告开关必须为布尔值')
+        if key in ('ad_enabled', 'access_gate_enabled'):
+            if not isinstance(value, bool): raise ValueError('开关配置必须为布尔值')
             value = '1' if value else '0'
-        else: value = str(value or '').strip()
-        if len(value) > (2048 if key in ('ad_url','ad_image') else 500): raise ValueError('配置过长')
-        if key in ('ad_url','ad_image') and value:
+        elif key == 'trial_days':
+            try:
+                td = int(value)
+            except (TypeError, ValueError):
+                raise ValueError('体验天数必须为整数')
+            if td < 0 or td > 30:
+                raise ValueError('体验天数需在 0 ~ 30 天之间')
+            value = str(td)
+        elif key == 'trial_max_per_ip_day':
+            try:
+                mp = int(value)
+            except (TypeError, ValueError):
+                raise ValueError('同 IP 每日体验上限必须为整数')
+            if mp < 1 or mp > 50:
+                raise ValueError('同 IP 每日体验上限需在 1 ~ 50 之间')
+            value = str(mp)
+        else:
+            value = str(value or '').strip()
+        max_len = 2048 if key in ('ad_url', 'ad_image', 'redeem_buy_url', 'redeem_qr_image') else (600 if key == 'redeem_guide_tip' else 500)
+        if len(value) > max_len: raise ValueError('配置过长')
+        if key in ('ad_url', 'ad_image', 'redeem_buy_url', 'redeem_qr_image') and value:
             try: p = urllib.parse.urlsplit(value)
-            except ValueError: raise ValueError('广告链接无效')
+            except ValueError: raise ValueError('外链地址无效')
             if p.scheme != 'https' or not p.hostname or p.username or p.password or any(ord(ch)<=32 for ch in value) or '\\' in value:
-                raise ValueError('广告链接和图片必须为 HTTPS 地址')
+                raise ValueError('外链与二维码图片地址必须为 HTTPS 地址')
         if key == 'ad_provider' and value not in ('manual','reserved'): raise ValueError('暂不支持该广告供应商')
         if key == 'ad_slots':
             slots = list(dict.fromkeys(value.split(',')))
@@ -856,13 +1007,17 @@ def get_admin_dashboard(limit=200):
     now = int(time.time())
     presence = list_online_presence(window_sec=180, limit=50)
     with _DB_LOCK, _conn() as c:
+        gate_enabled, _, _ = _get_gate_settings(c)
         total_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         pro_users = c.execute("SELECT COUNT(*) FROM users WHERE vip_expire_at > ?", (now,)).fetchone()[0]
+        exempt_users = c.execute("SELECT COUNT(*) FROM users WHERE vip_expire_at <= ? AND access_exempt = 1", (now,)).fetchone()[0]
+        trial_users = c.execute("SELECT COUNT(*) FROM users WHERE vip_expire_at <= ? AND access_exempt = 0 AND trial_expire_at > ?", (now, now)).fetchone()[0]
+        expired_users = c.execute("SELECT COUNT(*) FROM users WHERE vip_expire_at <= ? AND access_exempt = 0 AND trial_expire_at <= ?", (now, now)).fetchone()[0]
         unused_codes = c.execute("SELECT COUNT(*) FROM redeem_codes WHERE used_by IS NULL").fetchone()[0]
         used_codes = c.execute("SELECT COUNT(*) FROM redeem_codes WHERE used_by IS NOT NULL").fetchone()[0]
         synced_users = c.execute("SELECT COUNT(*) FROM user_sync").fetchone()[0]
         recent_rows = c.execute(
-            "SELECT id, username, vip_expire_at, created_at FROM users ORDER BY created_at DESC LIMIT 6"
+            "SELECT id, username, vip_expire_at, trial_expire_at, trial_source, access_exempt, created_at FROM users ORDER BY created_at DESC LIMIT 6"
         ).fetchall()
         rows = c.execute(
             """
@@ -884,7 +1039,7 @@ def get_admin_dashboard(limit=200):
                 pass
     recent_users = []
     for ur in recent_rows:
-        fmt_u = _format_user(ur)
+        fmt_u = _format_user(ur, gate_enabled=gate_enabled)
         fmt_u["created_at"] = ur["created_at"]
         recent_users.append(fmt_u)
     codes = [
@@ -903,6 +1058,9 @@ def get_admin_dashboard(limit=200):
         "stats": {
             "total_users": total_users,
             "pro_users": pro_users,
+            "trial_users": trial_users,
+            "expired_users": expired_users,
+            "exempt_users": exempt_users,
             "unused_codes": unused_codes,
             "used_codes": used_codes,
             "synced_users": synced_users,
@@ -934,13 +1092,22 @@ def list_admin_users(query="", status="all", limit=200, window_sec=180):
     elif status == "free":
         where.append("u.vip_expire_at <= ?")
         params.append(now)
+    elif status == "trial":
+        where.append("u.vip_expire_at <= ? AND u.access_exempt = 0 AND u.trial_expire_at > ?")
+        params.extend([now, now])
+    elif status == "expired":
+        where.append("u.vip_expire_at <= ? AND u.access_exempt = 0 AND u.trial_expire_at <= ?")
+        params.extend([now, now])
+    elif status == "exempt":
+        where.append("u.vip_expire_at <= ? AND u.access_exempt = 1")
+        params.append(now)
     elif status == "online":
         where.append("EXISTS (SELECT 1 FROM user_presence op WHERE op.user_id=u.id AND op.logged_in=1 AND op.last_seen_at>=?)")
         params.append(cutoff)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     params.append(max(1, min(500, int(limit))))
     sql = f"""
-        SELECT u.id, u.username, u.vip_expire_at, u.created_at, us.updated_at AS last_sync_at,
+        SELECT u.id, u.username, u.vip_expire_at, u.trial_expire_at, u.trial_source, u.access_exempt, u.created_at, us.updated_at AS last_sync_at,
                lp.last_seen_at, lp.ip AS last_ip, lp.device_info AS last_device,
                lp.client_type, lp.logged_in
         FROM users u
@@ -956,10 +1123,11 @@ def list_admin_users(query="", status="all", limit=200, window_sec=180):
         LIMIT ?
     """
     with _DB_LOCK, _conn() as c:
+        gate_enabled, _, _ = _get_gate_settings(c)
         rows = c.execute(sql, params).fetchall()
     result = []
     for r in rows:
-        item = _format_user(r)
+        item = _format_user(r, gate_enabled=gate_enabled)
         last_seen = int(r["last_seen_at"] or 0)
         logged_in = bool(r["logged_in"]) if r["logged_in"] is not None else False
         item["created_at"] = r["created_at"]
@@ -975,7 +1143,7 @@ def list_admin_users(query="", status="all", limit=200, window_sec=180):
 
 
 def admin_set_user_vip(user_id, action, days=0):
-    """管理员手工赠送/续期或取消指定用户的 Pro 会员资格。"""
+    """管理员手工管理用户权益：叠加 Pro 天数、补发体验、切换豁免或清零锁定。"""
     uid = int(user_id)
     now = int(time.time())
     with _DB_LOCK, _conn() as c:
@@ -986,13 +1154,25 @@ def admin_set_user_vip(user_id, action, days=0):
             d = int(days)
             if d < 1 or d > 36500:
                 raise ValueError("天数范围需在 1 ~ 36500 之间")
-            base_ts = max(now, int(row["vip_expire_at"] or 0))
+            trial_exp = int(row["trial_expire_at"] or 0) if "trial_expire_at" in row.keys() else 0
+            base_ts = max(now, int(row["vip_expire_at"] or 0), trial_exp)
             new_exp = base_ts + d * 86400
+            c.execute("UPDATE users SET vip_expire_at=? WHERE id=?", (new_exp, uid))
+        elif action == "trial":
+            d = int(days)
+            if d < 1 or d > 365:
+                raise ValueError("体验天数需在 1 ~ 365 之间")
+            base_ts = max(now, int(row["trial_expire_at"] or 0))
+            new_trial = base_ts + d * 86400
+            c.execute("UPDATE users SET trial_expire_at=?, trial_source='admin' WHERE id=?", (new_trial, uid))
+        elif action == "exempt":
+            c.execute("UPDATE users SET access_exempt=1, trial_source='admin_exempt' WHERE id=?", (uid,))
+        elif action == "unexempt":
+            c.execute("UPDATE users SET access_exempt=0 WHERE id=?", (uid,))
         elif action == "clear":
-            new_exp = 0
+            c.execute("UPDATE users SET vip_expire_at=0, trial_expire_at=0, access_exempt=0 WHERE id=?", (uid,))
         else:
             raise ValueError("不支持的操作类型")
-        c.execute("UPDATE users SET vip_expire_at=? WHERE id=?", (new_exp, uid))
         updated = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     return _format_user(updated)
 

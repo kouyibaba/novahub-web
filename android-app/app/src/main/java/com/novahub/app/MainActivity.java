@@ -426,6 +426,24 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public String getDeviceFingerprint() {
+            if (!trustedMainPage) return "";
+            try {
+                String aid = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                if (aid == null || aid.trim().isEmpty()) return "";
+                java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+                byte[] digest = md.digest((aid.trim() + ":novahub-v1").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                StringBuilder sb = new StringBuilder("and_");
+                for (int i = 0; i < 12 && i < digest.length; i++) {
+                    sb.append(String.format(java.util.Locale.US, "%02x", digest[i] & 0xff));
+                }
+                return sb.toString();
+            } catch (Throwable ignored) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
         public void checkUpdate() {
             runOnUiThread(() -> AppUpdater.check(MainActivity.this, true));
         }

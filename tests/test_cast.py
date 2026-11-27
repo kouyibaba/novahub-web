@@ -142,7 +142,8 @@ class CastRoomTests(unittest.TestCase):
             httpd.server_close()
 
     def test_kuwo_lrc_falls_back_to_gdstudio_when_upstream_fails(self):
-        h = DummyCastHandler()
+        _, token = db.register_user("castuser_lrc", "secret123")
+        h = DummyCastHandler(headers={"Authorization": f"Bearer {token}"})
         with mock.patch.object(server, "_http_get_bytes", side_effect=OSError("502 Bad Gateway")), \
              mock.patch.object(h, "_fetch_gdstudio_lrc", return_value="[00:01.00]天黑黑 欲落雨") as mock_fb:
             h.handle_kuwo({"act": ["lrc"], "id": ["12345"], "name": ["天黑黑"], "artist": ["孙燕姿"]})

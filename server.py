@@ -482,6 +482,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _media_user(self, qs):
         return self._current_user() or db.verify_token((qs.get("ticket") or [""])[0], role="media")
 
+    def _require_active_access(self, allow_media_ticket=False, qs=None):
+        """校验登录态与体验/卡密有效状态；未登录返回 401，到期未解锁返回 403。"""
+        user = self._media_user(qs or {}) if allow_media_ticket else self._current_user()
+        if not user:
+            self.send_json({"error": "请先登录账号", "code": "AUTH_REQUIRED"}, 401)
+            return None
+        if not user.get("has_access", True):
+            self.send_json(
+                {
+                    "error": "体验期已结束，请兑换卡密解锁全部功能",
+                    "code": "ACCESS_EXPIRED",
+                    "access_status": user.get("access_status") or "expired",
+                },
+                403,
+            )
+            return None
+        return user
+
     def _is_admin(self):
         auth = self.headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
@@ -622,7 +640,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_json({"error": "操作过于频繁，请 1 分钟后再试"}, 429)
         try:
             body = self._read_json_body(16384)
-            user, token = db.register_user(body.get("username"), body.get("password"))
+            did = str(body.get("device_id") or self.headers.get("X-Device-Id") or "").strip()
+            user, token = db.register_user(
+                body.get("username"),
+                body.get("password"),
+                device_id=did,
+                ip=self._client_ip(),
+            )
+            self._touch_presence(user["id"], body, logged_in=True)
             self.send_json({"user": user, "token": token})
         except ValueError as e:
             self.send_json({"error": str(e)}, 400)
@@ -719,10 +744,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         is_admin = path.startswith('/api/admin/')
         if is_admin and not self._is_admin():
             return self.send_json({'error': '未授权'}, 401)
-        user = self._current_user()
-        owner = user['id'] if user else 0
         if not is_admin and not _check_rate_limit(self._client_ip(), 'catalog', 50, 60):
             return self.send_json({'error': '请求过于频繁'}, 429)
+        user = None
+        if not is_admin:
+            user = self._require_active_access()
+            if not user:
+                return
+        owner = user['id'] if user else 0
         try:
             cat = catalog.current()
             if self.command == 'GET':
@@ -883,11 +912,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     # ---------- 音乐曲库网关 ----------
     def handle_kuwo(self, qs):
+        user = self._require_active_access()
+        if not user:
+            return
         act = qs.get("act", [""])[0]
         if act == "url":
-            user = self._current_user()
-            if not user:
-                return self.send_json({"error": "请先登录账号"}, 401)
             bitrate = (qs.get("br") or ["128"])[0]
             if bitrate not in ("128", "192", "320", "999"):
                 return self.send_json({"error": "无效音质"}, 400)
@@ -964,10 +993,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 name = (qs.get("name") or [""])[0].strip()
                 artist = (qs.get("artist") or [""])[0].strip()
                 lrc_text = ""
-                if rid:
+                if rid and rid != "0":
                     try:
                         u = f"http://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId={rid}"
-                        _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
+                        _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
                         d = json.loads(raw_b.decode("utf-8", "ignore").strip())
                         lrclist = ((d.get("data") or {}).get("lrclist")) or []
                         lines = []
@@ -982,7 +1011,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     except Exception:
                         lrc_text = ""
 
-                # 酷我官方歌词接口异常或为空时，按歌名+歌手自动回退网易云歌词源
+                # 酷我官方歌词接口异常或为空时，按歌名+歌手自动回退网易云/gdstudio歌词源
                 if not lrc_text and name:
                     lrc_text = self._fetch_gdstudio_lrc(name, artist)
 
@@ -993,32 +1022,74 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_json({"error": str(e)}, 502)
 
-    def _fetch_gdstudio_lrc(self, name, artist=""):
-        """按歌名与歌手从 gdstudio（网易云源）检索标准 LRC 歌词。"""
+    @staticmethod
+    def _pick_best_track(items, name, artist, artist_getter):
+        norm = lambda s: re.sub(r"\s+", "", str(s or "").lower())
+        want_name = norm(name)
+        want_artist = norm(artist)
+        best = items[0]
+        for it in items:
+            it_name = norm(it.get("name"))
+            it_art = norm(artist_getter(it))
+            if want_name and it_name == want_name and (not want_artist or want_artist in it_art or it_art in want_artist):
+                return it
+        return best
+
+    def _fetch_netease_lrc(self, name, artist=""):
+        """直连网易云音乐公开接口检索标准 LRC 歌词（低延迟兜底）。"""
         q_str = f"{name} {artist}".strip() if artist else name.strip()
         if not q_str:
             return ""
+        hdr = {"User-Agent": UA_DESKTOP, "Referer": "https://music.163.com/"}
+        try:
+            su = f"https://music.163.com/api/search/get/web?s={urllib.parse.quote(q_str)}&type=1&limit=5"
+            _, s_raw, _ = _http_get_bytes(su, headers=hdr, timeout=4)
+            sd = json.loads(s_raw.decode("utf-8", "ignore"))
+            songs = ((sd.get("result") or {}).get("songs")) or []
+            if not songs:
+                return ""
+            best = self._pick_best_track(
+                songs,
+                name,
+                artist,
+                lambda it: "/".join(a.get("name", "") for a in (it.get("artists") or []) if isinstance(a, dict)),
+            )
+            nid = str(best.get("id") or "").strip()
+            if not nid:
+                return ""
+            lu = f"https://music.163.com/api/song/lyric?id={urllib.parse.quote(nid)}&lv=1&kv=1&tv=-1"
+            _, l_raw, _ = _http_get_bytes(lu, headers=hdr, timeout=4)
+            ld = json.loads(l_raw.decode("utf-8", "ignore"))
+            lrc = ((ld.get("lrc") or {}).get("lyric")) or ((ld.get("tlyric") or {}).get("lyric")) or ""
+            return str(lrc).strip()
+        except Exception:
+            return ""
+
+    def _fetch_gdstudio_lrc(self, name, artist=""):
+        """按歌名与歌手检索标准 LRC 歌词（优先低延迟网易云直连，再回退 gdstudio）。"""
+        q_str = f"{name} {artist}".strip() if artist else name.strip()
+        if not q_str:
+            return ""
+        direct = self._fetch_netease_lrc(name, artist)
+        if direct:
+            return direct
         try:
             su = f"https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name={urllib.parse.quote(q_str)}&count=5&pages=1"
-            _, s_raw, _ = _http_get_bytes(su, headers={"User-Agent": UA_DESKTOP}, timeout=5)
+            _, s_raw, _ = _http_get_bytes(su, headers={"User-Agent": UA_DESKTOP}, timeout=7)
             items = json.loads(s_raw.decode("utf-8", "ignore"))
             if not isinstance(items, list) or not items:
                 return ""
-            norm = lambda s: re.sub(r"\s+", "", str(s or "").lower())
-            want_name = norm(name)
-            want_artist = norm(artist)
-            best = items[0]
-            for it in items:
-                it_name = norm(it.get("name"))
-                it_art = norm("/".join(it.get("artist")) if isinstance(it.get("artist"), list) else it.get("artist"))
-                if want_name and it_name == want_name and (not want_artist or want_artist in it_art or it_art in want_artist):
-                    best = it
-                    break
+            best = self._pick_best_track(
+                items,
+                name,
+                artist,
+                lambda it: "/".join(it.get("artist")) if isinstance(it.get("artist"), list) else it.get("artist"),
+            )
             nid = str(best.get("id") or "").strip()
             if not nid:
                 return ""
             lu = f"https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id={urllib.parse.quote(nid)}"
-            _, l_raw, _ = _http_get_bytes(lu, headers={"User-Agent": UA_DESKTOP}, timeout=5)
+            _, l_raw, _ = _http_get_bytes(lu, headers={"User-Agent": UA_DESKTOP}, timeout=7)
             ld = json.loads(l_raw.decode("utf-8", "ignore"))
             if isinstance(ld, dict):
                 return str(ld.get("lyric") or ld.get("tlyric") or "").strip()
@@ -1037,8 +1108,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return h
 
     def handle_media_download(self, qs):
-        if not self._media_user(qs):
-            return self.send_json({"error": "请先登录账号"}, 401)
+        if not self._require_active_access(allow_media_ticket=True, qs=qs):
+            return
         target = (qs.get("url") or [""])[0].strip()
         if not _is_safe_proxy_target(target):
             return self.send_json({"error": "Invalid download url"}, 400)
@@ -1112,8 +1183,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 pass
 
     def handle_live_m3u8(self, qs):
-        if not self._media_user(qs):
-            return self.send_json({"error": "请先登录账号"}, 401)
+        if not self._require_active_access(allow_media_ticket=True, qs=qs):
+            return
         target = (qs.get("url") or [""])[0].strip()
         if not _is_safe_proxy_target(target):
             return self.send_json({"error": "Invalid live url"}, 400)
@@ -1168,8 +1239,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({"error": str(e)}, 502)
 
     def handle_live_seg(self, qs):
-        if not self._media_user(qs):
-            return self.send_json({"error": "请先登录账号"}, 401)
+        if not self._require_active_access(allow_media_ticket=True, qs=qs):
+            return
         target = (qs.get("url") or [""])[0].strip()
         if not _is_safe_proxy_target(target):
             return self.send_json({"error": "Invalid seg url"}, 400)
@@ -1187,6 +1258,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     # ---------- 小说实时在线直读网关 ----------
     def handle_novel_search(self, qs):
+        if not self._require_active_access():
+            return
         raw_q = (qs.get("q") or [""])[0].strip()
         if not raw_q:
             return self.send_json({"items": []})
@@ -1247,6 +1320,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({"items": [], "error": f"搜索请求失败: {e}"}, 502)
 
     def handle_novel_book(self, qs):
+        if not self._require_active_access():
+            return
         book_id = (qs.get("book_id") or [""])[0].strip()
         if not re.fullmatch(r"\d{15,22}", book_id):
             return self.send_json({"error": "无效的 book_id"}, 400)
@@ -1261,6 +1336,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({"error": f"获取章节目录失败: {e}"}, 502)
 
     def handle_novel_chapter(self, qs):
+        if not self._require_active_access():
+            return
         book_id = (qs.get("book_id") or [""])[0].strip()
         try:
             index = int((qs.get("index") or ["1"])[0])
@@ -1364,9 +1441,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if p in ('/api/admin/sources', '/api/admin/subscriptions', '/api/vod/home', '/api/vod/search', '/api/vod/detail'):
             return self.handle_catalog(p, qs)
         if p == "/api/media/ticket":
-            user = self._current_user()
+            user = self._require_active_access()
             if not user:
-                return self.send_json({"error": "请先登录账号"}, 401)
+                return
             try:
                 ticket = db.sign_media_ticket(self.headers.get("Authorization", "")[7:].strip())
             except ValueError as exc:
@@ -1466,9 +1543,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
     def handle_notifications_get(self, qs):
-        user = self._current_user()
+        user = self._require_active_access()
         if not user:
-            return self.send_json({"error": "请先登录账号"}, 401)
+            return
         unread_only = (qs.get("unread") or ["0"])[0] == "1"
         try:
             limit = int((qs.get("limit") or ["50"])[0])
@@ -1514,9 +1591,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({"error": str(e)}, 500)
 
     def handle_notifications_check(self):
-        user = self._current_user()
+        user = self._require_active_access()
         if not user:
-            return self.send_json({"error": "请先登录账号"}, 401)
+            return
         if not _check_rate_limit(f"{self._client_ip()}:{user['id']}", "notif_check", 2, 180):
             return self.send_json({"error": "检查过于频繁，请稍后再试"}, 429)
         targets = db.list_due_watch_targets(limit=6, min_interval=0, user_id=user["id"])
@@ -1570,9 +1647,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def handle_cast_command(self):
         """手机/网页已登录用户向指定 4 位投屏码下发播放或遥控指令。"""
-        user = self._current_user()
+        user = self._require_active_access()
         if not user:
-            return self.send_json({"error": "请先登录账号"}, 401)
+            return
         if not _check_rate_limit(f"{self._client_ip()}:{user['id']}", "cast_cmd", 120, 60):
             return self.send_json({"error": "投屏操作过于频繁，请稍后再试"}, 429)
         try:

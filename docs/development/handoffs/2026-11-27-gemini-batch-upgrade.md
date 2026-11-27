@@ -79,3 +79,18 @@
   - `server.py` `/kw?act=lrc` 支持传入 `name`、`artist`，在酷我官方歌词接口异常或为空时自动回退检索 `music-api.gdstudio.xyz`（网易云源）返回标准 LRC；
   - `app.js` 请求 `/kw?act=lrc` 携带歌名和歌手并解除 `song.source !== "kuwo"` 限制，统一接入多源兜底。
 - **测试与验证**：新增 `tests/test_cast.py` 并扩展 `tests/player_and_cache.test.cjs` 与 `tests/test_frontend.cjs`，全部 Python 与 Node 测试通过。
+
+## 6. v2.5.0 增量交付：新用户 3 天体验 + 强门禁卡密解锁体系（2026-11-27 续）
+- **数据层与防刷风控（`db.py`）**：
+  - `users` 表无损增量加列 `trial_expire_at`、`trial_source`、`access_exempt`，新建防刷记录表 `trial_grants`；
+  - 首次迁移一次性将存量老用户标记为 `access_exempt = 1`（永久豁免），新用户注册自动获 3 天全功能体验；
+  - 同设备指纹限领 1 次、同 IP 24 小时默认上限 2 次；体验期内兑换卡密在 `max(now, trial_expire_at, vip_expire_at)` 上叠加天数；
+  - `site_config` 支持 `access_gate_enabled`、`trial_days`、`trial_max_per_ip_day`、`redeem_guide_tip`、`redeem_buy_url`、`redeem_qr_image` 后台热配置。
+- **服务端全链路强门禁（`server.py`）**：
+  - 新增统一守卫 `_require_active_access()`，覆盖影视目录/搜索/详情、酷我曲库搜歌/播放/歌词、小说搜索/目录/正文、直播流转发、媒体下载、投屏推流与更新提醒接口；未登录返回 `401 AUTH_REQUIRED`，到期未解锁返回 `403 ACCESS_EXPIRED`。
+- **Android 原生硬件指纹（`android-app/`）**：
+  - `MainActivity.java` 新增 `NovaNative.getDeviceFingerprint()`（基于 `ANDROID_ID` SHA-256 哈希），重装/清缓存仍可防重领体验；版本号升至 `v2.5.0 (13)`。
+- **前端强门禁锁屏与体验倒计时引导（`index.html`、`style.css`、`app.js` 及 `docs/`）**：
+  - 新增全屏门禁层 `#accessGateLayer`，未登录直接展示登录/注册双标签页，到期直接锁屏并提供卡密输入激活、购卡外链与客服二维码展示；体验期展示剩余时间横幅与卡密解锁入口。
+- **管理后台升级（`admin.html` 及 `docs/admin.html`）**：
+  - 总览新增体验/到期人数统计；用户筛选新增 `Pro 已解锁` / `体验中` / `已到期` / `永久豁免`；支持手工补发体验、切换豁免、清零锁定；发卡新增 `3天体验卡` 与 `7天周卡`；新增门禁与体验参数热配置卡片。

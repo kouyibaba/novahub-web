@@ -67,6 +67,9 @@ test('player UI includes +30s, +1m, next episode, fullscreen episode drawer, ski
   assert.ok(appSource.includes('function cancelActiveSearch('));
   assert.ok(appSource.includes('data-cancel-search="1"'));
   assert.ok(appSource.includes('&name=${encodeURIComponent(songName)}&artist=${encodeURIComponent(songArtist)}'));
+  assert.ok(htmlSource.includes('id="accessGateLayer"'));
+  assert.ok(appSource.includes('function syncAccessGate('));
+  assert.ok(appSource.includes('getDeviceFingerprint'));
 });
 
 test('tv.html big-screen cast receiver parses cleanly', () => {
@@ -88,4 +91,6 @@ test('admin.html inline script parses cleanly and exposes online presence UI', (
   }
   assert.ok(adminSource.includes('id="onlineTbody"'));
   assert.ok(adminSource.includes('/api/admin/online'));
+  assert.ok(adminSource.includes('id="accessGateEnabled"'));
+  assert.ok(adminSource.includes('id="btnSaveGate"'));
 });

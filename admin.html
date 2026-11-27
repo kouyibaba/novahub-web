@@ -529,8 +529,10 @@
           <div class="chips" id="userStatusChips">
             <button type="button" class="chip active" data-ustatus="all">全部</button>
             <button type="button" class="chip" data-ustatus="online">当前在线</button>
-            <button type="button" class="chip" data-ustatus="pro">Pro 会员</button>
-            <button type="button" class="chip" data-ustatus="free">普通用户</button>
+            <button type="button" class="chip" data-ustatus="pro">Pro 已解锁</button>
+            <button type="button" class="chip" data-ustatus="trial">体验中</button>
+            <button type="button" class="chip" data-ustatus="expired">已到期</button>
+            <button type="button" class="chip" data-ustatus="exempt">永久豁免</button>
           </div>
         </div>
         <div tabindex="0" role="region" aria-labelledby="usersTblCap" class="table-wrap">
@@ -563,6 +565,8 @@
       <div class="card">
         <div class="card-hd"><h2>批量生成 Pro 卡密</h2></div>
         <div class="chips" id="presetDays" style="margin-bottom:10px">
+          <button type="button" class="chip" data-d="3">3天体验卡</button>
+          <button type="button" class="chip" data-d="7">周卡 (7天)</button>
           <button type="button" class="chip active" data-d="30">月卡 (30天)</button>
           <button type="button" class="chip" data-d="90">季卡 (90天)</button>
           <button type="button" class="chip" data-d="365">年卡 (365天)</button>
@@ -677,6 +681,25 @@
           </div>
         </div>
       </div>
+
+      <div class="card">
+        <div class="card-hd"><h2>新用户 3 天体验与强门禁解锁配置</h2></div>
+        <label class="switch-row">
+          <input id="accessGateEnabled" type="checkbox">
+          <span>开启到期强门禁（未登录或体验期到期且未兑换卡密的用户，将全屏锁定并禁止浏览/播放/下载）</span>
+        </label>
+        <div class="row">
+          <div><label class="fld" for="trialDays">新用户注册默认体验天数（0~30，0 表示不赠送直接锁卡密）</label><input id="trialDays" type="number" min="0" max="30" value="3"></div>
+          <div><label class="fld" for="trialMaxPerIp">同 IP 24 小时内最多允许自动领体验账号数（1~50）</label><input id="trialMaxPerIp" type="number" min="1" max="50" value="2"></div>
+        </div>
+        <label class="fld" for="redeemGuideTip">门禁页获取卡密引导文案</label>
+        <textarea id="redeemGuideTip" rows="3" placeholder="例如：请联系客服微信 xxx 购买卡密，或点击下方按钮前往自动发卡站领取"></textarea>
+        <div class="row">
+          <div><label class="fld" for="redeemBuyUrl">HTTPS 购卡 / 活动领码链接（可留空）</label><input id="redeemBuyUrl" placeholder="https://..."></div>
+          <div><label class="fld" for="redeemQrImage">HTTPS 客服 / 领码二维码图片（可留空）</label><input id="redeemQrImage" placeholder="https://.../qr.png"></div>
+        </div>
+        <button id="btnSaveGate" type="button" class="btn primary" style="width:100%;margin-top:14px">保存门禁与体验配置</button>
+      </div>
     </section>
 
     <!-- 模块 5：安全与设置 -->
@@ -723,13 +746,15 @@
   <label class="fld" for="vipAddDays">赠送或续期天数</label>
   <input id="vipAddDays" type="number" min="1" max="36500" value="30">
   <div class="dlg-foot">
-    <button type="button" id="btnVipAdd" class="btn primary">确认叠加天数</button>
+    <button type="button" id="btnVipAdd" class="btn primary">叠加 Pro 天数</button>
+    <button type="button" id="btnVipTrial" class="btn ghost">补发体验天数</button>
   </div>
   <div class="dlg-divider">
-    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">如需提前收回该用户的 Pro 权限，可执行清零操作：</div>
-    <form method="dialog" style="display:flex;justify-content:space-between;gap:8px">
-      <button type="submit" value="clear" class="btn danger sm">取消 Pro 资格</button>
-      <button type="submit" value="cancel" class="btn ghost sm" autofocus>取消</button>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">老用户豁免或立即收回全部权限（锁定）：</div>
+    <form method="dialog" style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+      <button type="submit" value="toggle_exempt" id="btnToggleExempt" class="btn ghost sm">切换永久豁免</button>
+      <button type="submit" value="clear" class="btn danger sm">清零权限并锁定</button>
+      <button type="submit" value="cancel" class="btn ghost sm" autofocus>关闭</button>
     </form>
   </div>
 </dialog>
@@ -883,16 +908,26 @@ function renderOnlineList(online) {
   </tr>`).join("");
 }
 
+function renderUserStatusTag(u) {
+  const st = u.access_status || (u.is_pro ? "active" : (u.access_exempt ? "exempt" : "expired"));
+  if (st === "active") return `<span class="tag gold">Pro 剩 ${u.remain_days} 天</span>`;
+  if (st === "exempt") return `<span class="tag gold">永久豁免</span>`;
+  if (st === "trial") return `<span class="tag ok">体验剩 ${u.trial_remain_days || 1} 天</span>`;
+  return `<span class="tag muted">已到期</span>`;
+}
+
 /* ============ 总览与健康检查 ============ */
 function renderOverview(d) {
   const st = d.stats || {};
   const total = Number(st.total_users) || 0;
   const pro = Number(st.pro_users) || 0;
+  const trial = Number(st.trial_users) || 0;
+  const expired = Number(st.expired_users) || 0;
   const rate = total > 0 ? Math.round((pro / total) * 100) : 0;
 
   $("#sUsers").textContent = total;
   $("#sPro").textContent = pro;
-  $("#sProRate").textContent = `${rate}% 转化`;
+  $("#sProRate").textContent = `${rate}% · 体验${trial}/到期${expired}`;
   $("#sSynced").textContent = `云同步 ${st.synced_users || 0}`;
   $("#sUnused").textContent = st.unused_codes || 0;
   if ($("#sUsedPair")) $("#sUsedPair").textContent = `${st.used_codes || 0} 已核销`;
@@ -909,7 +944,7 @@ function renderOverview(d) {
   $("#recentUsersBox").innerHTML = rUsers.length
     ? rUsers.map((u) => `<div class="mini-row">
         <div><div><strong>${esc(u.username)}</strong></div><div class="mini-sub">注册于 ${fmtTime(u.created_at)}</div></div>
-        <span class="tag ${u.is_pro ? "gold" : "muted"}">${u.is_pro ? `Pro 剩 ${u.remain_days} 天` : "普通用户"}</span>
+        ${renderUserStatusTag(u)}
       </div>`).join("")
     : `<div style="color:var(--muted);padding:16px 0;text-align:center">暂无注册用户</div>`;
 
@@ -964,7 +999,7 @@ function renderUsers() {
       <div class="mini-sub">${esc(devLine || "暂无设备记录")}</div>
     </td>
     <td data-label="会员状态">
-      <span class="tag ${u.is_pro ? "gold" : "muted"}">${u.is_pro ? `Pro 剩 ${u.remain_days} 天` : "普通用户"}</span>
+      ${renderUserStatusTag(u)}
     </td>
     <td data-label="最后活跃 / 同步" class="num">
       <div>活跃：${u.last_seen_at ? fmtTime(u.last_seen_at) : "-"}</div>
@@ -990,10 +1025,16 @@ function renderUsers() {
 function openVipDialog(uid) {
   editingUser = allUsers.find((u) => u.id === uid);
   if (!editingUser) return;
-  $("#dlgVipTitle").textContent = `管理 Pro · ${editingUser.username}`;
+  $("#dlgVipTitle").textContent = `管理权限 · ${editingUser.username}`;
   $("#dlgVipSub").textContent = editingUser.is_pro
-    ? `当前为有效 Pro（剩余 ${editingUser.remain_days} 天），追加天数将从当前到期日向后累加。`
-    : "当前为普通用户，追加天数将从今天起立即生效。";
+    ? `当前为正式 Pro（剩余 ${editingUser.remain_days} 天），追加天数将向后累加。`
+    : (editingUser.access_exempt
+      ? "当前为老用户永久豁免状态。"
+      : (editingUser.access_status === "trial"
+        ? `当前处于体验期（剩余 ${editingUser.trial_remain_days} 天）。`
+        : "当前体验已到期（锁定中），可叠加 Pro 或补发体验。"));
+  const exBtn = $("#btnToggleExempt");
+  if (exBtn) exBtn.textContent = editingUser.access_exempt ? "取消永久豁免" : "设为永久豁免";
   $("#dlgVip").showModal();
 }
 
@@ -1016,13 +1057,31 @@ $("#btnVipAdd").onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 
+$("#btnVipTrial").onclick = async () => {
+  if (!editingUser) return;
+  const days = Math.max(1, Math.min(365, Number($("#vipAddDays").value) || 3));
+  try {
+    await api("/api/admin/user/vip", "POST", { user_id: editingUser.id, action: "trial", days });
+    $("#dlgVip").close("");
+    toast(`已为 ${editingUser.username} 补发 ${days} 天体验期`);
+    await Promise.all([loadUsers(), loadDash(false)]);
+  } catch (e) { toast(e.message, true); }
+};
+
 $("#dlgVip").addEventListener("close", async () => {
   const val = $("#dlgVip").returnValue;
   $("#dlgVip").returnValue = "";
-  if (val === "clear" && editingUser) {
+  if (val === "toggle_exempt" && editingUser) {
+    try {
+      const act = editingUser.access_exempt ? "unexempt" : "exempt";
+      await api("/api/admin/user/vip", "POST", { user_id: editingUser.id, action: act });
+      toast(act === "exempt" ? `已将 ${editingUser.username} 设为永久豁免` : `已取消 ${editingUser.username} 的永久豁免`);
+      await Promise.all([loadUsers(), loadDash(false)]);
+    } catch (e) { toast(e.message, true); }
+  } else if (val === "clear" && editingUser) {
     try {
       await api("/api/admin/user/vip", "POST", { user_id: editingUser.id, action: "clear" });
-      toast(`已取消 ${editingUser.username} 的 Pro 资格`);
+      toast(`已清零 ${editingUser.username} 的全部权限并锁定`);
       await Promise.all([loadUsers(), loadDash(false)]);
     } catch (e) { toast(e.message, true); }
   }
@@ -1172,6 +1231,12 @@ async function loadDash(withUsers = true) {
     $("#adImage").value=d.config.ad_image||"";
     $("#adSlots").value=(d.config.ad_slots||["home","novel"]).join(",");
     $("#adProvider").value=d.config.ad_provider||"manual";
+    if ($("#accessGateEnabled")) $("#accessGateEnabled").checked = d.config.access_gate_enabled !== false;
+    if ($("#trialDays")) $("#trialDays").value = d.config.trial_days ?? 3;
+    if ($("#trialMaxPerIp")) $("#trialMaxPerIp").value = d.config.trial_max_per_ip_day ?? 2;
+    if ($("#redeemGuideTip")) $("#redeemGuideTip").value = d.config.redeem_guide_tip || "";
+    if ($("#redeemBuyUrl")) $("#redeemBuyUrl").value = d.config.redeem_buy_url || "";
+    if ($("#redeemQrImage")) $("#redeemQrImage").value = d.config.redeem_qr_image || "";
     updateAdPreview();
     refreshApkVersion();
     if (withUsers && !$("#panel-users").hidden) await loadUsers();
@@ -1303,6 +1368,21 @@ $("#btnSaveAd").onclick = async () => {
     toast("赞助广告位配置已生效");
   } catch (e) { toast(e.message, true); }
 };
+
+$("#btnSaveGate")?.addEventListener("click", async () => {
+  try {
+    await api("/api/admin/config", "POST", {
+      access_gate_enabled: !!$("#accessGateEnabled")?.checked,
+      trial_days: Number($("#trialDays")?.value ?? 3),
+      trial_max_per_ip_day: Number($("#trialMaxPerIp")?.value ?? 2),
+      redeem_guide_tip: $("#redeemGuideTip")?.value.trim() || "",
+      redeem_buy_url: $("#redeemBuyUrl")?.value.trim() || "",
+      redeem_qr_image: $("#redeemQrImage")?.value.trim() || "",
+    });
+    toast("体验期与强门禁配置已保存生效");
+    loadDash(false);
+  } catch (e) { toast(e.message, true); }
+});
 
 $("#btnChgPwd").onclick = async () => {
   const old_password = $("#oldPwd").value.trim();
