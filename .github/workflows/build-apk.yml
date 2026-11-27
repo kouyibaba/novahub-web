@@ -21,18 +21,18 @@ jobs:
 
       # Browser publication path: apply only the exact reviewed release patch.
       # Once applied, the patch is removed; ordinary builds skip this step.
-      - name: Apply reviewed v2.4.9 release bundle
+      - name: Apply reviewed v2.5.0 release bundle
         run: |
           set -euo pipefail
-          patch=reviewed-v2.4.9.patch
+          patch=reviewed-v2.5.0.patch
           if [ -f "$patch" ]; then
-            echo "8bb12c71dceca832caedf0806f7a6cb39a9ec82b3f9d5eae62ee0a5d4950460a  $patch" | sha256sum --check --strict
+            echo "32282b9baca2ec6a23a52fdd4bbc0bcc6aeb1ab7b30c2c631aec01e486070e7a  $patch" | sha256sum --check --strict
             git apply --check "$patch"
             git apply --index "$patch"
             git rm -- "$patch"
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "feat: release v2.4.9 multi-mode casting, search cancel & lyric fallback"
+            git commit -m "feat: release v2.5.0 3-day trial and strict redeem gate"
             git pull --rebase origin main
             git push origin HEAD:main
           fi
