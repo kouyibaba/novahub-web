@@ -1,10 +1,10 @@
 {
-  "versionCode": 8,
-  "versionName": "2.4.5",
+  "versionCode": 10,
+  "versionName": "2.4.7",
   "force": false,
-  "notes": "增强覆盖升级后的登录保持：加密保存有效会话、活跃续期，网络重连和过时请求不再清除新登录\n影视片库由后台统一维护，支持自动订阅更新、候选检测、质量排序与有限并发搜索\n观看历史支持逐条删除和清空，续播进度同步删除，旧设备同步不会恢复已删除记录\n播放器最多尝试两条同版本同集备用线路，并保留续播位置\n广告位默认关闭，管理后台预留图文广告配置与供应商接入位置\n明确 Pro 的站内免广告、高码率音乐及会员标识；普通用户继续保留云同步与系统听书\n音质及播放线路以内容源实际支持为准，不增加付费 AI API",
-  "sha256": "3023df602dbf7985ccd71175d54067f422583e51a1647372999659dc5dc49593",
-  "size": 42383,
+  "notes": "新增收藏更新提醒（站内消息中心红点 + Android 原生定时轮询通知），支持电视剧与书架小说单作品提醒开关及多条更新合并防重\n移除误导性的「片库正在更新」提示，首页最近更新支持缓存复用、返回不重刷\n优化首页与列表页多列骨架屏对齐，三端搜索增加居中加载动画提示\n播放器新增快进 30 秒 / 1 分钟、下一集、全屏选集抽屉、双击暂停/播放、长按左右快退/快进、用户自定义跳过片头片尾与手势防误触\n多设备播放进度同步支持 App 端缓存优先策略并回写服务端\n修复电视直播源防云端旧源覆盖、Hls 加载竞态与节点代理容灾，支持音视频下载\n管理后台新增实时在线用户监控与设备/IP/最后活跃状态；电脑端与端内更新支持 ADB 通道优先",
+  "sha256": "c0f68784fc30141bb201a83d4151b90689b201ea9736d059092e597684c4231e",
+  "size": 46131,
   "url": "https://kouyibaba.github.io/novahub-web/apk/novahub-latest.apk",
-  "fallback_url": "https://github.com/kouyibaba/novahub-web/releases/download/v2.4.5/NovaHub-v2.4.5.apk"
+  "fallback_url": "https://github.com/kouyibaba/novahub-web/releases/download/v2.4.7/NovaHub-v2.4.7.apk"
 }
