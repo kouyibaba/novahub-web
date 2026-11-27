@@ -112,3 +112,48 @@ test('admin.html inline script parses cleanly and exposes online presence UI', (
   assert.ok(adminSource.includes('id="accessGateEnabled"'));
   assert.ok(adminSource.includes('id="btnSaveGate"'));
 });
+
+test('v2.5.3 fixes novel covers, adds home horizontal swipe mode switching, and makes landscape skip modal sticky', () => {
+  const cssSource = fs.readFileSync('style.css', 'utf8');
+  const htmlIdx = fs.readFileSync('index.html', 'utf8');
+  assert.ok(appSource.includes('const WEB_VERSION = "v2.5.3"'));
+  assert.ok(htmlIdx.includes('?v=20261127-v253'));
+  assert.ok(appSource.includes('function syncOverlayHost('));
+  assert.ok(appSource.includes('function bindHomeSwipeNavigation('));
+  assert.ok(appSource.includes('referrerpolicy="no-referrer"'));
+  assert.ok(appSource.includes('window._novelCovErr'));
+  assert.ok(cssSource.includes('#modalBody'));
+  assert.ok(cssSource.includes('@media (max-height: 520px)'));
+  assert.ok(cssSource.includes('.skip-cfg-grid'));
+
+  const normStart = appSource.indexOf('function normalizeNovelCover(');
+  const normEnd = appSource.indexOf('window._novelCovErr =', normStart);
+  assert.ok(normStart >= 0 && normEnd > normStart);
+  const normCtx = {};
+  vm.createContext(normCtx);
+  vm.runInContext(appSource.slice(normStart, normEnd), normCtx);
+  assert.equal(
+    normCtx.normalizeNovelCover('https://p6-tt.bytecdn.cn/novel-pic/abc~tplv-shrink:640:0.image'),
+    'https://p6-novel.byteimg.com/novel-pic/abc~tplv-shrink:640:0.image'
+  );
+  assert.equal(
+    normCtx.normalizeNovelCover('http://p3-novel.byteimg.com/novel-pic/abc.image'),
+    'https://p3-novel.byteimg.com/novel-pic/abc.image'
+  );
+
+  const swStart = appSource.indexOf('const HOME_SWIPE_ORDER =');
+  const swEnd = appSource.indexOf('function bindHomeSwipeNavigation(', swStart);
+  assert.ok(swStart >= 0 && swEnd > swStart);
+  const swCtx = {};
+  vm.createContext(swCtx);
+  vm.runInContext(appSource.slice(swStart, swEnd), swCtx);
+  assert.equal(swCtx.resolveHomeSwipeMode('vod', -110, 10, 220), 'music');
+  assert.equal(swCtx.resolveHomeSwipeMode('music', -110, 12, 220), 'novel');
+  assert.equal(swCtx.resolveHomeSwipeMode('novel', -110, 8, 220), '');
+  assert.equal(swCtx.resolveHomeSwipeMode('novel', 110, 8, 220), 'music');
+  assert.equal(swCtx.resolveHomeSwipeMode('music', 110, 8, 220), 'vod');
+  assert.equal(swCtx.resolveHomeSwipeMode('vod', 110, 8, 220), '');
+  assert.equal(swCtx.resolveHomeSwipeMode('vod', -40, 2, 180), '');
+  assert.equal(swCtx.resolveHomeSwipeMode('vod', -100, 90, 200), '');
+  assert.equal(swCtx.resolveHomeSwipeMode('vod', -120, 5, 1200), '');
+});

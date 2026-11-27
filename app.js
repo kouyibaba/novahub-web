@@ -1,6 +1,8 @@
 /* ZY Player Web — 核心逻辑（Obsidian Cinema & Warm Amber 矢量设计版） */
 "use strict";
 
+const WEB_VERSION = "v2.5.3";
+
 /* ============ 本地存储（复用 APK 存储键，本地解锁 VIP/God） ============ */
 const K = {
   SOURCE: "source", VIDEO: "video", LIKE: "like", HISTORY: "history",
@@ -175,17 +177,30 @@ async function migrateLegacySources(extra) {
 /* ============ 工具 ============ */
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function syncOverlayHost(el) {
+  if (!el) return;
+  const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+  const targetParent = (fsEl && fsEl.appendChild) ? fsEl : document.body;
+  if (targetParent && el.parentElement !== targetParent) {
+    try { targetParent.appendChild(el); } catch {}
+  }
+}
 function toast(msg, ms = 1600) {
-  const t = $("#toast"); t.textContent = msg; t.classList.remove("hidden");
+  const t = $("#toast");
+  syncOverlayHost(t);
+  t.textContent = msg; t.classList.remove("hidden");
   clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.add("hidden"), ms);
 }
 function modal(title, bodyHtml) {
   return new Promise((resolve) => {
+    const m = $("#modal");
+    syncOverlayHost(m);
+    if (typeof _fsUiTimer !== "undefined" && _fsUiTimer) { clearTimeout(_fsUiTimer); _fsUiTimer = null; }
     $("#modalTitle").textContent = title;
     $("#modalBody").innerHTML = bodyHtml;
-    $("#modal").classList.remove("hidden");
-    const ok = () => { $("#modal").classList.add("hidden"); $("#modalOk").onclick = $("#modalCancel").onclick = null; resolve(true); };
-    const cancel = () => { $("#modal").classList.add("hidden"); $("#modalOk").onclick = $("#modalCancel").onclick = null; resolve(false); };
+    m.classList.remove("hidden");
+    const ok = () => { m.classList.add("hidden"); $("#modalOk").onclick = $("#modalCancel").onclick = null; resolve(true); };
+    const cancel = () => { m.classList.add("hidden"); $("#modalOk").onclick = $("#modalCancel").onclick = null; resolve(false); };
     $("#modalOk").onclick = ok; $("#modalCancel").onclick = cancel;
   });
 }
@@ -414,6 +429,71 @@ function switchMode(mode, targetRoute) {
   syncModeFab();
   const defRoute = mode === "music" ? "m_discover" : mode === "novel" ? "n_store" : "home";
   go(targetRoute || defRoute);
+}
+
+const HOME_SWIPE_ORDER = ["vod", "music", "novel"];
+function resolveHomeSwipeMode(curMode, dx, dy, dt) {
+  if (dt > 750 || Math.abs(dx) < 64 || Math.abs(dx) <= Math.abs(dy) * 1.6) return "";
+  const idx = HOME_SWIPE_ORDER.indexOf(curMode);
+  if (idx < 0) return "";
+  const nextIdx = dx < 0 ? idx + 1 : idx - 1;
+  if (nextIdx < 0 || nextIdx >= HOME_SWIPE_ORDER.length) return "";
+  return HOME_SWIPE_ORDER[nextIdx];
+}
+
+function bindHomeSwipeNavigation() {
+  if (bindHomeSwipeNavigation._bound) return;
+  bindHomeSwipeNavigation._bound = true;
+  let active = false, sx = 0, sy = 0, st = 0;
+  const isHidden = (sel) => {
+    const el = $(sel);
+    return !el || el.classList.contains("hidden");
+  };
+  const isOnModuleHome = () => {
+    if (viewStack.length > 0) return false;
+    const okRoute = (appMode === "vod" && currentRoute === "home")
+      || (appMode === "music" && currentRoute === "m_discover")
+      || (appMode === "novel" && currentRoute === "n_store");
+    if (!okRoute) return false;
+    return isHidden("#playerLayer") && isHidden("#readerLayer") && isHidden("#modal")
+      && isHidden("#accessGateLayer") && isHidden("#searchHistPop") && isHidden("#tocMask");
+  };
+  const hasHScrollParent = (target) => {
+    let el = target && target.nodeType === 1 ? target : target?.parentElement;
+    while (el && el !== document.body && el !== document.documentElement) {
+      if (el.scrollWidth > el.clientWidth + 4) {
+        const ox = getComputedStyle(el).overflowX;
+        if (ox === "auto" || ox === "scroll") return true;
+      }
+      el = el.parentElement;
+    }
+    return false;
+  };
+  document.addEventListener("touchstart", (e) => {
+    if (!e.touches || e.touches.length !== 1 || !isOnModuleHome()) { active = false; return; }
+    const t = e.touches[0];
+    const vw = window.innerWidth || document.documentElement.clientWidth || 360;
+    if (t.clientX < 28 || t.clientX > vw - 28) { active = false; return; }
+    const target = e.target;
+    if (target && target.closest && target.closest("input, textarea, select, [contenteditable]")) { active = false; return; }
+    if (hasHScrollParent(target)) { active = false; return; }
+    active = true;
+    sx = t.clientX;
+    sy = t.clientY;
+    st = Date.now();
+  }, { passive: true });
+  document.addEventListener("touchmove", (e) => {
+    if (active && (!e.touches || e.touches.length !== 1)) active = false;
+  }, { passive: true });
+  document.addEventListener("touchend", (e) => {
+    if (!active) return;
+    active = false;
+    if (!isOnModuleHome() || !e.changedTouches || !e.changedTouches.length) return;
+    const t = e.changedTouches[0];
+    const nextMode = resolveHomeSwipeMode(appMode, t.clientX - sx, t.clientY - sy, Date.now() - st);
+    if (nextMode && nextMode !== appMode) switchMode(nextMode);
+  }, { passive: true });
+  document.addEventListener("touchcancel", () => { active = false; }, { passive: true });
 }
 
 let _bootDone = false;
@@ -2116,30 +2196,56 @@ async function openSkipCfgModal() {
         <input id="skipEnabledIn" type="checkbox" style="width:auto" ${(cur.enabled || (!cur.intro && !cur.outro)) ? "checked" : ""}>
         <span>启用本剧自动跳过片头 / 片尾</span>
       </label>
-      <label>跳过片头（秒）</label>
-      <input id="skipIntroIn" type="number" min="0" max="600" value="${cur.intro}">
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
-        <button type="button" class="m-chip" data-skip-intro="${curSec}">设为当前 (${fmt(curSec)})</button>
-        <button type="button" class="m-chip" data-skip-intro="90">90s</button>
-        <button type="button" class="m-chip" data-skip-intro="120">120s</button>
-        <button type="button" class="m-chip" data-skip-intro="0">清空</button>
+      <div class="skip-cfg-grid">
+        <div class="skip-cfg-col">
+          <label>跳过片头（秒）</label>
+          <input id="skipIntroIn" type="number" min="0" max="600" inputmode="numeric" value="${cur.intro}">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+            <button type="button" class="m-chip" data-skip-intro="${curSec}">设为当前 (${fmt(curSec)})</button>
+            <button type="button" class="m-chip" data-skip-intro="90">90s</button>
+            <button type="button" class="m-chip" data-skip-intro="120">120s</button>
+            <button type="button" class="m-chip" data-skip-intro="0">清空</button>
+          </div>
+        </div>
+        <div class="skip-cfg-col">
+          <label>提前跳过片尾（秒，连播下一集）</label>
+          <input id="skipOutroIn" type="number" min="0" max="600" inputmode="numeric" value="${cur.outro}">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+            <button type="button" class="m-chip" data-skip-outro="60">60s</button>
+            <button type="button" class="m-chip" data-skip-outro="90">90s</button>
+            <button type="button" class="m-chip" data-skip-outro="120">120s</button>
+            <button type="button" class="m-chip" data-skip-outro="0">清空</button>
+          </div>
+        </div>
       </div>
-      <label style="margin-top:10px">提前跳过片尾（秒，连播下一集）</label>
-      <input id="skipOutroIn" type="number" min="0" max="600" value="${cur.outro}">
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
-        <button type="button" class="m-chip" data-skip-outro="60">60s</button>
-        <button type="button" class="m-chip" data-skip-outro="90">90s</button>
-        <button type="button" class="m-chip" data-skip-outro="120">120s</button>
-        <button type="button" class="m-chip" data-skip-outro="0">清空</button>
-      </div>
-      <div class="hint" style="margin-top:8px">设置按剧集记忆并随账号云端同步；续播历史进度时不会覆盖你的历史断点。</div>
+      <div class="hint skip-cfg-hint">设置按剧集记忆并随账号云端同步；续播历史进度时不会覆盖你的历史断点。</div>
     </div>`);
   setTimeout(() => {
+    const autoEnable = (val) => {
+      const chk = $("#skipEnabledIn");
+      if (chk && Number(val) > 0) chk.checked = true;
+    };
     document.querySelectorAll("[data-skip-intro]").forEach((b) => {
-      b.onclick = () => { const el = $("#skipIntroIn"); if (el) el.value = b.dataset.skipIntro; };
+      b.onclick = () => {
+        const el = $("#skipIntroIn");
+        if (el) el.value = b.dataset.skipIntro;
+        autoEnable(b.dataset.skipIntro);
+      };
     });
     document.querySelectorAll("[data-skip-outro]").forEach((b) => {
-      b.onclick = () => { const el = $("#skipOutroIn"); if (el) el.value = b.dataset.skipOutro; };
+      b.onclick = () => {
+        const el = $("#skipOutroIn");
+        if (el) el.value = b.dataset.skipOutro;
+        autoEnable(b.dataset.skipOutro);
+      };
+    });
+    ["#skipIntroIn", "#skipOutroIn"].forEach((sel) => {
+      $(sel)?.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          $("#modalOk")?.click();
+        }
+      });
     });
   }, 0);
   if (!(await okPromise)) return;
@@ -2147,6 +2253,7 @@ async function openSkipCfgModal() {
   const outro = Number($("#skipOutroIn")?.value) || 0;
   const enabled = !!$("#skipEnabledIn")?.checked;
   saveSkipCfg(P.vodKey, { intro, outro, enabled });
+  if (NH.user && typeof cloudSyncPush === "function") cloudSyncPush(true);
   toast(enabled && (intro > 0 || outro > 0) ? `已保存片头 ${intro}s / 片尾 ${outro}s` : "已关闭本剧跳过片头片尾");
 }
 
@@ -2623,6 +2730,8 @@ window.addEventListener("resize", updateFsRotate);
 window.addEventListener("orientationchange", () => setTimeout(updateFsRotate, 120));
 ["fullscreenchange", "webkitfullscreenchange"].forEach((ev) => {
   document.addEventListener(ev, () => {
+    syncOverlayHost($("#modal"));
+    syncOverlayHost($("#toast"));
     const nativeFs = !!(window.NovaNative && typeof window.NovaNative.setFullscreen === "function");
     if (!nativeFs && !document.fullscreenElement && !document.webkitFullscreenElement) {
       $("#playerLayer")?.classList.remove("is-fs", "fs-ui-hide", "fs-rotate", "fs-cover");
@@ -3560,13 +3669,18 @@ function renderMe() {
     <div class="section-title">数据维护</div>
     <div class="group">
       ${window.NovaNative && typeof window.NovaNative.checkUpdate === "function" ? `<div class="row" id="checkApkUpdate"><span class="r-ico">${ico("download")}</span><div class="r-main"><div class="r-title">检查客户端 APK 更新</div><div class="r-sub" id="apkVerSub">正在读取原生壳版本…</div></div><span class="r-arrow">${ico("chevronRight")}</span></div>` : ""}
+      <div class="row" id="refreshWebHotfix"><span class="r-ico">${ico("wave")}</span><div class="r-main"><div class="r-title">刷新最新网页界面（免装 APK 热更新）</div><div class="r-sub">当前网页热更版本：${WEB_VERSION}</div></div><span class="r-arrow">${ico("chevronRight")}</span></div>
       <div class="row" id="goWebdav"><span class="r-ico">${ico("cloud")}</span><div class="r-main"><div class="r-title">WebDAV 与本地文件备份</div></div><span class="r-arrow">${ico("chevronRight")}</span></div>
       <div class="row danger" id="clearAll"><span class="r-ico">${ico("trash")}</span><div class="r-main"><div class="r-title">重置并清空本机缓存数据</div></div><span class="r-arrow">${ico("chevronRight")}</span></div>
     </div>
 
     <div class="section-title">版本信息</div>
-    <div class="hint">NovaHub · 星隅 — 私人影视放映、黑胶听音与精品小说阅读终端。<br>内置高清影视片库、无损音乐曲库与流式在线小说阅读引擎。</div>`;
+    <div class="hint">NovaHub · 星隅（网页热更版 ${WEB_VERSION}）— 私人影视放映、黑胶听音与精品小说阅读终端。<br>内置高清影视片库、无损音乐曲库与流式在线小说阅读引擎。</div>`;
 
+  $("#refreshWebHotfix")?.addEventListener("click", () => {
+    toast("正在获取最新热更新…");
+    location.replace(location.pathname + "?t=" + Date.now());
+  });
   if ($("#checkApkUpdate") && window.NovaNative) {
     try {
       const ver = window.NovaNative.getAppVersion ? window.NovaNative.getAppVersion() : "已安装";
@@ -3655,6 +3769,25 @@ let novelSearchKw = "";
 const _novelDirMem = new Map(); // book_id -> chapters[]
 const _novelChMem = new Map();  // `${book_id}:${index}` -> chapterObj
 
+function normalizeNovelCover(url) {
+  let raw = String(url || "").trim();
+  if (!raw) return "";
+  raw = raw.replace(/^https?:\/\/[^/]*bytecdn\.cn\//i, "https://p6-novel.byteimg.com/");
+  if (/^http:\/\/[^/]*byteimg\.com\//i.test(raw)) raw = "https://" + raw.slice(7);
+  return raw;
+}
+window._novelCovErr = (el, mode) => {
+  if (!el) return;
+  const cur = String(el.getAttribute("src") || el.src || "");
+  if (!el.dataset.covRetry && cur.includes("p6-novel.byteimg.com")) {
+    el.dataset.covRetry = "1";
+    el.src = cur.replace("p6-novel.byteimg.com", "p3-novel.byteimg.com");
+    return;
+  }
+  if (mode === "detail") el.style.display = "none";
+  else _imgPh(el, "book", mode || "novel-cov");
+};
+
 const getNovelShelf = () => get("novel_shelf", []);
 const isInNovelShelf = (bid) => !!bid && getNovelShelf().some((x) => String(x.book_id) === String(bid));
 function toggleNovelShelf(book) {
@@ -3670,7 +3803,7 @@ function toggleNovelShelf(book) {
       book_id: String(book.book_id),
       title: book.title || "未知书名",
       author: book.author || "未知作者",
-      cover: book.cover || "",
+      cover: normalizeNovelCover(book.cover),
       category: book.category || "",
       score: book.score || "",
       status: book.status || "",
@@ -3690,7 +3823,7 @@ function addNovelHist(book) {
     book_id: String(book.book_id),
     title: book.title || "未知书名",
     author: book.author || "未知作者",
-    cover: book.cover || "",
+    cover: normalizeNovelCover(book.cover),
     category: book.category || "",
     score: book.score || "",
     status: book.status || "",
@@ -3718,11 +3851,12 @@ function paintNovelList(container, list, opts = {}) {
   container.innerHTML = list.map((b) => {
     const prog = getNovelProg(b.book_id);
     const metaParts = [b.author || "未知作者", b.category, b.status].filter(Boolean);
+    const cov = normalizeNovelCover(b.cover);
     const badgeHtml = prog
       ? `<span class="badge">读至 第${prog.index}章</span>`
       : (b.score ? `<span class="novel-score">${esc(b.score)} 分</span>` : "");
     return `<div class="novel-card">
-      ${b.cover ? `<img class="novel-cov" loading="lazy" src="${esc(b.cover)}" onerror="_imgPh(this,'book','novel-cov')">` : `<div class="novel-cov">${ico("book")}</div>`}
+      ${cov ? `<img class="novel-cov" loading="lazy" referrerpolicy="no-referrer" src="${esc(cov)}" onerror="_novelCovErr(this,'novel-cov')">` : `<div class="novel-cov">${ico("book")}</div>`}
       <div class="novel-info">
         <div>
           <div class="novel-head-row">
@@ -3856,12 +3990,13 @@ async function openNovelDetail(book, _fromBack = false, autoResume = false) {
   if (!_fromBack) pushView(() => openNovelDetail(book, true, false));
   const inShelf = isInNovelShelf(book.book_id);
   const prog = getNovelProg(book.book_id);
+  const cov = normalizeNovelCover(book.cover);
   const meta = [book.author || "未知作者", book.category, book.status, book.score ? `${book.score} 分` : ""].filter(Boolean).join(" · ");
   $("#view").innerHTML = `
     ${backBar(book.title)}
     <div class="form">
       <div style="display:flex;gap:13px">
-        ${book.cover ? `<img src="${esc(book.cover)}" style="width:88px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--line);flex-shrink:0" onerror="this.style.display='none'">` : ""}
+        ${cov ? `<img referrerpolicy="no-referrer" src="${esc(cov)}" style="width:88px;height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--line);flex-shrink:0" onerror="_novelCovErr(this,'detail')">` : ""}
         <div style="flex:1;min-width:0">
           <div style="font-size:16px;font-weight:700;line-height:1.35">${esc(book.title)}</div>
           <div class="hint" style="margin-top:5px">${esc(meta)}</div>
@@ -5505,6 +5640,7 @@ if ($("#btnBoxFs")) $("#btnBoxFs").onclick = $("#btnFs").onclick;
 updateTopbar();
 syncSearchClear();
 syncModeFab();
+bindHomeSwipeNavigation();
 go(appMode === "music" ? "m_discover" : appMode === "novel" ? "n_store" : "home");
 _bootDone = true;
 _bootReady = true;

@@ -1257,6 +1257,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({"error": str(e)}, 502)
 
     # ---------- 小说实时在线直读网关 ----------
+    @staticmethod
+    def _normalize_novel_cover(url: str, fallback: str = "") -> str:
+        """规范化番茄小说封面地址，替换已失效的 403 bytecdn 域名并强制 HTTPS。"""
+        raw = str(url or "").strip() or str(fallback or "").strip()
+        if not raw:
+            return ""
+        raw = re.sub(r"^https?://[^/]*bytecdn\.cn/", "https://p6-novel.byteimg.com/", raw, flags=re.I)
+        if raw.startswith("http://") and ("byteimg.com/" in raw or "fqnovelpic.com/" in raw):
+            raw = "https://" + raw[7:]
+        return raw
+
     def handle_novel_search(self, qs):
         if not self._require_active_access():
             return
@@ -1273,12 +1284,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     pb = response.read(4_194_304)
                 info = json.loads(pb.decode("utf-8", "ignore"))
                 if info.get("book_id") or info.get("book_name"):
+                    cover_u = self._normalize_novel_cover(
+                        info.get("thumb_url") or info.get("cover") or "",
+                        info.get("audio_thumb_uri") or "",
+                    )
                     return self.send_json({
                         "items": [{
                             "book_id": str(info.get("book_id") or bid),
                             "title": info.get("book_name") or f"书籍 {bid}",
                             "author": info.get("author") or "未知作者",
-                            "cover": "",
+                            "cover": cover_u,
                             "category": info.get("category") or "精选",
                             "score": str(info.get("score") or ""),
                             "status": "已完结" if info.get("finished") else "连载中",
@@ -1309,7 +1324,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "book_id": bid,
                     "title": html.unescape(title),
                     "author": html.unescape(re.sub(r"<[^>]+>", "", str(it.get("author") or "未知作者")).strip()),
-                    "cover": str(it.get("thumb_url") or "").strip(),
+                    "cover": self._normalize_novel_cover(it.get("thumb_url") or "", it.get("audio_thumb_uri") or ""),
                     "category": str(it.get("category") or "精选").strip(),
                     "score": str(it.get("score") or "").strip(),
                     "status": "已完结" if c_status == "0" else ("连载中" if c_status == "1" else ""),
