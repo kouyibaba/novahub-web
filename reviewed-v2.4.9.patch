@@ -1,0 +1,3624 @@
+diff --git a/android-app/RELEASE_NOTES.txt b/android-app/RELEASE_NOTES.txt
+index 2ec4554..1ee025a 100644
+--- a/android-app/RELEASE_NOTES.txt
++++ b/android-app/RELEASE_NOTES.txt
+@@ -1,3 +1,6 @@
++新增多方式可选投屏功能：支持 Android 原生零依赖 DLNA 扫描与遥控推流、4 位投屏码跨网大屏网页接收器（tv.html）、以及系统无线投屏/外部播放器/AirPlay/链接复制兜底
++修复后退或切页时搜索无法中止及顶部进度条卡死的问题，新增搜索中随时点击「取消」与「取消搜索」按钮
++修复酷我及收藏歌曲因上游歌词接口失效导致无歌词的问题，服务端与前端统一接入多源兜底检索标准 LRC 歌词
+ 修复影视搜索出来后点击详情偶发「线路暂不可用」的拦截问题，命中有效剧集自动自愈恢复源状态
+ 修复 Android 端音频/视频下载在 JavaBridge 线程调用 WebView 报错的问题，并增加浏览器下载自动回退
+ 新增收藏更新提醒（站内消息中心红点 + Android 原生定时轮询通知），支持电视剧与书架小说单作品提醒开关及多条更新合并防重
+diff --git a/android-app/app/build.gradle b/android-app/app/build.gradle
+index 6a1ed8a..0725607 100644
+--- a/android-app/app/build.gradle
++++ b/android-app/app/build.gradle
+@@ -10,8 +10,8 @@ android {
+         applicationId "com.novahub.app"
+         minSdk 24
+         targetSdk 34
+-        versionCode 11
+-        versionName "2.4.8"
++        versionCode 12
++        versionName "2.4.9"
+     }
+ 
+     signingConfigs {
+diff --git a/android-app/app/src/main/AndroidManifest.xml b/android-app/app/src/main/AndroidManifest.xml
+index 91f4023..6079415 100644
+--- a/android-app/app/src/main/AndroidManifest.xml
++++ b/android-app/app/src/main/AndroidManifest.xml
+@@ -2,6 +2,8 @@
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+     <uses-permission android:name="android.permission.INTERNET" />
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
++    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
++    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+diff --git a/android-app/app/src/main/java/com/novahub/app/DlnaCastManager.java b/android-app/app/src/main/java/com/novahub/app/DlnaCastManager.java
+new file mode 100644
+index 0000000..1709ea8
+--- /dev/null
++++ b/android-app/app/src/main/java/com/novahub/app/DlnaCastManager.java
+@@ -0,0 +1,430 @@
++package com.novahub.app;
++
++import android.content.Context;
++import android.net.wifi.WifiManager;
++import android.util.Log;
++import java.io.ByteArrayOutputStream;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.io.StringReader;
++import java.net.DatagramPacket;
++import java.net.DatagramSocket;
++import java.net.HttpURLConnection;
++import java.net.InetAddress;
++import java.net.InetSocketAddress;
++import java.net.URI;
++import java.net.URL;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++import org.json.JSONArray;
++import org.json.JSONObject;
++import org.xmlpull.v1.XmlPullParser;
++import org.xmlpull.v1.XmlPullParserFactory;
++
++/**
++ * 零第三方依赖 DLNA/UPnP 投屏管理器：
++ * 1. 使用 SSDP UDP 组播扫描局域网支持 AVTransport 的电视/盒子；
++ * 2. 解析设备描述 XML 获取 friendlyName 与 controlURL；
++ * 3. 通过标准 SOAP Action（SetAVTransportURI / Play / Pause / Seek / Stop）实现推流与遥控。
++ */
++public class DlnaCastManager {
++    private static final String TAG = "NovaDlna";
++    private static final String SSDP_HOST = "239.255.255.250";
++    private static final int SSDP_PORT = 1900;
++    private static final String AVT_SERVICE = "urn:schemas-upnp-org:service:AVTransport:1";
++    private static final Pattern LOCATION_PAT = Pattern.compile("(?im)^LOCATION:\\s*(.+?)\\s*$");
++
++    public interface DeviceCallback {
++        void onResult(JSONArray devices, String error);
++    }
++
++    public interface ActionCallback {
++        void onDone(boolean ok, String message);
++    }
++
++    public static final class Device {
++        final String udn;
++        final String name;
++        final String host;
++        final String location;
++        final String controlUrl;
++
++        Device(String udn, String name, String host, String location, String controlUrl) {
++            this.udn = udn;
++            this.name = name;
++            this.host = host;
++            this.location = location;
++            this.controlUrl = controlUrl;
++        }
++
++        JSONObject toJson() {
++            JSONObject obj = new JSONObject();
++            try {
++                obj.put("udn", udn);
++                obj.put("name", name);
++                obj.put("host", host);
++                obj.put("location", location);
++            } catch (Throwable ignored) {}
++            return obj;
++        }
++    }
++
++    private final Context appContext;
++    private final ExecutorService executor = Executors.newSingleThreadExecutor();
++    private final Map<String, Device> devices = new LinkedHashMap<>();
++    private volatile Device activeDevice;
++
++    public DlnaCastManager(Context context) {
++        this.appContext = context.getApplicationContext();
++    }
++
++    /** 异步扫描局域网 DLNA 投屏设备（约 2.8 秒窗口）。 */
++    public void scanDevices(DeviceCallback callback) {
++        executor.execute(() -> {
++            WifiManager.MulticastLock mLock = null;
++            List<Device> found = new ArrayList<>();
++            String err = null;
++            try {
++                WifiManager wm = (WifiManager) appContext.getSystemService(Context.WIFI_SERVICE);
++                if (wm != null) {
++                    mLock = wm.createMulticastLock("NovaHubDlnaLock");
++                    mLock.setReferenceCounted(false);
++                    mLock.acquire();
++                }
++
++                Set<String> locations = discoverLocations();
++                for (String loc : locations) {
++                    Device dev = fetchDeviceDescription(loc);
++                    if (dev != null) {
++                        found.add(dev);
++                    }
++                }
++                synchronized (this) {
++                    devices.clear();
++                    for (Device d : found) {
++                        devices.put(d.udn, d);
++                    }
++                }
++            } catch (Throwable e) {
++                Log.w(TAG, "DLNA scan failed", e);
++                err = e.getMessage() != null ? e.getMessage() : "扫描失败";
++            } finally {
++                if (mLock != null) {
++                    try {
++                        if (mLock.isHeld()) mLock.release();
++                    } catch (Throwable ignored) {}
++                }
++            }
++
++            JSONArray arr = new JSONArray();
++            for (Device d : found) {
++                arr.put(d.toJson());
++            }
++            if (callback != null) {
++                callback.onResult(arr, err);
++            }
++        });
++    }
++
++    /** 将指定媒体直链/代理流推送至选定 DLNA 设备并启动播放。 */
++    public void castUrl(String udn, String mediaUrl, String title, ActionCallback callback) {
++        executor.execute(() -> {
++            if (mediaUrl == null || (!mediaUrl.startsWith("http://") && !mediaUrl.startsWith("https://"))) {
++                if (callback != null) callback.onDone(false, "无效的媒体地址");
++                return;
++            }
++            Device dev;
++            synchronized (this) {
++                dev = devices.get(udn);
++            }
++            if (dev == null) {
++                if (callback != null) callback.onDone(false, "设备已失效，请重新扫描");
++                return;
++            }
++            try {
++                // 部分电视需要先 Stop 再重设 URI
++                try {
++                    sendSoap(dev.controlUrl, "Stop",
++                            "<u:Stop xmlns:u=\"" + AVT_SERVICE + "\"><InstanceID>0</InstanceID></u:Stop>");
++                } catch (Throwable ignored) {}
++
++                String safeTitle = (title == null || title.trim().isEmpty()) ? "NovaHub 视频" : title.trim();
++                String metadata = buildDidlMetadata(mediaUrl, safeTitle);
++                String setBody = "<u:SetAVTransportURI xmlns:u=\"" + AVT_SERVICE + "\">"
++                        + "<InstanceID>0</InstanceID>"
++                        + "<CurrentURI>" + xmlEscape(mediaUrl) + "</CurrentURI>"
++                        + "<CurrentURIMetaData>" + xmlEscape(metadata) + "</CurrentURIMetaData>"
++                        + "</u:SetAVTransportURI>";
++                sendSoap(dev.controlUrl, "SetAVTransportURI", setBody);
++
++                String playBody = "<u:Play xmlns:u=\"" + AVT_SERVICE + "\">"
++                        + "<InstanceID>0</InstanceID><Speed>1</Speed></u:Play>";
++                sendSoap(dev.controlUrl, "Play", playBody);
++                activeDevice = dev;
++                if (callback != null) callback.onDone(true, "已推送至 " + dev.name);
++            } catch (Throwable e) {
++                Log.w(TAG, "DLNA cast failed", e);
++                if (callback != null) {
++                    callback.onDone(false, "投屏失败：" + (e.getMessage() != null ? e.getMessage() : "设备拒绝连接"));
++                }
++            }
++        });
++    }
++
++    /** 控制当前正在投屏的 DLNA 设备（play / pause / stop / seek）。 */
++    public void control(String action, String value, ActionCallback callback) {
++        executor.execute(() -> {
++            Device dev = activeDevice;
++            if (dev == null) {
++                if (callback != null) callback.onDone(false, "当前未连接 DLNA 设备");
++                return;
++            }
++            String act = action == null ? "" : action.trim().toLowerCase(Locale.US);
++            try {
++                if ("play".equals(act)) {
++                    sendSoap(dev.controlUrl, "Play",
++                            "<u:Play xmlns:u=\"" + AVT_SERVICE + "\"><InstanceID>0</InstanceID><Speed>1</Speed></u:Play>");
++                    if (callback != null) callback.onDone(true, "已继续播放");
++                } else if ("pause".equals(act)) {
++                    sendSoap(dev.controlUrl, "Pause",
++                            "<u:Pause xmlns:u=\"" + AVT_SERVICE + "\"><InstanceID>0</InstanceID></u:Pause>");
++                    if (callback != null) callback.onDone(true, "已暂停");
++                } else if ("stop".equals(act)) {
++                    sendSoap(dev.controlUrl, "Stop",
++                            "<u:Stop xmlns:u=\"" + AVT_SERVICE + "\"><InstanceID>0</InstanceID></u:Stop>");
++                    activeDevice = null;
++                    if (callback != null) callback.onDone(true, "已停止 DLNA 投屏");
++                } else if ("seek".equals(act)) {
++                    int sec = 0;
++                    try { sec = Math.max(0, (int) Math.round(Double.parseDouble(value))); } catch (Throwable ignored) {}
++                    String target = formatHms(sec);
++                    sendSoap(dev.controlUrl, "Seek",
++                            "<u:Seek xmlns:u=\"" + AVT_SERVICE + "\">"
++                                    + "<InstanceID>0</InstanceID>"
++                                    + "<Unit>REL_TIME</Unit>"
++                                    + "<Target>" + target + "</Target>"
++                                    + "</u:Seek>");
++                    if (callback != null) callback.onDone(true, "已跳转至 " + target);
++                } else {
++                    if (callback != null) callback.onDone(false, "不支持的遥控操作");
++                }
++            } catch (Throwable e) {
++                Log.w(TAG, "DLNA control failed", e);
++                if (callback != null) callback.onDone(false, "遥控指令失败");
++            }
++        });
++    }
++
++    public void shutdown() {
++        executor.shutdownNow();
++    }
++
++    private Set<String> discoverLocations() throws Exception {
++        Set<String> locations = new LinkedHashSet<>();
++        DatagramSocket socket = null;
++        try {
++            socket = new DatagramSocket(null);
++            socket.setReuseAddress(true);
++            socket.bind(new InetSocketAddress(0));
++            socket.setSoTimeout(500);
++            InetAddress group = InetAddress.getByName(SSDP_HOST);
++
++            String[] searchTargets = new String[] {
++                    AVT_SERVICE,
++                    "urn:schemas-upnp-org:device:MediaRenderer:1"
++            };
++            for (int round = 0; round < 2; round++) {
++                for (String st : searchTargets) {
++                    String msg = "M-SEARCH * HTTP/1.1\r\n"
++                            + "HOST: 239.255.255.250:1900\r\n"
++                            + "MAN: \"ssdp:discover\"\r\n"
++                            + "MX: 2\r\n"
++                            + "ST: " + st + "\r\n\r\n";
++                    byte[] data = msg.getBytes(StandardCharsets.UTF_8);
++                    socket.send(new DatagramPacket(data, data.length, group, SSDP_PORT));
++                }
++            }
++
++            long deadline = System.currentTimeMillis() + 2600L;
++            byte[] buf = new byte[4096];
++            while (System.currentTimeMillis() < deadline) {
++                try {
++                    DatagramPacket pkt = new DatagramPacket(buf, buf.length);
++                    socket.receive(pkt);
++                    String resp = new String(pkt.getData(), 0, pkt.getLength(), StandardCharsets.UTF_8);
++                    Matcher m = LOCATION_PAT.matcher(resp);
++                    if (m.find()) {
++                        String loc = m.group(1).trim();
++                        if (loc.startsWith("http://") || loc.startsWith("https://")) {
++                            locations.add(loc);
++                        }
++                    }
++                } catch (java.net.SocketTimeoutException ignored) {
++                    // 等待下一个到达的 SSDP 响应直到时间窗口结束
++                }
++            }
++        } finally {
++            if (socket != null) {
++                try { socket.close(); } catch (Throwable ignored) {}
++            }
++        }
++        return locations;
++    }
++
++    private Device fetchDeviceDescription(String location) {
++        try {
++            String xml = httpGetText(location, 3000);
++            if (xml == null || xml.isEmpty()) return null;
++
++            XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
++            factory.setNamespaceAware(true);
++            XmlPullParser parser = factory.newPullParser();
++            parser.setInput(new StringReader(xml));
++
++            String urlBase = "";
++            String friendlyName = "";
++            String udn = "";
++            String avtControl = "";
++            boolean inService = false;
++            String curServiceType = "";
++            String curControlUrl = "";
++            String currentTag = "";
++
++            int ev = parser.getEventType();
++            while (ev != XmlPullParser.END_DOCUMENT) {
++                if (ev == XmlPullParser.START_TAG) {
++                    currentTag = parser.getName();
++                    if ("service".equalsIgnoreCase(currentTag)) {
++                        inService = true;
++                        curServiceType = "";
++                        curControlUrl = "";
++                    }
++                } else if (ev == XmlPullParser.TEXT) {
++                    String txt = parser.getText();
++                    if (txt != null) {
++                        txt = txt.trim();
++                        if ("URLBase".equalsIgnoreCase(currentTag) && urlBase.isEmpty()) {
++                            urlBase = txt;
++                        } else if ("friendlyName".equalsIgnoreCase(currentTag) && friendlyName.isEmpty()) {
++                            friendlyName = txt;
++                        } else if ("UDN".equalsIgnoreCase(currentTag) && udn.isEmpty()) {
++                            udn = txt;
++                        } else if (inService && "serviceType".equalsIgnoreCase(currentTag)) {
++                            curServiceType = txt;
++                        } else if (inService && "controlURL".equalsIgnoreCase(currentTag)) {
++                            curControlUrl = txt;
++                        }
++                    }
++                } else if (ev == XmlPullParser.END_TAG) {
++                    if ("service".equalsIgnoreCase(parser.getName())) {
++                        if (curServiceType.contains("AVTransport") && !curControlUrl.isEmpty() && avtControl.isEmpty()) {
++                            avtControl = curControlUrl;
++                        }
++                        inService = false;
++                    }
++                    currentTag = "";
++                }
++                ev = parser.next();
++            }
++
++            if (avtControl.isEmpty()) return null;
++            URI baseUri = URI.create(urlBase.isEmpty() ? location : urlBase);
++            String absControl = baseUri.resolve(avtControl).toString();
++            String host = baseUri.getHost() != null ? baseUri.getHost() : "";
++            String finalUdn = udn.isEmpty() ? absControl : udn;
++            String finalName = friendlyName.isEmpty() ? ("DLNA 设备 (" + host + ")") : friendlyName;
++            return new Device(finalUdn, finalName, host, location, absControl);
++        } catch (Throwable e) {
++            Log.d(TAG, "Ignore non-AVTransport device " + location);
++            return null;
++        }
++    }
++
++    private static String httpGetText(String urlStr, int timeoutMs) throws Exception {
++        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
++        conn.setConnectTimeout(timeoutMs);
++        conn.setReadTimeout(timeoutMs);
++        conn.setRequestMethod("GET");
++        try {
++            if (conn.getResponseCode() >= 400) return "";
++            try (InputStream in = conn.getInputStream();
++                 ByteArrayOutputStream out = new ByteArrayOutputStream()) {
++                byte[] buf = new byte[4096];
++                int n;
++                int total = 0;
++                while ((n = in.read(buf)) > 0) {
++                    total += n;
++                    if (total > 262144) break;
++                    out.write(buf, 0, n);
++                }
++                return out.toString(StandardCharsets.UTF_8.name());
++            }
++        } finally {
++            conn.disconnect();
++        }
++    }
++
++    private static void sendSoap(String controlUrl, String action, String bodyXml) throws Exception {
++        String envelope = "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
++                + "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
++                + "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
++                + "<s:Body>" + bodyXml + "</s:Body>"
++                + "</s:Envelope>";
++        byte[] payload = envelope.getBytes(StandardCharsets.UTF_8);
++        HttpURLConnection conn = (HttpURLConnection) new URL(controlUrl).openConnection();
++        conn.setConnectTimeout(5000);
++        conn.setReadTimeout(5000);
++        conn.setDoOutput(true);
++        conn.setRequestMethod("POST");
++        conn.setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"");
++        conn.setRequestProperty("SOAPACTION", "\"" + AVT_SERVICE + "#" + action + "\"");
++        try {
++            try (OutputStream os = conn.getOutputStream()) {
++                os.write(payload);
++            }
++            int code = conn.getResponseCode();
++            if (code < 200 || code >= 300) {
++                throw new IllegalStateException("HTTP " + code);
++            }
++        } finally {
++            conn.disconnect();
++        }
++    }
++
++    private static String buildDidlMetadata(String mediaUrl, String title) {
++        return "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" "
++                + "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" "
++                + "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">"
++                + "<item id=\"0\" parentID=\"-1\" restricted=\"1\">"
++                + "<dc:title>" + xmlEscape(title) + "</dc:title>"
++                + "<upnp:class>object.item.videoItem</upnp:class>"
++                + "<res protocolInfo=\"http-get:*:video/*:*\">" + xmlEscape(mediaUrl) + "</res>"
++                + "</item></DIDL-Lite>";
++    }
++
++    private static String xmlEscape(String raw) {
++        if (raw == null) return "";
++        return raw.replace("&", "&amp;")
++                .replace("<", "&lt;")
++                .replace(">", "&gt;")
++                .replace("\"", "&quot;")
++                .replace("'", "&apos;");
++    }
++
++    private static String formatHms(int totalSec) {
++        int h = totalSec / 3600;
++        int m = (totalSec % 3600) / 60;
++        int s = totalSec % 60;
++        return String.format(Locale.US, "%02d:%02d:%02d", h, m, s);
++    }
++}
+diff --git a/android-app/app/src/main/java/com/novahub/app/MainActivity.java b/android-app/app/src/main/java/com/novahub/app/MainActivity.java
+index 18ed99d..16893b9 100644
+--- a/android-app/app/src/main/java/com/novahub/app/MainActivity.java
++++ b/android-app/app/src/main/java/com/novahub/app/MainActivity.java
+@@ -50,6 +50,7 @@ public class MainActivity extends Activity {
+     private boolean backNavigationPending;
+     private android.window.OnBackInvokedCallback systemBackCallback;
+     private NovelTtsController novelTts;
++    private DlnaCastManager dlnaCastManager;
+     private SessionStore sessionStore;
+     private final Object sessionLock = new Object();
+     private String sessionNonce = "";
+@@ -87,6 +88,7 @@ public class MainActivity extends Activity {
+         super.onCreate(savedInstanceState);
+         activeRef = new WeakReference<>(this);
+         sessionStore = new SessionStore(this);
++        dlnaCastManager = new DlnaCastManager(this);
+ 
+         Window window = getWindow();
+         window.setStatusBarColor(Color.parseColor("#090A0D"));
+@@ -439,6 +441,92 @@ public class MainActivity extends Activity {
+                 return false;
+             }
+         }
++
++        @JavascriptInterface
++        public boolean hasCastBridge() {
++            return trustedMainPage;
++        }
++
++        @JavascriptInterface
++        public void scanDlnaDevices() {
++            if (!trustedMainPage || dlnaCastManager == null) return;
++            dlnaCastManager.scanDevices((devices, error) -> {
++                JSONObject res = new JSONObject();
++                try {
++                    res.put("ok", error == null);
++                    res.put("devices", devices != null ? devices : new org.json.JSONArray());
++                    if (error != null) res.put("error", error);
++                } catch (Throwable ignored) {}
++                final String json = res.toString();
++                mainHandler.post(() -> {
++                    if (!isFinishing() && webView != null && isTrustedNovelPage()) {
++                        webView.evaluateJavascript("window.__nhDlnaDevices && window.__nhDlnaDevices(" + json + ")", null);
++                    }
++                });
++            });
++        }
++
++        @JavascriptInterface
++        public void castDlna(final String udn, final String url, final String title) {
++            if (!trustedMainPage || dlnaCastManager == null) return;
++            dlnaCastManager.castUrl(udn, url, title, (ok, msg) -> notifyDlnaResult("cast", ok, msg));
++        }
++
++        @JavascriptInterface
++        public void controlDlna(final String action, final String value) {
++            if (!trustedMainPage || dlnaCastManager == null) return;
++            dlnaCastManager.control(action, value, (ok, msg) -> notifyDlnaResult(action, ok, msg));
++        }
++
++        @JavascriptInterface
++        public boolean openSystemCastSettings() {
++            if (!trustedMainPage) return false;
++            runOnUiThread(() -> {
++                try {
++                    startActivity(new android.content.Intent(Settings.ACTION_CAST_SETTINGS));
++                } catch (Throwable ignored) {
++                    try {
++                        startActivity(new android.content.Intent(Settings.ACTION_DISPLAY_SETTINGS));
++                    } catch (Throwable e2) {
++                        Toast.makeText(MainActivity.this, "请在系统设置中打开无线投屏", Toast.LENGTH_SHORT).show();
++                    }
++                }
++            });
++            return true;
++        }
++
++        @JavascriptInterface
++        public boolean openExternalPlayer(final String url, final String title) {
++            if (!trustedMainPage || url == null || (!url.startsWith("http://") && !url.startsWith("https://"))) {
++                return false;
++            }
++            runOnUiThread(() -> {
++                try {
++                    android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_VIEW);
++                    intent.setDataAndType(Uri.parse(url), "video/*");
++                    if (title != null && !title.isEmpty()) intent.putExtra("title", title);
++                    startActivity(android.content.Intent.createChooser(intent, "选择外部播放器播放/投屏"));
++                } catch (Throwable e) {
++                    Toast.makeText(MainActivity.this, "未找到可用的外部播放器", Toast.LENGTH_SHORT).show();
++                }
++            });
++            return true;
++        }
++    }
++
++    private void notifyDlnaResult(final String action, final boolean ok, final String message) {
++        JSONObject res = new JSONObject();
++        try {
++            res.put("action", action != null ? action : "");
++            res.put("ok", ok);
++            res.put("message", message != null ? message : "");
++        } catch (Throwable ignored) {}
++        final String json = res.toString();
++        mainHandler.post(() -> {
++            if (!isFinishing() && webView != null && isTrustedNovelPage()) {
++                webView.evaluateJavascript("window.__nhDlnaResult && window.__nhDlnaResult(" + json + ")", null);
++            }
++        });
+     }
+ 
+     private boolean enqueueSystemDownload(String url, String rawFilename) {
+@@ -544,6 +632,7 @@ public class MainActivity extends Activity {
+             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(systemBackCallback);
+         }
+         if (novelTts != null) novelTts.shutdown();
++        if (dlnaCastManager != null) dlnaCastManager.shutdown();
+         MediaNotifyService.clear(this);
+         super.onDestroy();
+     }
+diff --git a/app.js b/app.js
+index b3e1137..2ec532f 100644
+--- a/app.js
++++ b/app.js
+@@ -254,6 +254,9 @@ function closePlayer(fromPop = false) {
+     const v = $("#video");
+     if (v && v.currentTime > 1) saveProgress(P.vodKey, P.idx, v.currentTime, true);
+   }
++  if (typeof castState !== "undefined" && castState.active && typeof stopActiveCast === "function") {
++    stopActiveCast(true);
++  }
+   if (typeof openFsEpDrawer === "function") openFsEpDrawer(false);
+   if (typeof setPlayerFullscreen === "function") setPlayerFullscreen(false);
+   destroyPlayers();
+@@ -278,7 +281,8 @@ function closeReader() {
+   syncModeFab();
+ }
+ function goBack(fromPop = false) {
+-  if (typeof vodClient !== "undefined") { vodClient.cancel(); viewRequest++; }
++  if (typeof cancelActiveSearch === "function") cancelActiveSearch(true);
++  else if (typeof vodClient !== "undefined") { vodClient.cancel(); viewRequest++; }
+   if (!$("#tocMask").classList.contains("hidden")) { $("#tocMask").classList.add("hidden"); return; }
+   if (!$("#readerLayer").classList.contains("hidden")) { closeReader(); return; }
+   if (!$("#playerLayer").classList.contains("hidden")) { closePlayer(fromPop); return; }
+@@ -393,6 +397,7 @@ function updateTopbar() {
+ }
+ 
+ function switchMode(mode, targetRoute) {
++  if (typeof cancelActiveSearch === "function") cancelActiveSearch(true);
+   appMode = mode;
+   set(K.MODE, mode);
+   updateTopbar();
+@@ -404,7 +409,8 @@ function switchMode(mode, targetRoute) {
+ let _bootDone = false;
+ function go(route) {
+   const applyRoute = () => {
+-    vodClient.cancel(); viewRequest++;
++    if (typeof cancelActiveSearch === "function") cancelActiveSearch(true);
++    else { vodClient.cancel(); viewRequest++; }
+     currentRoute = route;
+     viewStack.length = 0;
+     document.body.classList.remove("detail-view");
+@@ -463,12 +469,38 @@ function syncSearchClear() {
+   const inp = $("#searchInput"), clr = $("#searchClear");
+   if (inp && clr) clr.classList.toggle("hidden", !inp.value.trim());
+ }
++let _searchAbort = null;
++let _searchLoading = false;
+ function setSearchLoading(on) {
++  _searchLoading = !!on;
+   const bar = $("#topProgress"), btn = $("#searchBtn");
+   if (bar) bar.classList.toggle("hidden", !on);
+   if (btn) {
+-    btn.disabled = !!on;
+-    btn.innerHTML = on ? `<progress aria-label="检索中" class="loading-spinner"></progress>` : "搜索";
++    btn.disabled = false;
++    btn.classList.toggle("is-cancel", !!on);
++    btn.setAttribute("aria-label", on ? "取消搜索" : "搜索");
++    btn.textContent = on ? "取消" : "搜索";
++  }
++}
++function cancelActiveSearch(silent = false) {
++  const hadActive = _searchLoading || !!_searchAbort;
++  if (_searchAbort) {
++    try { _searchAbort.abort(); } catch {}
++    _searchAbort = null;
++  }
++  if (typeof vodClient !== "undefined" && typeof vodClient.cancel === "function") {
++    vodClient.cancel();
++  }
++  if (typeof viewRequest !== "undefined") viewRequest++;
++  setSearchLoading(false);
++  if (!silent && hadActive && typeof toast === "function") toast("已取消搜索");
++}
++function cancelSearchAndLeave() {
++  cancelActiveSearch(false);
++  if (viewStack.length > 0) {
++    goBack();
++  } else if (typeof routes[currentRoute] === "function") {
++    routes[currentRoute]();
+   }
+ }
+ function renderSearchLoadingHtml(q, sub = "正在匹配多路资源，请稍候…") {
+@@ -476,6 +508,7 @@ function renderSearchLoadingHtml(q, sub = "正在匹配多路资源，请稍候
+     <div class="nh-spinner-lg" aria-hidden="true"></div>
+     <div class="search-loading-title">正在搜索「${esc(q)}」</div>
+     <div class="search-loading-sub">${esc(sub)}</div>
++    <button type="button" class="btn ghost" data-cancel-search="1" style="margin-top:12px;padding:6px 18px;font-size:12.5px">取消搜索</button>
+   </div>`;
+ }
+ function renderSkeletonHtml(type = "grid", count = 6, bare = false) {
+@@ -507,7 +540,15 @@ const triggerSearch = () => {
+     if (q) doSearch(q); else go("home");
+   }
+ };
+-$("#searchBtn").addEventListener("click", triggerSearch);
++$("#searchBtn").addEventListener("click", () => {
++  if (_searchLoading) { cancelSearchAndLeave(); return; }
++  triggerSearch();
++});
++document.addEventListener("click", (e) => {
++  if (e.target && e.target.closest && e.target.closest("[data-cancel-search]")) {
++    cancelSearchAndLeave();
++  }
++});
+ $("#searchInput").addEventListener("keydown", (e) => {
+   if (e.key === "Enter") { e.preventDefault(); triggerSearch(); }
+ });
+@@ -683,6 +724,10 @@ function sortByExactMatch(list, query, getTitle, getSub) {
+ 
+ async function searchMusic(q) {
+   if (!q) return;
++  cancelActiveSearch(true);
++  const mine = ++viewRequest;
++  const ac = new AbortController();
++  _searchAbort = ac;
+   setSearchLoading(true);
+   const view = $("#view");
+   if (view) view.innerHTML = `<div class="section-title">${ico("search")} 搜索：${esc(q)}</div>${renderSearchLoadingHtml(q, "正在检索曲库与歌单…")}`;
+@@ -693,7 +738,9 @@ async function searchMusic(q) {
+   };
+   try {
+     // 优先检索高可播率酷我曲库，并清理歌手转义分隔符
+-    const kwRes = await fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`).then((r) => r.ok ? r.json() : []).catch(() => []);
++    const kwRes = await fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`, { signal: ac.signal })
++      .then((r) => r.ok ? r.json() : []).catch(() => []);
++    if (mine !== viewRequest || ac.signal.aborted) return;
+     if (Array.isArray(kwRes)) {
+       kwRes.forEach((x) => {
+         const nm = String(x.name || "").replace(/\u00a0/g, " ").trim();
+@@ -708,7 +755,9 @@ async function searchMusic(q) {
+     }
+     // 仅当酷我有效结果不足 5 首时才回退补充网易云曲库，减少不可播杂曲
+     if (kwList.length < 5) {
+-      const neRes = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=30&pages=1`, 7000).catch(() => []);
++      const neRes = await fetch(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=30&pages=1`, { signal: ac.signal })
++        .then((r) => r.ok ? r.json() : []).catch(() => []);
++      if (mine !== viewRequest || ac.signal.aborted) return;
+       if (Array.isArray(neRes)) {
+         neRes.forEach((x) => {
+           const nm = String(x.name || "").trim() || "未知歌曲";
+@@ -727,8 +776,10 @@ async function searchMusic(q) {
+       }
+     }
+   } finally {
+-    setSearchLoading(false);
++    if (_searchAbort === ac) _searchAbort = null;
++    if (mine === viewRequest) setSearchLoading(false);
+   }
++  if (mine !== viewRequest || ac.signal.aborted) return;
+   const seen = new Set();
+   const merged = [];
+   kwList.concat(neList).forEach((item) => {
+@@ -864,28 +915,50 @@ async function resolveSongUrl(song, brOverride = null) {
+ async function loadSongLyrics(song, token) {
+   curLyrics = []; activeLrcIdx = -1;
+   const targets = [];
++  const songName = String(song.name || "").trim();
++  const songArtist = String(song.artist || "").trim();
+   if (song.source === "kuwo" || song._kwRid) {
+     const rid = song._kwRid || song.id;
+     targets.push(async () => {
+-      const r = await fetch(`/kw?act=lrc&id=${encodeURIComponent(rid)}`);
++      const r = await fetch(`/kw?act=lrc&id=${encodeURIComponent(rid)}&name=${encodeURIComponent(songName)}&artist=${encodeURIComponent(songArtist)}`);
+       const d = r.ok ? await r.json() : null;
+       return d?.lrc || "";
+     });
++  }
++  if (song.lrc) targets.push(() => fetchText(song.lrc, 5000));
++  if (song.id && song.source !== "kuwo" && song.source !== "tencent") {
++    targets.push(async () => {
++      const d = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id=${encodeURIComponent(song.id)}`, 5000);
++      return d?.lyric || "";
++    });
++  }
++  // 全曲源统一兜底：按歌名+歌手检索 gdstudio（网易云）标准 LRC，覆盖酷我/收藏旧曲目
++  if (songName) {
++    targets.push(async () => {
++      const kw = `${songName} ${songArtist}`.trim();
++      const list = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(kw)}&count=5&pages=1`, 5000);
++      if (!Array.isArray(list) || !list.length) return "";
++      const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, "");
++      const wn = norm(songName), wa = norm(songArtist);
++      const hit = list.find((it) => {
++        const iname = norm(it?.name);
++        const iart = norm(Array.isArray(it?.artist) ? it.artist.join("/") : it?.artist);
++        return wn && iname === wn && (!wa || iart.includes(wa) || wa.includes(iart));
++      }) || list[0];
++      if (!hit?.id) return "";
++      const ld = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id=${encodeURIComponent(hit.id)}`, 5000);
++      return ld?.lyric || ld?.tlyric || "";
++    });
++  }
++  if (song.source === "kuwo" || song._kwRid) {
+     targets.push(async () => {
+-      const s = await fetchJson(`https://api.vkeys.cn/v2/music/tencent?word=${encodeURIComponent(song.name + " " + (song.artist || ""))}&choose=1`, 5000);
++      const s = await fetchJson(`https://api.vkeys.cn/v2/music/tencent?word=${encodeURIComponent((songName + " " + songArtist).trim())}&choose=1`, 3500);
+       const tid = s?.data?.id;
+       if (!tid) return "";
+-      const ld = await fetchJson(`https://api.vkeys.cn/v2/music/tencent/lyric?id=${tid}`, 5000);
++      const ld = await fetchJson(`https://api.vkeys.cn/v2/music/tencent/lyric?id=${tid}`, 3500);
+       return ld?.data?.lrc || "";
+     });
+   }
+-  if (song.source !== "kuwo") {
+-    if (song.lrc) targets.push(() => fetchText(song.lrc, 5000));
+-    if (song.id && song.source !== "tencent") targets.push(async () => {
+-      const d = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id=${song.id}`, 5000);
+-      return d?.lyric || "";
+-    });
+-  }
+   for (const fn of targets) {
+     try {
+       const txt = await fn();
+@@ -2118,6 +2191,9 @@ function selectEpisodeIndex(i) {
+   renderEpisodes();
+   mountSource(P.eps[i].url);
+   $("#playerTitle").textContent = P.title.replace(/ · .*$/, "") + " · " + P.eps[i].name;
++  if (typeof castState !== "undefined" && castState.active && typeof syncCastEpisode === "function") {
++    syncCastEpisode();
++  }
+ }
+ function renderEpisodes() {
+   const el = $("#epList");
+@@ -2558,6 +2634,375 @@ $("#btnVodDownload")?.addEventListener("click", () => {
+   const title = (P.title || "视频").split(" · ")[0];
+   downloadVodEpisode(title, ep.name || "正片", ep.url);
+ });
++$("#btnCast")?.addEventListener("click", openCastModal);
++
++/* ============ 多方式可选投屏（DLNA + 4位投屏码大屏 + 系统投屏/外部播放器/AirPlay） ============ */
++const castState = {
++  active: false,
++  mode: "", // "dlna" | "room"
++  targetName: "",
++  udn: "",
++  code: "",
++  paused: false,
++  useProxy: false,
++  devices: [],
++  scanning: false,
++};
++
++function getCurrentCastRawUrl() {
++  const ep = (P.eps && P.eps[P.idx]) || null;
++  if (ep && ep.url) return ep.url;
++  const v = $("#video");
++  return v?.currentSrc || v?.src || "";
++}
++
++async function resolveCastUrls() {
++  const rawUrl = getCurrentCastRawUrl();
++  if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return null;
++  let gatewayBase = window.__NH_API_BASE__ || "";
++  if (!gatewayBase && location.protocol.startsWith("http") && !location.hostname.endsWith("github.io")) {
++    gatewayBase = location.origin;
++  }
++  let proxyUrl = "";
++  if (gatewayBase && !rawUrl.includes("/api/live/m3u8")) {
++    try {
++      const t = await nhApi("/api/media/ticket");
++      if (t && t.ticket) {
++        proxyUrl = `${gatewayBase.replace(/\/+$/, "")}/api/live/m3u8?url=${encodeURIComponent(rawUrl)}&ticket=${encodeURIComponent(t.ticket)}`;
++      }
++    } catch {}
++  }
++  const titleParts = (P.title || "星隅视频").split(" · ");
++  const title = titleParts[0] || "星隅视频";
++  const episode = (P.eps && P.eps[P.idx] && P.eps[P.idx].name) || titleParts[1] || "";
++  const v = $("#video");
++  const position = (!P.isLive && v && isFinite(v.currentTime)) ? Math.floor(v.currentTime) : 0;
++  return {
++    rawUrl,
++    proxyUrl,
++    title,
++    episode,
++    position,
++    is_live: !!P.isLive,
++  };
++}
++
++function renderCastBar() {
++  const bar = $("#castBar");
++  if (!bar) return;
++  if (!castState.active) {
++    bar.classList.add("hidden");
++    bar.innerHTML = "";
++    $("#btnCast")?.classList.remove("active");
++    return;
++  }
++  $("#btnCast")?.classList.add("active");
++  const modeLabel = castState.mode === "dlna"
++    ? `DLNA · ${castState.targetName || "电视"}`
++    : `投屏码 ${castState.code}`;
++  const hasNext = !!(P.eps && P.eps.length > 1 && !P.isLive && P.idx + 1 < P.eps.length);
++  bar.classList.remove("hidden");
++  bar.innerHTML = `
++    <div class="cast-bar-meta">
++      <span class="cast-dot"></span>
++      <span>正在投屏：${esc(modeLabel)}${castState.useProxy ? "（代理流）" : ""}</span>
++    </div>
++    <div class="cast-bar-btns">
++      <button type="button" class="cast-mini-btn accent" data-cast-act="toggle">${castState.paused ? "继续" : "暂停"}</button>
++      ${!P.isLive ? `<button type="button" class="cast-mini-btn" data-cast-act="rew">-30s</button>
++      <button type="button" class="cast-mini-btn" data-cast-act="fwd">+30s</button>` : ""}
++      ${hasNext ? `<button type="button" class="cast-mini-btn" data-cast-act="next">下一集</button>` : ""}
++      <button type="button" class="cast-mini-btn" data-cast-act="proxy">${castState.useProxy ? "切直链" : "切代理"}</button>
++      <button type="button" class="cast-mini-btn danger" data-cast-act="stop">退出</button>
++    </div>`;
++  bar.querySelectorAll("[data-cast-act]").forEach((btn) => {
++    btn.onclick = () => handleCastBarAction(btn.dataset.castAct);
++  });
++}
++
++async function handleCastBarAction(act) {
++  if (!castState.active) return;
++  if (act === "stop") {
++    await stopActiveCast(false);
++    return;
++  }
++  if (act === "next") {
++    playNextEpisode();
++    return;
++  }
++  if (act === "proxy") {
++    castState.useProxy = !castState.useProxy;
++    await syncCastEpisode();
++    renderCastBar();
++    return;
++  }
++  if (act === "toggle") {
++    const nextAction = castState.paused ? "play" : "pause";
++    if (castState.mode === "dlna") {
++      window.NovaNative?.controlDlna?.(nextAction, "");
++      castState.paused = !castState.paused;
++      renderCastBar();
++    } else if (castState.mode === "room") {
++      try {
++        await nhApi("/api/cast/command", "POST", { code: castState.code, action: nextAction });
++        castState.paused = !castState.paused;
++        renderCastBar();
++      } catch (e) { toast(e.message || "遥控失败"); }
++    }
++    return;
++  }
++  if (act === "rew" || act === "fwd") {
++    const delta = act === "rew" ? -30 : 30;
++    if (castState.mode === "room") {
++      try {
++        await nhApi("/api/cast/command", "POST", { code: castState.code, action: "seek", payload: { delta } });
++        toast(delta > 0 ? "大屏已快进 30 秒" : "大屏已快退 30 秒");
++      } catch (e) { toast(e.message || "大屏跳转失败"); }
++    } else if (castState.mode === "dlna") {
++      const v = $("#video");
++      const baseSec = Math.max(0, Math.floor((v?.currentTime || 0) + delta));
++      if (v) v.currentTime = baseSec;
++      window.NovaNative?.controlDlna?.("seek", String(baseSec));
++      toast(`已发送跳转指令（${fmt(baseSec)}）`);
++    }
++  }
++}
++
++async function syncCastEpisode() {
++  if (!castState.active) return;
++  const info = await resolveCastUrls();
++  if (!info) return toast("当前播放源地址不支持投屏");
++  const targetUrl = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
++  if (castState.mode === "dlna" && castState.udn) {
++    window.NovaNative?.castDlna?.(castState.udn, targetUrl, `${info.title} ${info.episode}`.trim());
++  } else if (castState.mode === "room" && castState.code) {
++    try {
++      await nhApi("/api/cast/command", "POST", {
++        code: castState.code,
++        action: "load",
++        payload: {
++          url: targetUrl,
++          proxy_url: info.proxyUrl || "",
++          title: info.title,
++          episode: info.episode,
++          position: info.position,
++          is_live: info.is_live,
++        },
++      });
++      toast(`已同步推送到投屏码 ${castState.code}`);
++    } catch (e) {
++      toast(e.message || "同步投屏失败");
++    }
++  }
++}
++
++async function stopActiveCast(silent = false) {
++  const prevMode = castState.mode;
++  const prevCode = castState.code;
++  castState.active = false;
++  castState.mode = "";
++  castState.paused = false;
++  renderCastBar();
++  if (prevMode === "dlna") {
++    try { window.NovaNative?.controlDlna?.("stop", ""); } catch {}
++  } else if (prevMode === "room" && prevCode) {
++    try { await nhApi("/api/cast/command", "POST", { code: prevCode, action: "stop" }); } catch {}
++  }
++  if (!silent) toast("已退出投屏");
++}
++
++async function startDlnaCast(udn, name) {
++  const info = await resolveCastUrls();
++  if (!info) return toast("当前线路不支持投屏");
++  const targetUrl = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
++  try { $("#video")?.pause(); } catch {}
++  castState.active = true;
++  castState.mode = "dlna";
++  castState.udn = udn;
++  castState.targetName = name || "DLNA 电视";
++  castState.paused = false;
++  renderCastBar();
++  window.NovaNative.castDlna(udn, targetUrl, `${info.title} ${info.episode}`.trim());
++  toast(`正在推送至 ${castState.targetName}…`);
++}
++
++async function startRoomCast(rawCode) {
++  const code = String(rawCode || "").trim().toUpperCase();
++  if (!/^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}$/.test(code)) {
++    return toast("请输入 4 位大屏投屏码");
++  }
++  const info = await resolveCastUrls();
++  if (!info) return toast("当前线路不支持投屏");
++  const targetUrl = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
++  await nhApi("/api/cast/command", "POST", {
++    code,
++    action: "load",
++    payload: {
++      url: targetUrl,
++      proxy_url: info.proxyUrl || "",
++      title: info.title,
++      episode: info.episode,
++      position: info.position,
++      is_live: info.is_live,
++    },
++  });
++  localStorage.setItem("nh_last_cast_code", code);
++  try { $("#video")?.pause(); } catch {}
++  castState.active = true;
++  castState.mode = "room";
++  castState.code = code;
++  castState.targetName = `大屏 ${code}`;
++  castState.paused = false;
++  renderCastBar();
++  toast(`已投屏至大屏 ${code}`);
++}
++
++function closeCastModal() {
++  const m = $("#modal");
++  if (m) m.classList.add("hidden");
++  $("#modalOk").onclick = $("#modalCancel").onclick = null;
++}
++
++function renderCastDeviceList() {
++  const box = $("#castDlnaList");
++  if (!box) return;
++  if (castState.scanning) {
++    box.innerHTML = `<div class="hint" style="padding:6px 0">正在扫描局域网支持 DLNA 的电视/盒子…</div>`;
++    return;
++  }
++  if (!castState.devices.length) {
++    box.innerHTML = `<div class="hint" style="padding:6px 0">未发现 DLNA 电视，请确保手机与电视在同一 Wi-Fi，或改用下方投屏码/系统投屏。</div>`;
++    return;
++  }
++  box.innerHTML = castState.devices.map((d) => `
++    <button type="button" class="cast-dev-item" data-dlna-udn="${esc(d.udn)}" data-dlna-name="${esc(d.name)}">
++      <span>${esc(d.name)}</span>
++      <small>${esc(d.host || "DLNA")} · 点击投屏</small>
++    </button>`).join("");
++  box.querySelectorAll("[data-dlna-udn]").forEach((btn) => {
++    btn.onclick = () => {
++      closeCastModal();
++      startDlnaCast(btn.dataset.dlnaUdn, btn.dataset.dlnaName);
++    };
++  });
++}
++
++window.__nhDlnaDevices = (res) => {
++  castState.scanning = false;
++  castState.devices = Array.isArray(res?.devices) ? res.devices : [];
++  renderCastDeviceList();
++};
++
++window.__nhDlnaResult = (res) => {
++  if (!res) return;
++  if (res.message) toast(res.message);
++  if (!res.ok && res.action === "cast") {
++    castState.active = false;
++    renderCastBar();
++  }
++};
++
++function triggerDlnaScan() {
++  if (!window.NovaNative || typeof window.NovaNative.scanDlnaDevices !== "function") return;
++  castState.scanning = true;
++  renderCastDeviceList();
++  window.NovaNative.scanDlnaDevices();
++}
++
++async function openCastModal() {
++  const rawUrl = getCurrentCastRawUrl();
++  if (!rawUrl) return toast("当前没有可投屏的视频地址");
++  const hasNativeCast = !!(window.NovaNative && typeof window.NovaNative.hasCastBridge === "function" && window.NovaNative.hasCastBridge());
++  const hasAirPlay = !!(typeof $("#video")?.webkitShowPlaybackTargetPicker === "function");
++  const lastCode = localStorage.getItem("nh_last_cast_code") || "";
++  const tvPageUrl = new URL("tv.html", location.href).href;
++
++  const modalPromise = modal("选择投屏方式", `
++    <div style="text-align:left">
++      <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-2);margin-bottom:10px;cursor:pointer">
++        <input id="castProxyChk" type="checkbox" style="width:auto" ${castState.useProxy ? "checked" : ""}>
++        <span>使用节点代理转发（直链黑屏或防盗链时勾选）</span>
++      </label>
++
++      ${hasNativeCast ? `
++      <div class="cast-section">
++        <div class="cast-section-head">
++          <span>1. 局域网 DLNA 电视直投</span>
++          <button type="button" id="btnScanDlna" class="cast-mini-btn accent">重新扫描</button>
++        </div>
++        <div id="castDlnaList" class="cast-dev-list"></div>
++      </div>` : ""}
++
++      <div class="cast-section">
++        <div class="cast-section-head">
++          <span>${hasNativeCast ? "2." : "1."} 4 位投屏码大屏投屏（跨网可用）</span>
++          <button type="button" id="btnCopyTvUrl" class="cast-mini-btn">复制大屏地址</button>
++        </div>
++        <div class="hint" style="font-size:11.5px;word-break:break-all">电视/电脑浏览器打开：${esc(tvPageUrl)}</div>
++        <div class="cast-code-row">
++          <input id="castCodeIn" class="cast-code-input" maxlength="4" placeholder="4位码" value="${esc(lastCode)}">
++          <button type="button" id="btnSendRoomCast" class="btn primary" style="padding:8px 14px;flex-shrink:0">推送大屏</button>
++        </div>
++      </div>
++
++      <div class="cast-section" style="margin-bottom:0">
++        <div class="cast-section-head">
++          <span>${hasNativeCast ? "3." : "2."} 更多投屏与播放方式</span>
++        </div>
++        <div class="cast-more-grid">
++          ${hasNativeCast ? `<button type="button" id="btnSysCast" class="cast-more-btn">系统无线投屏</button>
++          <button type="button" id="btnExtPlay" class="cast-more-btn">外部播放器打开</button>` : ""}
++          ${hasAirPlay ? `<button type="button" id="btnAirPlay" class="cast-more-btn">AirPlay 隔空播放</button>` : ""}
++          <button type="button" id="btnCopyCastUrl" class="cast-more-btn">复制播放链接</button>
++        </div>
++      </div>
++    </div>`);
++
++  setTimeout(() => {
++    $("#castProxyChk")?.addEventListener("change", (e) => { castState.useProxy = !!e.target.checked; });
++    if (hasNativeCast) {
++      $("#btnScanDlna")?.addEventListener("click", triggerDlnaScan);
++      triggerDlnaScan();
++      $("#btnSysCast")?.addEventListener("click", () => {
++        closeCastModal();
++        window.NovaNative.openSystemCastSettings();
++      });
++      $("#btnExtPlay")?.addEventListener("click", async () => {
++        const info = await resolveCastUrls();
++        if (!info) return toast("无法获取播放地址");
++        const u = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
++        closeCastModal();
++        window.NovaNative.openExternalPlayer(u, `${info.title} ${info.episode}`.trim());
++      });
++    }
++    $("#btnCopyTvUrl")?.addEventListener("click", async () => {
++      try { await navigator.clipboard.writeText(tvPageUrl); toast("已复制大屏接收地址"); }
++      catch { toast(tvPageUrl, 3000); }
++    });
++    $("#btnSendRoomCast")?.addEventListener("click", async () => {
++      const code = $("#castCodeIn")?.value || "";
++      try {
++        await startRoomCast(code);
++        closeCastModal();
++      } catch (e) {
++        toast(e.message || "大屏投屏失败");
++      }
++    });
++    $("#btnAirPlay")?.addEventListener("click", () => {
++      closeCastModal();
++      try { $("#video")?.webkitShowPlaybackTargetPicker?.(); }
++      catch { toast("当前设备暂不支持 AirPlay 弹窗"); }
++    });
++    $("#btnCopyCastUrl")?.addEventListener("click", async () => {
++      const info = await resolveCastUrls();
++      const u = info ? ((castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl) : rawUrl;
++      try { await navigator.clipboard.writeText(u); toast("已复制视频播放链接"); }
++      catch { toast(u, 3000); }
++    });
++  }, 0);
++
++  await modalPromise;
++}
+ ["pointerdown", "input", "change"].forEach((ev) => {
+   $(".player-ctrl")?.addEventListener(ev, () => showFsControls(true));
+   $(".player-head")?.addEventListener(ev, () => showFsControls(true));
+@@ -3033,7 +3478,7 @@ function renderMe() {
+           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
+             <span>${u ? esc(u.username) : "未登录游客"}</span>
+             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
+-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.8</span>
++            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.9</span>
+           </div>
+           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
+         </div>
+@@ -3291,6 +3736,10 @@ async function loadNovelCategory(cat = curNovelCat) {
+ 
+ async function searchNovel(q) {
+   if (!q) return;
++  cancelActiveSearch(true);
++  const mine = ++viewRequest;
++  const ac = new AbortController();
++  _searchAbort = ac;
+   novelIsSearch = true;
+   novelSearchKw = q;
+   if (currentRoute !== "n_store") {
+@@ -3301,14 +3750,17 @@ async function searchNovel(q) {
+   setSearchLoading(true);
+   $("#view").innerHTML = `<div class="section-title">${ico("search")} 搜索：${esc(q)}</div>${renderSearchLoadingHtml(q, "正在检索书城书库…")}`;
+   try {
+-    const r = await fetch(`/api/novel/search?q=${encodeURIComponent(q)}`);
++    const r = await fetch(`/api/novel/search?q=${encodeURIComponent(q)}`, { signal: ac.signal });
+     const d = await r.json();
++    if (mine !== viewRequest || ac.signal.aborted) return;
+     novelStoreList = sortByExactMatch(Array.isArray(d.items) ? d.items : [], q, (x) => x.title || x.name, (x) => x.author);
+     renderNovelStore();
+   } catch (e) {
++    if (mine !== viewRequest || ac.signal.aborted) return;
+     $("#view").innerHTML = `<div class="empty">检索失败：${esc(e.message)}</div>`;
+   } finally {
+-    setSearchLoading(false);
++    if (_searchAbort === ac) _searchAbort = null;
++    if (mine === viewRequest) setSearchLoading(false);
+   }
+ }
+ 
+diff --git a/docs/app.js b/docs/app.js
+index b3e1137..2ec532f 100644
+--- a/docs/app.js
++++ b/docs/app.js
+@@ -254,6 +254,9 @@ function closePlayer(fromPop = false) {
+     const v = $("#video");
+     if (v && v.currentTime > 1) saveProgress(P.vodKey, P.idx, v.currentTime, true);
+   }
++  if (typeof castState !== "undefined" && castState.active && typeof stopActiveCast === "function") {
++    stopActiveCast(true);
++  }
+   if (typeof openFsEpDrawer === "function") openFsEpDrawer(false);
+   if (typeof setPlayerFullscreen === "function") setPlayerFullscreen(false);
+   destroyPlayers();
+@@ -278,7 +281,8 @@ function closeReader() {
+   syncModeFab();
+ }
+ function goBack(fromPop = false) {
+-  if (typeof vodClient !== "undefined") { vodClient.cancel(); viewRequest++; }
++  if (typeof cancelActiveSearch === "function") cancelActiveSearch(true);
++  else if (typeof vodClient !== "undefined") { vodClient.cancel(); viewRequest++; }
+   if (!$("#tocMask").classList.contains("hidden")) { $("#tocMask").classList.add("hidden"); return; }
+   if (!$("#readerLayer").classList.contains("hidden")) { closeReader(); return; }
+   if (!$("#playerLayer").classList.contains("hidden")) { closePlayer(fromPop); return; }
+@@ -393,6 +397,7 @@ function updateTopbar() {
+ }
+ 
+ function switchMode(mode, targetRoute) {
++  if (typeof cancelActiveSearch === "function") cancelActiveSearch(true);
+   appMode = mode;
+   set(K.MODE, mode);
+   updateTopbar();
+@@ -404,7 +409,8 @@ function switchMode(mode, targetRoute) {
+ let _bootDone = false;
+ function go(route) {
+   const applyRoute = () => {
+-    vodClient.cancel(); viewRequest++;
++    if (typeof cancelActiveSearch === "function") cancelActiveSearch(true);
++    else { vodClient.cancel(); viewRequest++; }
+     currentRoute = route;
+     viewStack.length = 0;
+     document.body.classList.remove("detail-view");
+@@ -463,12 +469,38 @@ function syncSearchClear() {
+   const inp = $("#searchInput"), clr = $("#searchClear");
+   if (inp && clr) clr.classList.toggle("hidden", !inp.value.trim());
+ }
++let _searchAbort = null;
++let _searchLoading = false;
+ function setSearchLoading(on) {
++  _searchLoading = !!on;
+   const bar = $("#topProgress"), btn = $("#searchBtn");
+   if (bar) bar.classList.toggle("hidden", !on);
+   if (btn) {
+-    btn.disabled = !!on;
+-    btn.innerHTML = on ? `<progress aria-label="检索中" class="loading-spinner"></progress>` : "搜索";
++    btn.disabled = false;
++    btn.classList.toggle("is-cancel", !!on);
++    btn.setAttribute("aria-label", on ? "取消搜索" : "搜索");
++    btn.textContent = on ? "取消" : "搜索";
++  }
++}
++function cancelActiveSearch(silent = false) {
++  const hadActive = _searchLoading || !!_searchAbort;
++  if (_searchAbort) {
++    try { _searchAbort.abort(); } catch {}
++    _searchAbort = null;
++  }
++  if (typeof vodClient !== "undefined" && typeof vodClient.cancel === "function") {
++    vodClient.cancel();
++  }
++  if (typeof viewRequest !== "undefined") viewRequest++;
++  setSearchLoading(false);
++  if (!silent && hadActive && typeof toast === "function") toast("已取消搜索");
++}
++function cancelSearchAndLeave() {
++  cancelActiveSearch(false);
++  if (viewStack.length > 0) {
++    goBack();
++  } else if (typeof routes[currentRoute] === "function") {
++    routes[currentRoute]();
+   }
+ }
+ function renderSearchLoadingHtml(q, sub = "正在匹配多路资源，请稍候…") {
+@@ -476,6 +508,7 @@ function renderSearchLoadingHtml(q, sub = "正在匹配多路资源，请稍候
+     <div class="nh-spinner-lg" aria-hidden="true"></div>
+     <div class="search-loading-title">正在搜索「${esc(q)}」</div>
+     <div class="search-loading-sub">${esc(sub)}</div>
++    <button type="button" class="btn ghost" data-cancel-search="1" style="margin-top:12px;padding:6px 18px;font-size:12.5px">取消搜索</button>
+   </div>`;
+ }
+ function renderSkeletonHtml(type = "grid", count = 6, bare = false) {
+@@ -507,7 +540,15 @@ const triggerSearch = () => {
+     if (q) doSearch(q); else go("home");
+   }
+ };
+-$("#searchBtn").addEventListener("click", triggerSearch);
++$("#searchBtn").addEventListener("click", () => {
++  if (_searchLoading) { cancelSearchAndLeave(); return; }
++  triggerSearch();
++});
++document.addEventListener("click", (e) => {
++  if (e.target && e.target.closest && e.target.closest("[data-cancel-search]")) {
++    cancelSearchAndLeave();
++  }
++});
+ $("#searchInput").addEventListener("keydown", (e) => {
+   if (e.key === "Enter") { e.preventDefault(); triggerSearch(); }
+ });
+@@ -683,6 +724,10 @@ function sortByExactMatch(list, query, getTitle, getSub) {
+ 
+ async function searchMusic(q) {
+   if (!q) return;
++  cancelActiveSearch(true);
++  const mine = ++viewRequest;
++  const ac = new AbortController();
++  _searchAbort = ac;
+   setSearchLoading(true);
+   const view = $("#view");
+   if (view) view.innerHTML = `<div class="section-title">${ico("search")} 搜索：${esc(q)}</div>${renderSearchLoadingHtml(q, "正在检索曲库与歌单…")}`;
+@@ -693,7 +738,9 @@ async function searchMusic(q) {
+   };
+   try {
+     // 优先检索高可播率酷我曲库，并清理歌手转义分隔符
+-    const kwRes = await fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`).then((r) => r.ok ? r.json() : []).catch(() => []);
++    const kwRes = await fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`, { signal: ac.signal })
++      .then((r) => r.ok ? r.json() : []).catch(() => []);
++    if (mine !== viewRequest || ac.signal.aborted) return;
+     if (Array.isArray(kwRes)) {
+       kwRes.forEach((x) => {
+         const nm = String(x.name || "").replace(/\u00a0/g, " ").trim();
+@@ -708,7 +755,9 @@ async function searchMusic(q) {
+     }
+     // 仅当酷我有效结果不足 5 首时才回退补充网易云曲库，减少不可播杂曲
+     if (kwList.length < 5) {
+-      const neRes = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=30&pages=1`, 7000).catch(() => []);
++      const neRes = await fetch(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=30&pages=1`, { signal: ac.signal })
++        .then((r) => r.ok ? r.json() : []).catch(() => []);
++      if (mine !== viewRequest || ac.signal.aborted) return;
+       if (Array.isArray(neRes)) {
+         neRes.forEach((x) => {
+           const nm = String(x.name || "").trim() || "未知歌曲";
+@@ -727,8 +776,10 @@ async function searchMusic(q) {
+       }
+     }
+   } finally {
+-    setSearchLoading(false);
++    if (_searchAbort === ac) _searchAbort = null;
++    if (mine === viewRequest) setSearchLoading(false);
+   }
++  if (mine !== viewRequest || ac.signal.aborted) return;
+   const seen = new Set();
+   const merged = [];
+   kwList.concat(neList).forEach((item) => {
+@@ -864,28 +915,50 @@ async function resolveSongUrl(song, brOverride = null) {
+ async function loadSongLyrics(song, token) {
+   curLyrics = []; activeLrcIdx = -1;
+   const targets = [];
++  const songName = String(song.name || "").trim();
++  const songArtist = String(song.artist || "").trim();
+   if (song.source === "kuwo" || song._kwRid) {
+     const rid = song._kwRid || song.id;
+     targets.push(async () => {
+-      const r = await fetch(`/kw?act=lrc&id=${encodeURIComponent(rid)}`);
++      const r = await fetch(`/kw?act=lrc&id=${encodeURIComponent(rid)}&name=${encodeURIComponent(songName)}&artist=${encodeURIComponent(songArtist)}`);
+       const d = r.ok ? await r.json() : null;
+       return d?.lrc || "";
+     });
++  }
++  if (song.lrc) targets.push(() => fetchText(song.lrc, 5000));
++  if (song.id && song.source !== "kuwo" && song.source !== "tencent") {
++    targets.push(async () => {
++      const d = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id=${encodeURIComponent(song.id)}`, 5000);
++      return d?.lyric || "";
++    });
++  }
++  // 全曲源统一兜底：按歌名+歌手检索 gdstudio（网易云）标准 LRC，覆盖酷我/收藏旧曲目
++  if (songName) {
++    targets.push(async () => {
++      const kw = `${songName} ${songArtist}`.trim();
++      const list = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(kw)}&count=5&pages=1`, 5000);
++      if (!Array.isArray(list) || !list.length) return "";
++      const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, "");
++      const wn = norm(songName), wa = norm(songArtist);
++      const hit = list.find((it) => {
++        const iname = norm(it?.name);
++        const iart = norm(Array.isArray(it?.artist) ? it.artist.join("/") : it?.artist);
++        return wn && iname === wn && (!wa || iart.includes(wa) || wa.includes(iart));
++      }) || list[0];
++      if (!hit?.id) return "";
++      const ld = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id=${encodeURIComponent(hit.id)}`, 5000);
++      return ld?.lyric || ld?.tlyric || "";
++    });
++  }
++  if (song.source === "kuwo" || song._kwRid) {
+     targets.push(async () => {
+-      const s = await fetchJson(`https://api.vkeys.cn/v2/music/tencent?word=${encodeURIComponent(song.name + " " + (song.artist || ""))}&choose=1`, 5000);
++      const s = await fetchJson(`https://api.vkeys.cn/v2/music/tencent?word=${encodeURIComponent((songName + " " + songArtist).trim())}&choose=1`, 3500);
+       const tid = s?.data?.id;
+       if (!tid) return "";
+-      const ld = await fetchJson(`https://api.vkeys.cn/v2/music/tencent/lyric?id=${tid}`, 5000);
++      const ld = await fetchJson(`https://api.vkeys.cn/v2/music/tencent/lyric?id=${tid}`, 3500);
+       return ld?.data?.lrc || "";
+     });
+   }
+-  if (song.source !== "kuwo") {
+-    if (song.lrc) targets.push(() => fetchText(song.lrc, 5000));
+-    if (song.id && song.source !== "tencent") targets.push(async () => {
+-      const d = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id=${song.id}`, 5000);
+-      return d?.lyric || "";
+-    });
+-  }
+   for (const fn of targets) {
+     try {
+       const txt = await fn();
+@@ -2118,6 +2191,9 @@ function selectEpisodeIndex(i) {
+   renderEpisodes();
+   mountSource(P.eps[i].url);
+   $("#playerTitle").textContent = P.title.replace(/ · .*$/, "") + " · " + P.eps[i].name;
++  if (typeof castState !== "undefined" && castState.active && typeof syncCastEpisode === "function") {
++    syncCastEpisode();
++  }
+ }
+ function renderEpisodes() {
+   const el = $("#epList");
+@@ -2558,6 +2634,375 @@ $("#btnVodDownload")?.addEventListener("click", () => {
+   const title = (P.title || "视频").split(" · ")[0];
+   downloadVodEpisode(title, ep.name || "正片", ep.url);
+ });
++$("#btnCast")?.addEventListener("click", openCastModal);
++
++/* ============ 多方式可选投屏（DLNA + 4位投屏码大屏 + 系统投屏/外部播放器/AirPlay） ============ */
++const castState = {
++  active: false,
++  mode: "", // "dlna" | "room"
++  targetName: "",
++  udn: "",
++  code: "",
++  paused: false,
++  useProxy: false,
++  devices: [],
++  scanning: false,
++};
++
++function getCurrentCastRawUrl() {
++  const ep = (P.eps && P.eps[P.idx]) || null;
++  if (ep && ep.url) return ep.url;
++  const v = $("#video");
++  return v?.currentSrc || v?.src || "";
++}
++
++async function resolveCastUrls() {
++  const rawUrl = getCurrentCastRawUrl();
++  if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return null;
++  let gatewayBase = window.__NH_API_BASE__ || "";
++  if (!gatewayBase && location.protocol.startsWith("http") && !location.hostname.endsWith("github.io")) {
++    gatewayBase = location.origin;
++  }
++  let proxyUrl = "";
++  if (gatewayBase && !rawUrl.includes("/api/live/m3u8")) {
++    try {
++      const t = await nhApi("/api/media/ticket");
++      if (t && t.ticket) {
++        proxyUrl = `${gatewayBase.replace(/\/+$/, "")}/api/live/m3u8?url=${encodeURIComponent(rawUrl)}&ticket=${encodeURIComponent(t.ticket)}`;
++      }
++    } catch {}
++  }
++  const titleParts = (P.title || "星隅视频").split(" · ");
++  const title = titleParts[0] || "星隅视频";
++  const episode = (P.eps && P.eps[P.idx] && P.eps[P.idx].name) || titleParts[1] || "";
++  const v = $("#video");
++  const position = (!P.isLive && v && isFinite(v.currentTime)) ? Math.floor(v.currentTime) : 0;
++  return {
++    rawUrl,
++    proxyUrl,
++    title,
++    episode,
++    position,
++    is_live: !!P.isLive,
++  };
++}
++
++function renderCastBar() {
++  const bar = $("#castBar");
++  if (!bar) return;
++  if (!castState.active) {
++    bar.classList.add("hidden");
++    bar.innerHTML = "";
++    $("#btnCast")?.classList.remove("active");
++    return;
++  }
++  $("#btnCast")?.classList.add("active");
++  const modeLabel = castState.mode === "dlna"
++    ? `DLNA · ${castState.targetName || "电视"}`
++    : `投屏码 ${castState.code}`;
++  const hasNext = !!(P.eps && P.eps.length > 1 && !P.isLive && P.idx + 1 < P.eps.length);
++  bar.classList.remove("hidden");
++  bar.innerHTML = `
++    <div class="cast-bar-meta">
++      <span class="cast-dot"></span>
++      <span>正在投屏：${esc(modeLabel)}${castState.useProxy ? "（代理流）" : ""}</span>
++    </div>
++    <div class="cast-bar-btns">
++      <button type="button" class="cast-mini-btn accent" data-cast-act="toggle">${castState.paused ? "继续" : "暂停"}</button>
++      ${!P.isLive ? `<button type="button" class="cast-mini-btn" data-cast-act="rew">-30s</button>
++      <button type="button" class="cast-mini-btn" data-cast-act="fwd">+30s</button>` : ""}
++      ${hasNext ? `<button type="button" class="cast-mini-btn" data-cast-act="next">下一集</button>` : ""}
++      <button type="button" class="cast-mini-btn" data-cast-act="proxy">${castState.useProxy ? "切直链" : "切代理"}</button>
++      <button type="button" class="cast-mini-btn danger" data-cast-act="stop">退出</button>
++    </div>`;
++  bar.querySelectorAll("[data-cast-act]").forEach((btn) => {
++    btn.onclick = () => handleCastBarAction(btn.dataset.castAct);
++  });
++}
++
++async function handleCastBarAction(act) {
++  if (!castState.active) return;
++  if (act === "stop") {
++    await stopActiveCast(false);
++    return;
++  }
++  if (act === "next") {
++    playNextEpisode();
++    return;
++  }
++  if (act === "proxy") {
++    castState.useProxy = !castState.useProxy;
++    await syncCastEpisode();
++    renderCastBar();
++    return;
++  }
++  if (act === "toggle") {
++    const nextAction = castState.paused ? "play" : "pause";
++    if (castState.mode === "dlna") {
++      window.NovaNative?.controlDlna?.(nextAction, "");
++      castState.paused = !castState.paused;
++      renderCastBar();
++    } else if (castState.mode === "room") {
++      try {
++        await nhApi("/api/cast/command", "POST", { code: castState.code, action: nextAction });
++        castState.paused = !castState.paused;
++        renderCastBar();
++      } catch (e) { toast(e.message || "遥控失败"); }
++    }
++    return;
++  }
++  if (act === "rew" || act === "fwd") {
++    const delta = act === "rew" ? -30 : 30;
++    if (castState.mode === "room") {
++      try {
++        await nhApi("/api/cast/command", "POST", { code: castState.code, action: "seek", payload: { delta } });
++        toast(delta > 0 ? "大屏已快进 30 秒" : "大屏已快退 30 秒");
++      } catch (e) { toast(e.message || "大屏跳转失败"); }
++    } else if (castState.mode === "dlna") {
++      const v = $("#video");
++      const baseSec = Math.max(0, Math.floor((v?.currentTime || 0) + delta));
++      if (v) v.currentTime = baseSec;
++      window.NovaNative?.controlDlna?.("seek", String(baseSec));
++      toast(`已发送跳转指令（${fmt(baseSec)}）`);
++    }
++  }
++}
++
++async function syncCastEpisode() {
++  if (!castState.active) return;
++  const info = await resolveCastUrls();
++  if (!info) return toast("当前播放源地址不支持投屏");
++  const targetUrl = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
++  if (castState.mode === "dlna" && castState.udn) {
++    window.NovaNative?.castDlna?.(castState.udn, targetUrl, `${info.title} ${info.episode}`.trim());
++  } else if (castState.mode === "room" && castState.code) {
++    try {
++      await nhApi("/api/cast/command", "POST", {
++        code: castState.code,
++        action: "load",
++        payload: {
++          url: targetUrl,
++          proxy_url: info.proxyUrl || "",
++          title: info.title,
++          episode: info.episode,
++          position: info.position,
++          is_live: info.is_live,
++        },
++      });
++      toast(`已同步推送到投屏码 ${castState.code}`);
++    } catch (e) {
++      toast(e.message || "同步投屏失败");
++    }
++  }
++}
++
++async function stopActiveCast(silent = false) {
++  const prevMode = castState.mode;
++  const prevCode = castState.code;
++  castState.active = false;
++  castState.mode = "";
++  castState.paused = false;
++  renderCastBar();
++  if (prevMode === "dlna") {
++    try { window.NovaNative?.controlDlna?.("stop", ""); } catch {}
++  } else if (prevMode === "room" && prevCode) {
++    try { await nhApi("/api/cast/command", "POST", { code: prevCode, action: "stop" }); } catch {}
++  }
++  if (!silent) toast("已退出投屏");
++}
++
++async function startDlnaCast(udn, name) {
++  const info = await resolveCastUrls();
++  if (!info) return toast("当前线路不支持投屏");
++  const targetUrl = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
++  try { $("#video")?.pause(); } catch {}
++  castState.active = true;
++  castState.mode = "dlna";
++  castState.udn = udn;
++  castState.targetName = name || "DLNA 电视";
++  castState.paused = false;
++  renderCastBar();
++  window.NovaNative.castDlna(udn, targetUrl, `${info.title} ${info.episode}`.trim());
++  toast(`正在推送至 ${castState.targetName}…`);
++}
++
++async function startRoomCast(rawCode) {
++  const code = String(rawCode || "").trim().toUpperCase();
++  if (!/^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}$/.test(code)) {
++    return toast("请输入 4 位大屏投屏码");
++  }
++  const info = await resolveCastUrls();
++  if (!info) return toast("当前线路不支持投屏");
++  const targetUrl = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
++  await nhApi("/api/cast/command", "POST", {
++    code,
++    action: "load",
++    payload: {
++      url: targetUrl,
++      proxy_url: info.proxyUrl || "",
++      title: info.title,
++      episode: info.episode,
++      position: info.position,
++      is_live: info.is_live,
++    },
++  });
++  localStorage.setItem("nh_last_cast_code", code);
++  try { $("#video")?.pause(); } catch {}
++  castState.active = true;
++  castState.mode = "room";
++  castState.code = code;
++  castState.targetName = `大屏 ${code}`;
++  castState.paused = false;
++  renderCastBar();
++  toast(`已投屏至大屏 ${code}`);
++}
++
++function closeCastModal() {
++  const m = $("#modal");
++  if (m) m.classList.add("hidden");
++  $("#modalOk").onclick = $("#modalCancel").onclick = null;
++}
++
++function renderCastDeviceList() {
++  const box = $("#castDlnaList");
++  if (!box) return;
++  if (castState.scanning) {
++    box.innerHTML = `<div class="hint" style="padding:6px 0">正在扫描局域网支持 DLNA 的电视/盒子…</div>`;
++    return;
++  }
++  if (!castState.devices.length) {
++    box.innerHTML = `<div class="hint" style="padding:6px 0">未发现 DLNA 电视，请确保手机与电视在同一 Wi-Fi，或改用下方投屏码/系统投屏。</div>`;
++    return;
++  }
++  box.innerHTML = castState.devices.map((d) => `
++    <button type="button" class="cast-dev-item" data-dlna-udn="${esc(d.udn)}" data-dlna-name="${esc(d.name)}">
++      <span>${esc(d.name)}</span>
++      <small>${esc(d.host || "DLNA")} · 点击投屏</small>
++    </button>`).join("");
++  box.querySelectorAll("[data-dlna-udn]").forEach((btn) => {
++    btn.onclick = () => {
++      closeCastModal();
++      startDlnaCast(btn.dataset.dlnaUdn, btn.dataset.dlnaName);
++    };
++  });
++}
++
++window.__nhDlnaDevices = (res) => {
++  castState.scanning = false;
++  castState.devices = Array.isArray(res?.devices) ? res.devices : [];
++  renderCastDeviceList();
++};
++
++window.__nhDlnaResult = (res) => {
++  if (!res) return;
++  if (res.message) toast(res.message);
++  if (!res.ok && res.action === "cast") {
++    castState.active = false;
++    renderCastBar();
++  }
++};
++
++function triggerDlnaScan() {
++  if (!window.NovaNative || typeof window.NovaNative.scanDlnaDevices !== "function") return;
++  castState.scanning = true;
++  renderCastDeviceList();
++  window.NovaNative.scanDlnaDevices();
++}
++
++async function openCastModal() {
++  const rawUrl = getCurrentCastRawUrl();
++  if (!rawUrl) return toast("当前没有可投屏的视频地址");
++  const hasNativeCast = !!(window.NovaNative && typeof window.NovaNative.hasCastBridge === "function" && window.NovaNative.hasCastBridge());
++  const hasAirPlay = !!(typeof $("#video")?.webkitShowPlaybackTargetPicker === "function");
++  const lastCode = localStorage.getItem("nh_last_cast_code") || "";
++  const tvPageUrl = new URL("tv.html", location.href).href;
++
++  const modalPromise = modal("选择投屏方式", `
++    <div style="text-align:left">
++      <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-2);margin-bottom:10px;cursor:pointer">
++        <input id="castProxyChk" type="checkbox" style="width:auto" ${castState.useProxy ? "checked" : ""}>
++        <span>使用节点代理转发（直链黑屏或防盗链时勾选）</span>
++      </label>
++
++      ${hasNativeCast ? `
++      <div class="cast-section">
++        <div class="cast-section-head">
++          <span>1. 局域网 DLNA 电视直投</span>
++          <button type="button" id="btnScanDlna" class="cast-mini-btn accent">重新扫描</button>
++        </div>
++        <div id="castDlnaList" class="cast-dev-list"></div>
++      </div>` : ""}
++
++      <div class="cast-section">
++        <div class="cast-section-head">
++          <span>${hasNativeCast ? "2." : "1."} 4 位投屏码大屏投屏（跨网可用）</span>
++          <button type="button" id="btnCopyTvUrl" class="cast-mini-btn">复制大屏地址</button>
++        </div>
++        <div class="hint" style="font-size:11.5px;word-break:break-all">电视/电脑浏览器打开：${esc(tvPageUrl)}</div>
++        <div class="cast-code-row">
++          <input id="castCodeIn" class="cast-code-input" maxlength="4" placeholder="4位码" value="${esc(lastCode)}">
++          <button type="button" id="btnSendRoomCast" class="btn primary" style="padding:8px 14px;flex-shrink:0">推送大屏</button>
++        </div>
++      </div>
++
++      <div class="cast-section" style="margin-bottom:0">
++        <div class="cast-section-head">
++          <span>${hasNativeCast ? "3." : "2."} 更多投屏与播放方式</span>
++        </div>
++        <div class="cast-more-grid">
++          ${hasNativeCast ? `<button type="button" id="btnSysCast" class="cast-more-btn">系统无线投屏</button>
++          <button type="button" id="btnExtPlay" class="cast-more-btn">外部播放器打开</button>` : ""}
++          ${hasAirPlay ? `<button type="button" id="btnAirPlay" class="cast-more-btn">AirPlay 隔空播放</button>` : ""}
++          <button type="button" id="btnCopyCastUrl" class="cast-more-btn">复制播放链接</button>
++        </div>
++      </div>
++    </div>`);
++
++  setTimeout(() => {
++    $("#castProxyChk")?.addEventListener("change", (e) => { castState.useProxy = !!e.target.checked; });
++    if (hasNativeCast) {
++      $("#btnScanDlna")?.addEventListener("click", triggerDlnaScan);
++      triggerDlnaScan();
++      $("#btnSysCast")?.addEventListener("click", () => {
++        closeCastModal();
++        window.NovaNative.openSystemCastSettings();
++      });
++      $("#btnExtPlay")?.addEventListener("click", async () => {
++        const info = await resolveCastUrls();
++        if (!info) return toast("无法获取播放地址");
++        const u = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
++        closeCastModal();
++        window.NovaNative.openExternalPlayer(u, `${info.title} ${info.episode}`.trim());
++      });
++    }
++    $("#btnCopyTvUrl")?.addEventListener("click", async () => {
++      try { await navigator.clipboard.writeText(tvPageUrl); toast("已复制大屏接收地址"); }
++      catch { toast(tvPageUrl, 3000); }
++    });
++    $("#btnSendRoomCast")?.addEventListener("click", async () => {
++      const code = $("#castCodeIn")?.value || "";
++      try {
++        await startRoomCast(code);
++        closeCastModal();
++      } catch (e) {
++        toast(e.message || "大屏投屏失败");
++      }
++    });
++    $("#btnAirPlay")?.addEventListener("click", () => {
++      closeCastModal();
++      try { $("#video")?.webkitShowPlaybackTargetPicker?.(); }
++      catch { toast("当前设备暂不支持 AirPlay 弹窗"); }
++    });
++    $("#btnCopyCastUrl")?.addEventListener("click", async () => {
++      const info = await resolveCastUrls();
++      const u = info ? ((castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl) : rawUrl;
++      try { await navigator.clipboard.writeText(u); toast("已复制视频播放链接"); }
++      catch { toast(u, 3000); }
++    });
++  }, 0);
++
++  await modalPromise;
++}
+ ["pointerdown", "input", "change"].forEach((ev) => {
+   $(".player-ctrl")?.addEventListener(ev, () => showFsControls(true));
+   $(".player-head")?.addEventListener(ev, () => showFsControls(true));
+@@ -3033,7 +3478,7 @@ function renderMe() {
+           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
+             <span>${u ? esc(u.username) : "未登录游客"}</span>
+             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
+-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.8</span>
++            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.9</span>
+           </div>
+           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
+         </div>
+@@ -3291,6 +3736,10 @@ async function loadNovelCategory(cat = curNovelCat) {
+ 
+ async function searchNovel(q) {
+   if (!q) return;
++  cancelActiveSearch(true);
++  const mine = ++viewRequest;
++  const ac = new AbortController();
++  _searchAbort = ac;
+   novelIsSearch = true;
+   novelSearchKw = q;
+   if (currentRoute !== "n_store") {
+@@ -3301,14 +3750,17 @@ async function searchNovel(q) {
+   setSearchLoading(true);
+   $("#view").innerHTML = `<div class="section-title">${ico("search")} 搜索：${esc(q)}</div>${renderSearchLoadingHtml(q, "正在检索书城书库…")}`;
+   try {
+-    const r = await fetch(`/api/novel/search?q=${encodeURIComponent(q)}`);
++    const r = await fetch(`/api/novel/search?q=${encodeURIComponent(q)}`, { signal: ac.signal });
+     const d = await r.json();
++    if (mine !== viewRequest || ac.signal.aborted) return;
+     novelStoreList = sortByExactMatch(Array.isArray(d.items) ? d.items : [], q, (x) => x.title || x.name, (x) => x.author);
+     renderNovelStore();
+   } catch (e) {
++    if (mine !== viewRequest || ac.signal.aborted) return;
+     $("#view").innerHTML = `<div class="empty">检索失败：${esc(e.message)}</div>`;
+   } finally {
+-    setSearchLoading(false);
++    if (_searchAbort === ac) _searchAbort = null;
++    if (mine === viewRequest) setSearchLoading(false);
+   }
+ }
+ 
+diff --git a/docs/development/handoffs/2026-11-27-gemini-batch-upgrade.md b/docs/development/handoffs/2026-11-27-gemini-batch-upgrade.md
+index 224a8f8..ee17fd8 100644
+--- a/docs/development/handoffs/2026-11-27-gemini-batch-upgrade.md
++++ b/docs/development/handoffs/2026-11-27-gemini-batch-upgrade.md
+@@ -57,3 +57,25 @@
+ ## 4. 部署与未完成项说明
+ - 后端与静态网页已通过 **USB ADB 本地转发通道（127.0.0.1:11785）** 推送至平板 `~/novahub/` 并精准重启验证（未走公网）。
+ - `android-app/`（`MainActivity.java`、`AppUpdater.java`）代码已更新并递增至 `v2.4.6 (9)`，需推送至 GitHub 由 `.github/workflows/build-apk.yml` 完成签名构建后，再经 `.\pad.ps1 -InstallApk` 走 ADB 覆盖安装验证。
++
++## 5. v2.4.9 增量交付：多方式可选投屏（2026-11-27 续）
++- **后端投屏码房间（`server.py`）**：
++  - 新增内存级 4 位无歧义投屏码房间 `_CAST_ROOMS`（6 小时 TTL、容量 200 上限），路由 `POST /api/cast/room`、`GET /api/cast/poll`（`hmac.compare_digest` 校验 `secret`）、`POST /api/cast/command`（登录鉴权 + 频率限制 + URL 白名单校验）。
++  - 将 `/tv.html` 加入 `Handler.send_head()` 静态访问白名单。
++- **大屏网页接收器（`tv.html` / `docs/tv.html`）**：
++  - 暗黑影院风独立页面，启动自动展示 4 位投屏码，每 1.5s 增量轮询指令，支持 `Hls.js` / 直连播放、直链失败自动切换 `proxy_url`、远程暂停/播放/快进快退/音量/退出与有声自动播放解锁按钮。
++- **Android 原生零依赖 DLNA 与系统投屏桥接（`android-app/`）**：
++  - 新增 `DlnaCastManager.java`（纯 Android SDK：`WifiManager.MulticastLock` + `DatagramSocket` SSDP 扫描 + `AVTransport` SOAP 推流与遥控）；
++  - `AndroidManifest.xml` 补充 `ACCESS_WIFI_STATE` 与 `CHANGE_WIFI_MULTICAST_STATE`；
++  - `MainActivity.java` 在 `NovaBridge` 暴露 `hasCastBridge`、`scanDlnaDevices`、`castDlna`、`controlDlna`、`openSystemCastSettings`、`openExternalPlayer`（严守 `trustedMainPage` 线程安全规范）；
++  - `build.gradle` 升至 `versionCode 12` / `versionName "2.4.9"`，同步更新 `RELEASE_NOTES.txt`。
++- **前端统一投屏弹窗与遥控条（`index.html`、`style.css`、`app.js` 及 `docs/`）**：
++  - `<video>` 增加 `x-webkit-airplay="allow"`，控制栏新增 `#btnCast` 与顶部遥控条 `#castBar`；
++  - 弹窗同时提供三种可选方式：局域网 DLNA 设备列表、4 位投屏码大屏投屏、系统无线投屏/外部播放器/AirPlay/复制播放链接，并支持直链与节点代理流实时切换及切集自动同步。
++- **搜索取消与流水条修复（`app.js`、`style.css`）**：
++  - 维护全局 `_searchAbort` 与统一 `cancelActiveSearch()` / `cancelSearchAndLeave()`，并在 `goBack()`、`go()`、`switchMode()` 调用，彻底解决后退/切页时 `#topProgress` 流水条卡死与音乐/小说请求未中止的问题；
++  - 搜索进行中时 `#searchBtn` 切换为可点击的「取消」按钮，居中加载卡片也增加「取消搜索」按钮。
++- **音乐歌词兜底修复（`server.py`、`app.js`）**：
++  - `server.py` `/kw?act=lrc` 支持传入 `name`、`artist`，在酷我官方歌词接口异常或为空时自动回退检索 `music-api.gdstudio.xyz`（网易云源）返回标准 LRC；
++  - `app.js` 请求 `/kw?act=lrc` 携带歌名和歌手并解除 `song.source !== "kuwo"` 限制，统一接入多源兜底。
++- **测试与验证**：新增 `tests/test_cast.py` 并扩展 `tests/player_and_cache.test.cjs` 与 `tests/test_frontend.cjs`，全部 Python 与 Node 测试通过。
+diff --git a/docs/index.html b/docs/index.html
+index 02c9038..a2c72d5 100644
+--- a/docs/index.html
++++ b/docs/index.html
+@@ -67,7 +67,7 @@
+ })();
+ </script>
+ <link rel="manifest" href="manifest.json">
+-<link rel="stylesheet" href="style.css?v=20261127-v248">
++<link rel="stylesheet" href="style.css?v=20261127-v249">
+ <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+ <script defer src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+ <style>
+@@ -145,8 +145,9 @@
+     <span id="playerTitle" class="player-title"></span>
+     <button id="playerFav" class="btn-back"></button>
+   </div>
++  <div id="castBar" class="cast-bar hidden" aria-live="polite"></div>
+   <div class="player-box">
+-    <video id="video" playsinline webkit-playsinline x5-video-player-type="h5"></video>
++    <video id="video" playsinline webkit-playsinline x-webkit-airplay="allow" x5-video-player-type="h5"></video>
+     <div id="playerDimmer" class="player-dimmer" aria-hidden="true"></div>
+     <div id="playerTip" class="player-tip"></div>
+     <div id="playerGestureToast" class="player-gesture-toast hidden" aria-hidden="true"></div>
+@@ -183,6 +184,7 @@
+         <button id="btnFsEp" class="player-tool-btn fs-ep-btn hidden" type="button" aria-label="全屏选集">选集</button>
+         <button id="btnSkipCfg" class="player-tool-btn" type="button" aria-label="片头片尾设置">片头尾</button>
+         <button id="btnVodDownload" class="player-tool-btn" type="button" aria-label="下载本集">下载</button>
++        <button id="btnCast" class="player-tool-btn" type="button" aria-label="投屏">投屏</button>
+         <button id="btnFit" class="player-fit-btn" type="button" aria-label="切换画面铺满">铺满</button>
+       </div>
+       <button id="btnFs" class="player-fs-btn" type="button" aria-label="全屏"></button>
+@@ -265,9 +267,9 @@
+ 
+ <div id="toast" class="toast hidden"></div>
+ 
+-<script src="history_state.js?v=20261127-v248"></script>
+-<script src="vod_client.js?v=20261127-v248"></script>
+-<script src="auth_session.js?v=20261127-v248"></script>
+-<script src="app.js?v=20261127-v248"></script>
++<script src="history_state.js?v=20261127-v249"></script>
++<script src="vod_client.js?v=20261127-v249"></script>
++<script src="auth_session.js?v=20261127-v249"></script>
++<script src="app.js?v=20261127-v249"></script>
+ </body>
+ </html>
+diff --git a/docs/style.css b/docs/style.css
+index 6c51ffb..d3c6b35 100644
+--- a/docs/style.css
++++ b/docs/style.css
+@@ -1144,6 +1144,11 @@ html, body, #epList, #lrcBox, .modal-box, .n-drawer-list {
+ .search-submit {
+   display: inline-flex; align-items: center; justify-content: center; min-width: 48px; min-height: 27px;
+ }
++.search-submit.is-cancel {
++  background: rgba(255, 255, 255, 0.14);
++  color: var(--text);
++  border: 1px solid rgba(255, 255, 255, 0.22);
++}
+ 
+ .top-progress {
+   position: sticky; top: 54px; left: 0; right: 0; z-index: 25; height: 2px;
+@@ -1863,3 +1868,133 @@ body.in-mplayer {
+ .live-cat-bar .m-chip { flex-shrink: 0; }
+ 
+ .ad-image{width:76px;height:76px;object-fit:cover;border-radius:8px;flex-shrink:0}
++
++/* ============ v2.4.9 多方式投屏面板与遥控条 ============ */
++.cast-bar {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++  padding: 8px 12px;
++  background: linear-gradient(90deg, rgba(229, 184, 105, 0.14), rgba(20, 22, 30, 0.94));
++  border-bottom: 1px solid rgba(229, 184, 105, 0.28);
++  font-size: 12.5px;
++}
++.cast-bar.hidden { display: none; }
++.cast-bar-meta {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++  min-width: 0;
++  color: var(--text);
++  font-weight: 600;
++}
++.cast-dot {
++  width: 7px;
++  height: 7px;
++  border-radius: 50%;
++  background: var(--emerald);
++  box-shadow: 0 0 8px var(--emerald);
++  flex-shrink: 0;
++}
++.cast-bar-btns {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 6px;
++}
++.cast-mini-btn {
++  padding: 4px 10px;
++  border-radius: 999px;
++  border: 1px solid rgba(255, 255, 255, 0.16);
++  background: rgba(255, 255, 255, 0.08);
++  color: var(--text);
++  font-size: 11.5px;
++  font-weight: 600;
++  cursor: pointer;
++}
++.cast-mini-btn.accent {
++  border-color: rgba(229, 184, 105, 0.45);
++  color: var(--accent);
++  background: rgba(229, 184, 105, 0.14);
++}
++.cast-mini-btn.danger {
++  border-color: rgba(255, 107, 107, 0.35);
++  color: #ff9c9c;
++}
++.cast-section {
++  padding: 10px 11px;
++  border-radius: 12px;
++  background: rgba(255, 255, 255, 0.035);
++  border: 1px solid rgba(255, 255, 255, 0.08);
++  margin-bottom: 10px;
++}
++.cast-section-head {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++  font-size: 13px;
++  font-weight: 700;
++  color: var(--text);
++  margin-bottom: 7px;
++}
++.cast-dev-list {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++  margin-top: 6px;
++}
++.cast-dev-item {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++  width: 100%;
++  padding: 8px 10px;
++  border-radius: 9px;
++  border: 1px solid rgba(229, 184, 105, 0.24);
++  background: rgba(229, 184, 105, 0.08);
++  color: var(--text);
++  text-align: left;
++  cursor: pointer;
++}
++.cast-dev-item small { color: var(--muted); font-size: 11px; }
++.cast-code-row {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  margin-top: 6px;
++}
++.cast-code-input {
++  flex: 1;
++  min-width: 0;
++  padding: 8px 10px;
++  border-radius: 9px;
++  border: 1px solid rgba(255, 255, 255, 0.14);
++  background: rgba(0, 0, 0, 0.32);
++  color: var(--accent);
++  font-size: 16px;
++  font-weight: 700;
++  letter-spacing: 0.18em;
++  text-transform: uppercase;
++}
++.cast-more-grid {
++  display: grid;
++  grid-template-columns: repeat(2, minmax(0, 1fr));
++  gap: 7px;
++  margin-top: 6px;
++}
++.cast-more-btn {
++  padding: 8px 10px;
++  border-radius: 9px;
++  border: 1px solid rgba(255, 255, 255, 0.12);
++  background: rgba(255, 255, 255, 0.05);
++  color: var(--text);
++  font-size: 12px;
++  font-weight: 600;
++  cursor: pointer;
++  text-align: center;
++}
++.cast-more-btn:hover { border-color: rgba(229, 184, 105, 0.45); color: var(--accent); }
+diff --git a/docs/tv.html b/docs/tv.html
+new file mode 100644
+index 0000000..ad29578
+--- /dev/null
++++ b/docs/tv.html
+@@ -0,0 +1,403 @@
++<!DOCTYPE html>
++<html lang="zh-CN">
++<head>
++<meta charset="UTF-8">
++<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
++<meta name="theme-color" content="#090A0E">
++<title>NovaHub · 星隅大屏接收器</title>
++<script>
++(function(){
++  const origFetch = window.fetch.bind(window);
++  window.__NH_API_BASE__ = '';
++  window.__NH_REFRESH_ENDPOINT__ = async function() {
++    if (!location.hostname.endsWith('github.io')) return '';
++    try {
++      const r = await origFetch('./endpoint.json?t=' + Date.now(), { cache: 'no-store' });
++      const d = await r.json();
++      window.__NH_API_BASE__ = ((d && d.url) || '').replace(/\/+$/, '');
++      return window.__NH_API_BASE__;
++    } catch {
++      return window.__NH_API_BASE__;
++    }
++  };
++  if (!location.hostname.endsWith('github.io')) return;
++  let ready = window.__NH_REFRESH_ENDPOINT__();
++  window.fetch = async function(input, init) {
++    await ready;
++    const isRel = typeof input === 'string' && /^\/(api|kw|proxy)(\/|\?|$)/.test(input);
++    const buildUrl = (base) => isRel && base ? base + input : input;
++    const target = buildUrl(window.__NH_API_BASE__);
++    try {
++      const resp = await origFetch(target, init);
++      if (isRel && (resp.status === 502 || resp.status === 503 || resp.status === 530)) {
++        const oldBase = window.__NH_API_BASE__;
++        const newBase = await window.__NH_REFRESH_ENDPOINT__();
++        if (newBase && newBase !== oldBase) return origFetch(buildUrl(newBase), init);
++      }
++      return resp;
++    } catch (err) {
++      if (isRel) {
++        const oldBase = window.__NH_API_BASE__;
++        const newBase = await window.__NH_REFRESH_ENDPOINT__();
++        if (newBase && newBase !== oldBase) return origFetch(buildUrl(newBase), init);
++      }
++      throw err;
++    }
++  };
++})();
++</script>
++<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
++<style>
++:root {
++  color-scheme: dark;
++  --bg: #090a0e;
++  --card: rgba(20, 22, 30, 0.88);
++  --border: rgba(231, 198, 107, 0.24);
++  --accent: #e7c66b;
++  --text: #f5efe2;
++  --muted: #9a96a6;
++}
++* { box-sizing: border-box; margin: 0; padding: 0; }
++html, body {
++  width: 100%; height: 100%; overflow: hidden;
++  background: radial-gradient(circle at 50% 18%, rgba(231, 198, 107, 0.10), transparent 55%), var(--bg);
++  color: var(--text);
++  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
++}
++.standby {
++  width: 100%; height: 100%;
++  display: flex; align-items: center; justify-content: center; padding: 24px;
++}
++.standby.hidden { display: none; }
++.panel {
++  width: min(560px, 100%);
++  padding: 34px 28px;
++  border-radius: 24px;
++  background: var(--card);
++  border: 1px solid var(--border);
++  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.65);
++  text-align: center;
++}
++.brand {
++  display: inline-flex; align-items: center; gap: 10px;
++  font-size: 20px; font-weight: 700; letter-spacing: 0.04em; color: var(--text);
++}
++.brand span { color: var(--accent); }
++.subtitle { margin-top: 8px; font-size: 13.5px; color: var(--muted); }
++.code-box {
++  margin: 26px auto 18px;
++  padding: 20px 18px;
++  border-radius: 18px;
++  background: rgba(10, 11, 16, 0.9);
++  border: 1px dashed rgba(231, 198, 107, 0.42);
++}
++.code-label { font-size: 12px; letter-spacing: 0.14em; color: var(--muted); margin-bottom: 8px; }
++.code-val {
++  font-size: clamp(46px, 9vw, 68px);
++  font-weight: 800;
++  letter-spacing: 0.24em;
++  text-indent: 0.24em;
++  color: var(--accent);
++  font-variant-numeric: tabular-nums;
++  text-shadow: 0 0 26px rgba(231, 198, 107, 0.28);
++}
++.status {
++  font-size: 13.5px; color: #d8d3c8; min-height: 22px; margin-bottom: 18px;
++}
++.actions { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
++.btn {
++  padding: 10px 20px; border-radius: 999px; cursor: pointer;
++  font-size: 13.5px; font-weight: 600; border: 1px solid rgba(255, 255, 255, 0.14);
++  background: rgba(255, 255, 255, 0.07); color: var(--text);
++}
++.btn.primary {
++  background: linear-gradient(135deg, #eccb73, #b98b2a);
++  color: #12100b; border-color: transparent;
++}
++.tips {
++  margin-top: 22px; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, 0.08);
++  font-size: 12.5px; color: var(--muted); line-height: 1.75; text-align: left;
++}
++.stage {
++  position: fixed; inset: 0; background: #000;
++  display: flex; align-items: center; justify-content: center;
++}
++.stage.hidden { display: none; }
++.stage video {
++  width: 100%; height: 100%; object-fit: contain; background: #000;
++}
++.hud-top {
++  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
++  display: flex; align-items: center; justify-content: space-between; gap: 12px;
++  padding: 16px 22px;
++  background: linear-gradient(180deg, rgba(0, 0, 0, 0.82), transparent);
++  transition: opacity 0.28s ease;
++}
++.hud-top.fade { opacity: 0; pointer-events: none; }
++.hud-title { font-size: 16px; font-weight: 600; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.hud-sub { font-size: 12px; color: rgba(255, 255, 255, 0.72); margin-top: 2px; }
++.hud-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
++.pill {
++  padding: 6px 14px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
++  border: 1px solid rgba(231, 198, 107, 0.42); background: rgba(15, 16, 22, 0.78); color: var(--accent);
++  cursor: pointer;
++}
++.unmute-btn {
++  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 15;
++  padding: 14px 26px; border-radius: 999px; border: 1px solid rgba(231, 198, 107, 0.65);
++  background: rgba(15, 16, 22, 0.9); color: var(--accent); font-size: 15px; font-weight: 700;
++  cursor: pointer; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65);
++}
++.unmute-btn.hidden { display: none; }
++</style>
++</head>
++<body>
++  <section id="standby" class="standby">
++    <div class="panel">
++      <div class="brand">Nova<span>.</span>Hub 大屏接收器</div>
++      <div class="subtitle">打开手机/电脑端星隅播放器，点击「投屏」输入下方 4 位投屏码</div>
++      <div class="code-box">
++        <div class="code-label">当前大屏投屏码</div>
++        <div id="roomCode" class="code-val">----</div>
++      </div>
++      <div id="roomStatus" class="status">正在连接星隅网关生成投屏码…</div>
++      <div class="actions">
++        <button id="btnRefreshCode" class="btn primary" type="button">刷新投屏码</button>
++        <button id="btnTvFs" class="btn" type="button">全屏显示</button>
++      </div>
++      <div class="tips">
++        1. 支持电视浏览器、电脑浏览器、平板浏览器跨网络投屏。<br>
++        2. 手机端可在播放界面遥控暂停、快进、切集，以及切换节点转发防盗链流。<br>
++        3. 若首次浏览器阻止自动出声，请按遥控器或鼠标点击画面中心「开启声音」。
++      </div>
++    </div>
++  </section>
++
++  <section id="stage" class="stage hidden">
++    <video id="tvVideo" controls playsinline autoplay></video>
++    <div id="hudTop" class="hud-top">
++      <div style="min-width:0">
++        <div id="tvTitle" class="hud-title">正在准备播放…</div>
++        <div id="tvSub" class="hud-sub">投屏码：----</div>
++      </div>
++      <div class="hud-right">
++        <button id="btnStageFs" class="pill" type="button">全屏</button>
++        <button id="btnStopCast" class="pill" type="button">退出投屏</button>
++      </div>
++    </div>
++    <button id="btnUnmute" class="unmute-btn hidden" type="button">点击开启声音 / 继续播放</button>
++  </section>
++
++<script>
++(function(){
++  const $ = (s) => document.querySelector(s);
++  const state = {
++    code: '',
++    secret: '',
++    seq: 0,
++    hls: null,
++    pollTimer: null,
++    hudTimer: null,
++    currentPayload: null,
++    proxyTried: false,
++  };
++
++  function setStatus(msg) {
++    $('#roomStatus').textContent = msg || '';
++  }
++
++  function destroyVideo() {
++    if (state.hls) {
++      try { state.hls.destroy(); } catch {}
++      state.hls = null;
++    }
++    const v = $('#tvVideo');
++    v.pause();
++    v.removeAttribute('src');
++    v.load();
++    $('#btnUnmute').classList.add('hidden');
++  }
++
++  function showStandby(msg) {
++    destroyVideo();
++    state.currentPayload = null;
++    $('#stage').classList.add('hidden');
++    $('#standby').classList.remove('hidden');
++    if (msg) setStatus(msg);
++  }
++
++  function touchHud() {
++    const hud = $('#hudTop');
++    hud.classList.remove('fade');
++    clearTimeout(state.hudTimer);
++    state.hudTimer = setTimeout(() => hud.classList.add('fade'), 4000);
++  }
++
++  async function tryAutoPlay(v) {
++    try {
++      v.muted = false;
++      await v.play();
++      $('#btnUnmute').classList.add('hidden');
++    } catch {
++      try {
++        v.muted = true;
++        await v.play();
++        $('#btnUnmute').classList.remove('hidden');
++      } catch {
++        $('#btnUnmute').classList.remove('hidden');
++      }
++    }
++  }
++
++  function mountMedia(payload, useProxy = false) {
++    if (!payload || !payload.url) return;
++    destroyVideo();
++    state.currentPayload = payload;
++    state.proxyTried = useProxy;
++    const url = (useProxy && payload.proxy_url) ? payload.proxy_url : payload.url;
++    const v = $('#tvVideo');
++    $('#standby').classList.add('hidden');
++    $('#stage').classList.remove('hidden');
++    $('#tvTitle').textContent = payload.title + (payload.episode ? (' · ' + payload.episode) : '');
++    $('#tvSub').textContent = '投屏码：' + state.code + (useProxy ? ' · 节点转发流' : '');
++    touchHud();
++
++    const pos = Number(payload.position) || 0;
++    const applyPos = () => {
++      if (pos > 1 && !payload.is_live && isFinite(v.duration) && pos < v.duration) {
++        v.currentTime = pos;
++      }
++    };
++
++    const fallbackToProxy = () => {
++      if (!state.proxyTried && payload.proxy_url && payload.proxy_url !== url) {
++        mountMedia(payload, true);
++        return true;
++      }
++      return false;
++    };
++
++    const isHls = /\.m3u8(\?|$)/i.test(url) || url.includes('/api/live/m3u8');
++    if (isHls && window.Hls && Hls.isSupported()) {
++      const hls = new Hls({ maxBufferLength: 30 });
++      state.hls = hls;
++      hls.loadSource(url);
++      hls.attachMedia(v);
++      hls.on(Hls.Events.MANIFEST_PARSED, () => {
++        if (pos > 1 && !payload.is_live) {
++          v.addEventListener('loadedmetadata', applyPos, { once: true });
++        }
++        tryAutoPlay(v);
++      });
++      hls.on(Hls.Events.ERROR, (_e, d) => {
++        if (!d || !d.fatal) return;
++        if (!fallbackToProxy()) {
++          $('#tvSub').textContent = '投屏码：' + state.code + ' · 视频流加载失败 (' + (d.details || d.type || 'ERROR') + ')';
++        }
++      });
++    } else {
++      v.src = url;
++      if (pos > 1 && !payload.is_live) {
++        v.addEventListener('loadedmetadata', applyPos, { once: true });
++      }
++      v.onerror = () => { fallbackToProxy(); };
++      tryAutoPlay(v);
++    }
++  }
++
++  function applyCommand(cmd) {
++    if (!cmd || !cmd.action) return;
++    const v = $('#tvVideo');
++    const p = cmd.payload || {};
++    if (cmd.action === 'load') {
++      mountMedia(p, false);
++    } else if (cmd.action === 'play') {
++      tryAutoPlay(v);
++      touchHud();
++    } else if (cmd.action === 'pause') {
++      v.pause();
++      touchHud();
++    } else if (cmd.action === 'seek') {
++      if (typeof p.time === 'number' && isFinite(p.time)) {
++        v.currentTime = Math.max(0, p.time);
++      } else if (typeof p.delta === 'number' && isFinite(p.delta)) {
++        v.currentTime = Math.max(0, (v.currentTime || 0) + p.delta);
++      }
++      touchHud();
++    } else if (cmd.action === 'volume') {
++      if (typeof p.level === 'number' && isFinite(p.level)) {
++        v.muted = false;
++        v.volume = Math.max(0, Math.min(1, p.level));
++      }
++    } else if (cmd.action === 'stop') {
++      showStandby('投放端已停止投屏，可重新输入投屏码连接');
++    }
++  }
++
++  async function createRoom() {
++    setStatus('正在生成 4 位投屏码…');
++    try {
++      const r = await fetch('/api/cast/room', { method: 'POST' });
++      const d = await r.json();
++      if (!r.ok || !d.code) throw new Error(d.error || '创建房间失败');
++      state.code = d.code;
++      state.secret = d.secret;
++      state.seq = 0;
++      $('#roomCode').textContent = d.code;
++      $('#tvSub').textContent = '投屏码：' + d.code;
++      setStatus('等待手机端连接投屏（房间 6 小时内有效）');
++    } catch (e) {
++      $('#roomCode').textContent = 'ERR';
++      setStatus('连接失败：' + (e.message || e));
++    }
++  }
++
++  async function pollLoop() {
++    if (state.code && state.secret) {
++      try {
++        const u = '/api/cast/poll?code=' + encodeURIComponent(state.code)
++          + '&secret=' + encodeURIComponent(state.secret)
++          + '&since=' + state.seq;
++        const r = await fetch(u, { cache: 'no-store' });
++        if (r.status === 404) {
++          await createRoom();
++        } else if (r.ok) {
++          const d = await r.json();
++          const cmds = Array.isArray(d.commands) ? d.commands : [];
++          for (const c of cmds) {
++            if (typeof c.seq === 'number' && c.seq > state.seq) state.seq = c.seq;
++            applyCommand(c);
++          }
++          if (typeof d.seq === 'number' && d.seq > state.seq) state.seq = d.seq;
++        }
++      } catch {}
++    }
++    state.pollTimer = setTimeout(pollLoop, 1500);
++  }
++
++  function toggleFs() {
++    if (document.fullscreenElement) {
++      document.exitFullscreen().catch(() => {});
++    } else {
++      document.documentElement.requestFullscreen?.().catch(() => {});
++    }
++  }
++
++  $('#btnRefreshCode').onclick = () => createRoom();
++  $('#btnTvFs').onclick = toggleFs;
++  $('#btnStageFs').onclick = toggleFs;
++  $('#btnStopCast').onclick = () => showStandby('已退出播放，等待新的投屏推送');
++  $('#btnUnmute').onclick = () => {
++    const v = $('#tvVideo');
++    v.muted = false;
++    v.play().catch(() => {});
++    $('#btnUnmute').classList.add('hidden');
++  };
++  $('#stage').addEventListener('pointermove', touchHud);
++  $('#stage').addEventListener('click', touchHud);
++
++  createRoom().then(() => { pollLoop(); });
++})();
++</script>
++</body>
++</html>
+diff --git a/index.html b/index.html
+index 02c9038..a2c72d5 100644
+--- a/index.html
++++ b/index.html
+@@ -67,7 +67,7 @@
+ })();
+ </script>
+ <link rel="manifest" href="manifest.json">
+-<link rel="stylesheet" href="style.css?v=20261127-v248">
++<link rel="stylesheet" href="style.css?v=20261127-v249">
+ <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+ <script defer src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+ <style>
+@@ -145,8 +145,9 @@
+     <span id="playerTitle" class="player-title"></span>
+     <button id="playerFav" class="btn-back"></button>
+   </div>
++  <div id="castBar" class="cast-bar hidden" aria-live="polite"></div>
+   <div class="player-box">
+-    <video id="video" playsinline webkit-playsinline x5-video-player-type="h5"></video>
++    <video id="video" playsinline webkit-playsinline x-webkit-airplay="allow" x5-video-player-type="h5"></video>
+     <div id="playerDimmer" class="player-dimmer" aria-hidden="true"></div>
+     <div id="playerTip" class="player-tip"></div>
+     <div id="playerGestureToast" class="player-gesture-toast hidden" aria-hidden="true"></div>
+@@ -183,6 +184,7 @@
+         <button id="btnFsEp" class="player-tool-btn fs-ep-btn hidden" type="button" aria-label="全屏选集">选集</button>
+         <button id="btnSkipCfg" class="player-tool-btn" type="button" aria-label="片头片尾设置">片头尾</button>
+         <button id="btnVodDownload" class="player-tool-btn" type="button" aria-label="下载本集">下载</button>
++        <button id="btnCast" class="player-tool-btn" type="button" aria-label="投屏">投屏</button>
+         <button id="btnFit" class="player-fit-btn" type="button" aria-label="切换画面铺满">铺满</button>
+       </div>
+       <button id="btnFs" class="player-fs-btn" type="button" aria-label="全屏"></button>
+@@ -265,9 +267,9 @@
+ 
+ <div id="toast" class="toast hidden"></div>
+ 
+-<script src="history_state.js?v=20261127-v248"></script>
+-<script src="vod_client.js?v=20261127-v248"></script>
+-<script src="auth_session.js?v=20261127-v248"></script>
+-<script src="app.js?v=20261127-v248"></script>
++<script src="history_state.js?v=20261127-v249"></script>
++<script src="vod_client.js?v=20261127-v249"></script>
++<script src="auth_session.js?v=20261127-v249"></script>
++<script src="app.js?v=20261127-v249"></script>
+ </body>
+ </html>
+diff --git a/server.py b/server.py
+index 4aaa879..ddf152d 100644
+--- a/server.py
++++ b/server.py
+@@ -13,6 +13,7 @@ from html.parser import HTMLParser
+ import json
+ import os
+ import re
++import secrets
+ import shutil
+ import socket
+ import subprocess
+@@ -54,6 +55,48 @@ _PREFETCHING_BOOKS = set()
+ _RATE_BUCKETS = collections.defaultdict(collections.deque)
+ _RATE_LOCK = threading.Lock()
+ 
++# 大屏投屏码房间状态（内存态 + 6 小时 TTL 自动回收）
++_CAST_ROOMS = {}
++_CAST_LOCK = threading.Lock()
++_CAST_TTL = 6 * 3600
++_CAST_MAX_ROOMS = 200
++_CAST_ACTIONS = {"load", "play", "pause", "seek", "stop", "volume"}
++_CAST_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
++
++
++def _cast_cleanup_locked(now):
++    """清理过期投屏房间，超出容量上限时按活跃时间淘汰最旧房间。"""
++    expired = [k for k, v in _CAST_ROOMS.items() if now - v.get("updated_at", 0) > _CAST_TTL]
++    for k in expired:
++        _CAST_ROOMS.pop(k, None)
++    if len(_CAST_ROOMS) >= _CAST_MAX_ROOMS:
++        oldest = sorted(_CAST_ROOMS.items(), key=lambda kv: kv[1].get("updated_at", 0))
++        for k, _ in oldest[: max(1, len(_CAST_ROOMS) - _CAST_MAX_ROOMS + 1)]:
++            _CAST_ROOMS.pop(k, None)
++
++
++def _cast_gen_code_locked():
++    """生成 4 位无歧义大写投屏码（避开 0/O/1/I）。"""
++    for _ in range(32):
++        code = "".join(secrets.choice(_CAST_ALPHABET) for _ in range(4))
++        if code not in _CAST_ROOMS:
++            return code
++    raise RuntimeError("投屏房间已满，请稍后再试")
++
++
++def _is_http_media_url(url):
++    """校验投屏下发的媒体地址是否为合法 http/https URL。"""
++    if not isinstance(url, str):
++        return False
++    u = url.strip()
++    if len(u) < 10 or len(u) > 4096:
++        return False
++    try:
++        sp = urllib.parse.urlsplit(u)
++        return sp.scheme.lower() in ("http", "https") and bool(sp.netloc)
++    except Exception:
++        return False
++
+ def _check_rate_limit(ip, bucket, limit, window_sec=60):
+     """基于客户端 IP 的轻量滑动窗口限流。"""
+     now = time.time()
+@@ -383,7 +426,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
+     def send_head(self):
+         # One allowlist shared by inherited GET and HEAD; no directory listing.
+         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+-        allowed = {"/", "/index.html", "/admin.html", "/app.js", "/auth_session.js", "/history_state.js", "/vod_client.js", "/style.css",
++        allowed = {"/", "/index.html", "/tv.html", "/admin.html", "/app.js", "/auth_session.js", "/history_state.js", "/vod_client.js", "/style.css",
+                    "/manifest.json", "/icon.svg", "/endpoint.json", "/apk-version.json",
+                    "/apk/novahub-latest.apk"}
+         relative = path[5:] if path.startswith("/docs/") else path
+@@ -917,26 +960,72 @@ class Handler(http.server.SimpleHTTPRequestHandler):
+                 return
+ 
+             if act == "lrc":
+-                rid = urllib.parse.quote(qs.get("id", [""])[0])
+-                u = f"http://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId={rid}"
+-                _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+-                d = json.loads(raw_b.decode("utf-8", "ignore").strip())
+-                lrclist = ((d.get("data") or {}).get("lrclist")) or []
+-                lines = []
+-                for item in lrclist:
+-                    sec = float(item.get("time") or 0)
+-                    mm = int(sec // 60)
+-                    ss = sec - mm * 60
+-                    txt = html.unescape(item.get("lineLyric") or "").strip()
+-                    if txt:
+-                        lines.append(f"[{mm:02d}:{ss:05.2f}]{txt}")
+-                self.send_json({"lrc": "\n".join(lines)})
++                rid = urllib.parse.quote((qs.get("id") or [""])[0].strip())
++                name = (qs.get("name") or [""])[0].strip()
++                artist = (qs.get("artist") or [""])[0].strip()
++                lrc_text = ""
++                if rid:
++                    try:
++                        u = f"http://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId={rid}"
++                        _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
++                        d = json.loads(raw_b.decode("utf-8", "ignore").strip())
++                        lrclist = ((d.get("data") or {}).get("lrclist")) or []
++                        lines = []
++                        for item in lrclist:
++                            sec = float(item.get("time") or 0)
++                            mm = int(sec // 60)
++                            ss = sec - mm * 60
++                            txt = html.unescape(item.get("lineLyric") or "").strip()
++                            if txt:
++                                lines.append(f"[{mm:02d}:{ss:05.2f}]{txt}")
++                        lrc_text = "\n".join(lines)
++                    except Exception:
++                        lrc_text = ""
++
++                # 酷我官方歌词接口异常或为空时，按歌名+歌手自动回退网易云歌词源
++                if not lrc_text and name:
++                    lrc_text = self._fetch_gdstudio_lrc(name, artist)
++
++                self.send_json({"lrc": lrc_text})
+                 return
+ 
+             self.send_json({"error": "unknown act"}, 400)
+         except Exception as e:
+             self.send_json({"error": str(e)}, 502)
+ 
++    def _fetch_gdstudio_lrc(self, name, artist=""):
++        """按歌名与歌手从 gdstudio（网易云源）检索标准 LRC 歌词。"""
++        q_str = f"{name} {artist}".strip() if artist else name.strip()
++        if not q_str:
++            return ""
++        try:
++            su = f"https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name={urllib.parse.quote(q_str)}&count=5&pages=1"
++            _, s_raw, _ = _http_get_bytes(su, headers={"User-Agent": UA_DESKTOP}, timeout=5)
++            items = json.loads(s_raw.decode("utf-8", "ignore"))
++            if not isinstance(items, list) or not items:
++                return ""
++            norm = lambda s: re.sub(r"\s+", "", str(s or "").lower())
++            want_name = norm(name)
++            want_artist = norm(artist)
++            best = items[0]
++            for it in items:
++                it_name = norm(it.get("name"))
++                it_art = norm("/".join(it.get("artist")) if isinstance(it.get("artist"), list) else it.get("artist"))
++                if want_name and it_name == want_name and (not want_artist or want_artist in it_art or it_art in want_artist):
++                    best = it
++                    break
++            nid = str(best.get("id") or "").strip()
++            if not nid:
++                return ""
++            lu = f"https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id={urllib.parse.quote(nid)}"
++            _, l_raw, _ = _http_get_bytes(lu, headers={"User-Agent": UA_DESKTOP}, timeout=5)
++            ld = json.loads(l_raw.decode("utf-8", "ignore"))
++            if isinstance(ld, dict):
++                return str(ld.get("lyric") or ld.get("tlyric") or "").strip()
++        except Exception:
++            return ""
++        return ""
++
+     # ---------- 直播流 HLS 跨域重写代理 & 媒体流式下载 ----------
+     def _live_headers(self, target_url):
+         p = urllib.parse.urlsplit(target_url)
+@@ -1237,6 +1326,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
+             return self.handle_notifications_prefs_post()
+         if p == "/api/notifications/check":
+             return self.handle_notifications_check()
++        if p == "/api/cast/room":
++            return self.handle_cast_room_create()
++        if p == "/api/cast/command":
++            return self.handle_cast_command()
+         if p == "/api/vip/redeem":
+             return self.handle_vip_redeem()
+         if p == "/api/sync":
+@@ -1295,6 +1388,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
+             return self.handle_notifications_prefs_get()
+         if p == "/api/media/download":
+             return self.handle_media_download(qs)
++        if p == "/api/cast/poll":
++            return self.handle_cast_poll(qs)
+         if p == "/api/ops/download":
+             return self.handle_ops(p)
+         if p == "/kw":
+@@ -1429,6 +1524,130 @@ class Handler(http.server.SimpleHTTPRequestHandler):
+         res = db.list_notifications(user["id"], limit=50)
+         self.send_json({"ok": True, "checked": checked, "updated": updated, **res})
+ 
++    def handle_cast_room_create(self):
++        """大屏端申请 4 位投屏码与配对密钥，供手机端远程推送播放。"""
++        if not _check_rate_limit(self._client_ip(), "cast_room", 20, 60):
++            return self.send_json({"error": "申请投屏码过于频繁，请稍后再试"}, 429)
++        now = time.time()
++        secret = secrets.token_urlsafe(18)
++        with _CAST_LOCK:
++            _cast_cleanup_locked(now)
++            try:
++                code = _cast_gen_code_locked()
++            except RuntimeError as e:
++                return self.send_json({"error": str(e)}, 503)
++            _CAST_ROOMS[code] = {
++                "secret": secret,
++                "seq": 0,
++                "commands": [],
++                "created_at": now,
++                "updated_at": now,
++            }
++        self.send_json({"ok": True, "code": code, "secret": secret, "expires_in": _CAST_TTL})
++
++    def handle_cast_poll(self, qs):
++        """大屏端增量轮询投屏指令队列。"""
++        code = str((qs.get("code") or [""])[0]).strip().upper()
++        secret = str((qs.get("secret") or [""])[0]).strip()
++        try:
++            since = max(0, int((qs.get("since") or ["0"])[0]))
++        except ValueError:
++            since = 0
++        if not code or not secret:
++            return self.send_json({"error": "缺少投屏码或密钥"}, 400)
++        now = time.time()
++        with _CAST_LOCK:
++            _cast_cleanup_locked(now)
++            room = _CAST_ROOMS.get(code)
++            if not room:
++                return self.send_json({"error": "投屏房间不存在或已过期"}, 404)
++            if not hmac.compare_digest(room["secret"], secret):
++                return self.send_json({"error": "投屏密钥校验失败"}, 403)
++            room["updated_at"] = now
++            cmds = [dict(c) for c in room["commands"] if c["seq"] > since]
++            seq = room["seq"]
++        self.send_json({"ok": True, "seq": seq, "commands": cmds, "expires_in": _CAST_TTL})
++
++    def handle_cast_command(self):
++        """手机/网页已登录用户向指定 4 位投屏码下发播放或遥控指令。"""
++        user = self._current_user()
++        if not user:
++            return self.send_json({"error": "请先登录账号"}, 401)
++        if not _check_rate_limit(f"{self._client_ip()}:{user['id']}", "cast_cmd", 120, 60):
++            return self.send_json({"error": "投屏操作过于频繁，请稍后再试"}, 429)
++        try:
++            body = self._read_json_body(16384)
++        except Exception as e:
++            return self.send_json({"error": f"请求体无效: {e}"}, 400)
++        code = str(body.get("code") or "").strip().upper()
++        action = str(body.get("action") or "").strip().lower()
++        payload = body.get("payload")
++        if not isinstance(payload, dict):
++            payload = {}
++        if not re.fullmatch(r"[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}", code):
++            return self.send_json({"error": "请输入有效的 4 位投屏码"}, 400)
++        if action not in _CAST_ACTIONS:
++            return self.send_json({"error": "不支持的投屏指令"}, 400)
++
++        clean_payload = {}
++        if action == "load":
++            url = str(payload.get("url") or "").strip()
++            if not _is_http_media_url(url):
++                return self.send_json({"error": "无效的投屏播放地址"}, 400)
++            clean_payload["url"] = url
++            proxy_url = str(payload.get("proxy_url") or "").strip()
++            if proxy_url and _is_http_media_url(proxy_url):
++                clean_payload["proxy_url"] = proxy_url
++            clean_payload["title"] = str(payload.get("title") or "正在投屏")[:160]
++            clean_payload["episode"] = str(payload.get("episode") or "")[:80]
++            clean_payload["is_live"] = bool(payload.get("is_live", False))
++            try:
++                pos = float(payload.get("position") or 0)
++                clean_payload["position"] = max(0.0, pos) if pos == pos else 0.0
++            except (TypeError, ValueError):
++                clean_payload["position"] = 0.0
++        elif action == "seek":
++            if "time" in payload:
++                try:
++                    t = float(payload["time"])
++                    clean_payload["time"] = max(0.0, t)
++                except (TypeError, ValueError):
++                    return self.send_json({"error": "无效的跳转时间"}, 400)
++            elif "delta" in payload:
++                try:
++                    d = float(payload["delta"])
++                    clean_payload["delta"] = max(-3600.0, min(3600.0, d))
++                except (TypeError, ValueError):
++                    return self.send_json({"error": "无效的时间偏移"}, 400)
++            else:
++                return self.send_json({"error": "缺少跳转参数"}, 400)
++        elif action == "volume":
++            try:
++                vol = float(payload.get("level", 1.0))
++                clean_payload["level"] = max(0.0, min(1.0, vol))
++            except (TypeError, ValueError):
++                return self.send_json({"error": "无效的音量值"}, 400)
++
++        now = time.time()
++        with _CAST_LOCK:
++            _cast_cleanup_locked(now)
++            room = _CAST_ROOMS.get(code)
++            if not room:
++                return self.send_json({"error": "未找到该投屏码对应的大屏，请核对后重试"}, 404)
++            room["seq"] += 1
++            seq = room["seq"]
++            room["updated_at"] = now
++            room["commands"].append({
++                "seq": seq,
++                "action": action,
++                "payload": clean_payload,
++                "ts": round(now, 3),
++                "sender": user.get("username") or "",
++            })
++            if len(room["commands"]) > 30:
++                room["commands"] = room["commands"][-30:]
++        self.send_json({"ok": True, "seq": seq, "code": code})
++
+ 
+ def _check_watch_targets(targets):
+     """低频巡检待查作品，比对集数/章节数变化并写入合并通知。"""
+diff --git a/style.css b/style.css
+index 6c51ffb..d3c6b35 100644
+--- a/style.css
++++ b/style.css
+@@ -1144,6 +1144,11 @@ html, body, #epList, #lrcBox, .modal-box, .n-drawer-list {
+ .search-submit {
+   display: inline-flex; align-items: center; justify-content: center; min-width: 48px; min-height: 27px;
+ }
++.search-submit.is-cancel {
++  background: rgba(255, 255, 255, 0.14);
++  color: var(--text);
++  border: 1px solid rgba(255, 255, 255, 0.22);
++}
+ 
+ .top-progress {
+   position: sticky; top: 54px; left: 0; right: 0; z-index: 25; height: 2px;
+@@ -1863,3 +1868,133 @@ body.in-mplayer {
+ .live-cat-bar .m-chip { flex-shrink: 0; }
+ 
+ .ad-image{width:76px;height:76px;object-fit:cover;border-radius:8px;flex-shrink:0}
++
++/* ============ v2.4.9 多方式投屏面板与遥控条 ============ */
++.cast-bar {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++  padding: 8px 12px;
++  background: linear-gradient(90deg, rgba(229, 184, 105, 0.14), rgba(20, 22, 30, 0.94));
++  border-bottom: 1px solid rgba(229, 184, 105, 0.28);
++  font-size: 12.5px;
++}
++.cast-bar.hidden { display: none; }
++.cast-bar-meta {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++  min-width: 0;
++  color: var(--text);
++  font-weight: 600;
++}
++.cast-dot {
++  width: 7px;
++  height: 7px;
++  border-radius: 50%;
++  background: var(--emerald);
++  box-shadow: 0 0 8px var(--emerald);
++  flex-shrink: 0;
++}
++.cast-bar-btns {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 6px;
++}
++.cast-mini-btn {
++  padding: 4px 10px;
++  border-radius: 999px;
++  border: 1px solid rgba(255, 255, 255, 0.16);
++  background: rgba(255, 255, 255, 0.08);
++  color: var(--text);
++  font-size: 11.5px;
++  font-weight: 600;
++  cursor: pointer;
++}
++.cast-mini-btn.accent {
++  border-color: rgba(229, 184, 105, 0.45);
++  color: var(--accent);
++  background: rgba(229, 184, 105, 0.14);
++}
++.cast-mini-btn.danger {
++  border-color: rgba(255, 107, 107, 0.35);
++  color: #ff9c9c;
++}
++.cast-section {
++  padding: 10px 11px;
++  border-radius: 12px;
++  background: rgba(255, 255, 255, 0.035);
++  border: 1px solid rgba(255, 255, 255, 0.08);
++  margin-bottom: 10px;
++}
++.cast-section-head {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++  font-size: 13px;
++  font-weight: 700;
++  color: var(--text);
++  margin-bottom: 7px;
++}
++.cast-dev-list {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++  margin-top: 6px;
++}
++.cast-dev-item {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++  width: 100%;
++  padding: 8px 10px;
++  border-radius: 9px;
++  border: 1px solid rgba(229, 184, 105, 0.24);
++  background: rgba(229, 184, 105, 0.08);
++  color: var(--text);
++  text-align: left;
++  cursor: pointer;
++}
++.cast-dev-item small { color: var(--muted); font-size: 11px; }
++.cast-code-row {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  margin-top: 6px;
++}
++.cast-code-input {
++  flex: 1;
++  min-width: 0;
++  padding: 8px 10px;
++  border-radius: 9px;
++  border: 1px solid rgba(255, 255, 255, 0.14);
++  background: rgba(0, 0, 0, 0.32);
++  color: var(--accent);
++  font-size: 16px;
++  font-weight: 700;
++  letter-spacing: 0.18em;
++  text-transform: uppercase;
++}
++.cast-more-grid {
++  display: grid;
++  grid-template-columns: repeat(2, minmax(0, 1fr));
++  gap: 7px;
++  margin-top: 6px;
++}
++.cast-more-btn {
++  padding: 8px 10px;
++  border-radius: 9px;
++  border: 1px solid rgba(255, 255, 255, 0.12);
++  background: rgba(255, 255, 255, 0.05);
++  color: var(--text);
++  font-size: 12px;
++  font-weight: 600;
++  cursor: pointer;
++  text-align: center;
++}
++.cast-more-btn:hover { border-color: rgba(229, 184, 105, 0.45); color: var(--accent); }
+diff --git a/tests/player_and_cache.test.cjs b/tests/player_and_cache.test.cjs
+index f7a1c67..5e9055f 100644
+--- a/tests/player_and_cache.test.cjs
++++ b/tests/player_and_cache.test.cjs
+@@ -59,6 +59,25 @@ test('player UI includes +30s, +1m, next episode, fullscreen episode drawer, ski
+   assert.ok(appSource.includes('function openNotificationCenter('));
+   assert.ok(appSource.includes('btnVodNotify'));
+   assert.ok(appSource.includes('btnNovelNotify'));
++  assert.ok(htmlSource.includes('id="btnCast"'));
++  assert.ok(htmlSource.includes('id="castBar"'));
++  assert.ok(htmlSource.includes('x-webkit-airplay="allow"'));
++  assert.ok(appSource.includes('function openCastModal('));
++  assert.ok(appSource.includes('/api/cast/command'));
++  assert.ok(appSource.includes('function cancelActiveSearch('));
++  assert.ok(appSource.includes('data-cancel-search="1"'));
++  assert.ok(appSource.includes('&name=${encodeURIComponent(songName)}&artist=${encodeURIComponent(songArtist)}'));
++});
++
++test('tv.html big-screen cast receiver parses cleanly', () => {
++  const tvHtml = fs.readFileSync('tv.html', 'utf8');
++  assert.ok(tvHtml.includes('/api/cast/room'));
++  assert.ok(tvHtml.includes('/api/cast/poll'));
++  const scripts = [...tvHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)];
++  assert.ok(scripts.length >= 2);
++  for (const s of scripts) {
++    assert.doesNotThrow(() => new vm.Script(s[1]));
++  }
+ });
+ 
+ test('admin.html inline script parses cleanly and exposes online presence UI', () => {
+diff --git a/tests/test_cast.py b/tests/test_cast.py
+new file mode 100644
+index 0000000..23852e5
+--- /dev/null
++++ b/tests/test_cast.py
+@@ -0,0 +1,151 @@
++import gc
++import io
++import json
++import pathlib
++import tempfile
++import threading
++import unittest
++from unittest import mock
++
++import db
++import server
++
++
++class DummyCastHandler(server.Handler):
++    def __init__(self, headers=None, body=None, ip="127.0.0.1"):
++        self.headers = headers or {}
++        self.client_address = (ip, 12345)
++        self._body = body
++        self.sent = []
++
++    def send_json(self, obj, status=200):
++        self.sent.append((status, obj))
++
++    def _read_json_body(self, max_bytes=1_048_576):
++        if self._body is None:
++            return {}
++        return json.loads(self._body.decode("utf-8"))
++
++
++class CastRoomTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.db_path = str(pathlib.Path(self.tmp.name) / "test.db")
++        self.patch = mock.patch.object(db, "DB_PATH", self.db_path)
++        self.patch.start()
++        db.init_db()
++        with server._CAST_LOCK:
++            server._CAST_ROOMS.clear()
++
++    def tearDown(self):
++        with server._CAST_LOCK:
++            server._CAST_ROOMS.clear()
++        self.patch.stop()
++        gc.collect()
++        self.tmp.cleanup()
++
++    def test_room_create_poll_secret_and_command_flow(self):
++        _, token = db.register_user("castuser1", "secret123")
++
++        h_create = DummyCastHandler()
++        h_create.handle_cast_room_create()
++        self.assertEqual(h_create.sent[0][0], 200)
++        room = h_create.sent[0][1]
++        code = room["code"]
++        secret = room["secret"]
++        self.assertEqual(len(code), 4)
++        self.assertTrue(secret)
++
++        # 未登录用户不能推送投屏指令
++        h_unauth = DummyCastHandler(
++            body=json.dumps({"code": code, "action": "play"}).encode("utf-8")
++        )
++        h_unauth.handle_cast_command()
++        self.assertEqual(h_unauth.sent[0][0], 401)
++
++        # 错误 secret 轮询返回 403
++        h_bad_sec = DummyCastHandler()
++        h_bad_sec.handle_cast_poll({"code": [code], "secret": ["wrong"], "since": ["0"]})
++        self.assertEqual(h_bad_sec.sent[0][0], 403)
++
++        # 登录用户下发 load + seek 指令
++        auth_headers = {"Authorization": f"Bearer {token}"}
++        h_load = DummyCastHandler(
++            headers=auth_headers,
++            body=json.dumps({
++                "code": code.lower(),
++                "action": "load",
++                "payload": {
++                    "url": "https://cdn.example.com/demo/index.m3u8",
++                    "proxy_url": "https://node.example.com/api/live/m3u8?url=1&ticket=abc",
++                    "title": "星际穿越",
++                    "episode": "HD",
++                    "position": 125,
++                },
++            }).encode("utf-8"),
++        )
++        h_load.handle_cast_command()
++        self.assertEqual(h_load.sent[0][0], 200)
++        self.assertEqual(h_load.sent[0][1]["seq"], 1)
++
++        h_seek = DummyCastHandler(
++            headers=auth_headers,
++            body=json.dumps({"code": code, "action": "seek", "payload": {"delta": 30}}).encode("utf-8"),
++        )
++        h_seek.handle_cast_command()
++        self.assertEqual(h_seek.sent[0][0], 200)
++        self.assertEqual(h_seek.sent[0][1]["seq"], 2)
++
++        # 增量轮询 since=0 与 since=1
++        h_poll0 = DummyCastHandler()
++        h_poll0.handle_cast_poll({"code": [code], "secret": [secret], "since": ["0"]})
++        self.assertEqual(h_poll0.sent[0][0], 200)
++        self.assertEqual(len(h_poll0.sent[0][1]["commands"]), 2)
++        self.assertEqual(h_poll0.sent[0][1]["commands"][0]["payload"]["title"], "星际穿越")
++
++        h_poll1 = DummyCastHandler()
++        h_poll1.handle_cast_poll({"code": [code], "secret": [secret], "since": ["1"]})
++        self.assertEqual(h_poll1.sent[0][0], 200)
++        self.assertEqual(len(h_poll1.sent[0][1]["commands"]), 1)
++        self.assertEqual(h_poll1.sent[0][1]["commands"][0]["action"], "seek")
++
++    def test_invalid_url_rejected_and_tv_html_in_allowlist(self):
++        _, token = db.register_user("castuser2", "secret123")
++        h_create = DummyCastHandler()
++        h_create.handle_cast_room_create()
++        code = h_create.sent[0][1]["code"]
++
++        h_bad = DummyCastHandler(
++            headers={"Authorization": f"Bearer {token}"},
++            body=json.dumps({
++                "code": code,
++                "action": "load",
++                "payload": {"url": "javascript:alert(1)"},
++            }).encode("utf-8"),
++        )
++        h_bad.handle_cast_command()
++        self.assertEqual(h_bad.sent[0][0], 400)
++
++        # 确认 /tv.html 在静态白名单中且不被 403 拦截
++        httpd = server.ThreadedHTTPServer(("127.0.0.1", 0), server.Handler)
++        t = threading.Thread(target=httpd.serve_forever, daemon=True)
++        t.start()
++        try:
++            import urllib.request
++            with urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/tv.html", timeout=5) as resp:
++                self.assertEqual(resp.status, 200)
++                text = resp.read().decode("utf-8")
++                self.assertIn("Nova", text)
++                self.assertIn("/api/cast/room", text)
++        finally:
++            httpd.shutdown()
++            httpd.server_close()
++
++    def test_kuwo_lrc_falls_back_to_gdstudio_when_upstream_fails(self):
++        h = DummyCastHandler()
++        with mock.patch.object(server, "_http_get_bytes", side_effect=OSError("502 Bad Gateway")), \
++             mock.patch.object(h, "_fetch_gdstudio_lrc", return_value="[00:01.00]天黑黑 欲落雨") as mock_fb:
++            h.handle_kuwo({"act": ["lrc"], "id": ["12345"], "name": ["天黑黑"], "artist": ["孙燕姿"]})
++        self.assertEqual(h.sent[0][0], 200)
++        self.assertIn("天黑黑", h.sent[0][1]["lrc"])
++        mock_fb.assert_called_once_with("天黑黑", "孙燕姿")
+diff --git a/tests/test_frontend.cjs b/tests/test_frontend.cjs
+index 0f53aea..f276e96 100644
+--- a/tests/test_frontend.cjs
++++ b/tests/test_frontend.cjs
+@@ -20,7 +20,7 @@ ctx.window.fetch('https://untrusted.example/api/live/seg');
+ assert.equal(calls.at(-1)[1].headers, undefined);
+ ctx.window.fetch('https://fixture.trycloudflare.com/api/live/seg');
+ assert.equal(calls.at(-1)[1].headers.get('Authorization'), 'Bearer fixture-token');
+-for (const file of ['index.html', 'app.js', 'auth_session.js', 'history_state.js', 'vod_client.js', 'admin.html', 'style.css', 'manifest.json', 'icon.svg']) {
++for (const file of ['index.html', 'tv.html', 'app.js', 'auth_session.js', 'history_state.js', 'vod_client.js', 'admin.html', 'style.css', 'manifest.json', 'icon.svg']) {
+   assert.equal(fs.readFileSync(file, 'utf8'), fs.readFileSync('docs/' + file, 'utf8'), `${file} differs from docs`);
+ }
+ assert.ok(!code.includes('const DEFAULT_SOURCES ='), 'upstream catalogs should be managed by backend');
+diff --git a/tv.html b/tv.html
+new file mode 100644
+index 0000000..ad29578
+--- /dev/null
++++ b/tv.html
+@@ -0,0 +1,403 @@
++<!DOCTYPE html>
++<html lang="zh-CN">
++<head>
++<meta charset="UTF-8">
++<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
++<meta name="theme-color" content="#090A0E">
++<title>NovaHub · 星隅大屏接收器</title>
++<script>
++(function(){
++  const origFetch = window.fetch.bind(window);
++  window.__NH_API_BASE__ = '';
++  window.__NH_REFRESH_ENDPOINT__ = async function() {
++    if (!location.hostname.endsWith('github.io')) return '';
++    try {
++      const r = await origFetch('./endpoint.json?t=' + Date.now(), { cache: 'no-store' });
++      const d = await r.json();
++      window.__NH_API_BASE__ = ((d && d.url) || '').replace(/\/+$/, '');
++      return window.__NH_API_BASE__;
++    } catch {
++      return window.__NH_API_BASE__;
++    }
++  };
++  if (!location.hostname.endsWith('github.io')) return;
++  let ready = window.__NH_REFRESH_ENDPOINT__();
++  window.fetch = async function(input, init) {
++    await ready;
++    const isRel = typeof input === 'string' && /^\/(api|kw|proxy)(\/|\?|$)/.test(input);
++    const buildUrl = (base) => isRel && base ? base + input : input;
++    const target = buildUrl(window.__NH_API_BASE__);
++    try {
++      const resp = await origFetch(target, init);
++      if (isRel && (resp.status === 502 || resp.status === 503 || resp.status === 530)) {
++        const oldBase = window.__NH_API_BASE__;
++        const newBase = await window.__NH_REFRESH_ENDPOINT__();
++        if (newBase && newBase !== oldBase) return origFetch(buildUrl(newBase), init);
++      }
++      return resp;
++    } catch (err) {
++      if (isRel) {
++        const oldBase = window.__NH_API_BASE__;
++        const newBase = await window.__NH_REFRESH_ENDPOINT__();
++        if (newBase && newBase !== oldBase) return origFetch(buildUrl(newBase), init);
++      }
++      throw err;
++    }
++  };
++})();
++</script>
++<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
++<style>
++:root {
++  color-scheme: dark;
++  --bg: #090a0e;
++  --card: rgba(20, 22, 30, 0.88);
++  --border: rgba(231, 198, 107, 0.24);
++  --accent: #e7c66b;
++  --text: #f5efe2;
++  --muted: #9a96a6;
++}
++* { box-sizing: border-box; margin: 0; padding: 0; }
++html, body {
++  width: 100%; height: 100%; overflow: hidden;
++  background: radial-gradient(circle at 50% 18%, rgba(231, 198, 107, 0.10), transparent 55%), var(--bg);
++  color: var(--text);
++  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
++}
++.standby {
++  width: 100%; height: 100%;
++  display: flex; align-items: center; justify-content: center; padding: 24px;
++}
++.standby.hidden { display: none; }
++.panel {
++  width: min(560px, 100%);
++  padding: 34px 28px;
++  border-radius: 24px;
++  background: var(--card);
++  border: 1px solid var(--border);
++  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.65);
++  text-align: center;
++}
++.brand {
++  display: inline-flex; align-items: center; gap: 10px;
++  font-size: 20px; font-weight: 700; letter-spacing: 0.04em; color: var(--text);
++}
++.brand span { color: var(--accent); }
++.subtitle { margin-top: 8px; font-size: 13.5px; color: var(--muted); }
++.code-box {
++  margin: 26px auto 18px;
++  padding: 20px 18px;
++  border-radius: 18px;
++  background: rgba(10, 11, 16, 0.9);
++  border: 1px dashed rgba(231, 198, 107, 0.42);
++}
++.code-label { font-size: 12px; letter-spacing: 0.14em; color: var(--muted); margin-bottom: 8px; }
++.code-val {
++  font-size: clamp(46px, 9vw, 68px);
++  font-weight: 800;
++  letter-spacing: 0.24em;
++  text-indent: 0.24em;
++  color: var(--accent);
++  font-variant-numeric: tabular-nums;
++  text-shadow: 0 0 26px rgba(231, 198, 107, 0.28);
++}
++.status {
++  font-size: 13.5px; color: #d8d3c8; min-height: 22px; margin-bottom: 18px;
++}
++.actions { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
++.btn {
++  padding: 10px 20px; border-radius: 999px; cursor: pointer;
++  font-size: 13.5px; font-weight: 600; border: 1px solid rgba(255, 255, 255, 0.14);
++  background: rgba(255, 255, 255, 0.07); color: var(--text);
++}
++.btn.primary {
++  background: linear-gradient(135deg, #eccb73, #b98b2a);
++  color: #12100b; border-color: transparent;
++}
++.tips {
++  margin-top: 22px; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, 0.08);
++  font-size: 12.5px; color: var(--muted); line-height: 1.75; text-align: left;
++}
++.stage {
++  position: fixed; inset: 0; background: #000;
++  display: flex; align-items: center; justify-content: center;
++}
++.stage.hidden { display: none; }
++.stage video {
++  width: 100%; height: 100%; object-fit: contain; background: #000;
++}
++.hud-top {
++  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
++  display: flex; align-items: center; justify-content: space-between; gap: 12px;
++  padding: 16px 22px;
++  background: linear-gradient(180deg, rgba(0, 0, 0, 0.82), transparent);
++  transition: opacity 0.28s ease;
++}
++.hud-top.fade { opacity: 0; pointer-events: none; }
++.hud-title { font-size: 16px; font-weight: 600; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.hud-sub { font-size: 12px; color: rgba(255, 255, 255, 0.72); margin-top: 2px; }
++.hud-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
++.pill {
++  padding: 6px 14px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
++  border: 1px solid rgba(231, 198, 107, 0.42); background: rgba(15, 16, 22, 0.78); color: var(--accent);
++  cursor: pointer;
++}
++.unmute-btn {
++  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 15;
++  padding: 14px 26px; border-radius: 999px; border: 1px solid rgba(231, 198, 107, 0.65);
++  background: rgba(15, 16, 22, 0.9); color: var(--accent); font-size: 15px; font-weight: 700;
++  cursor: pointer; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65);
++}
++.unmute-btn.hidden { display: none; }
++</style>
++</head>
++<body>
++  <section id="standby" class="standby">
++    <div class="panel">
++      <div class="brand">Nova<span>.</span>Hub 大屏接收器</div>
++      <div class="subtitle">打开手机/电脑端星隅播放器，点击「投屏」输入下方 4 位投屏码</div>
++      <div class="code-box">
++        <div class="code-label">当前大屏投屏码</div>
++        <div id="roomCode" class="code-val">----</div>
++      </div>
++      <div id="roomStatus" class="status">正在连接星隅网关生成投屏码…</div>
++      <div class="actions">
++        <button id="btnRefreshCode" class="btn primary" type="button">刷新投屏码</button>
++        <button id="btnTvFs" class="btn" type="button">全屏显示</button>
++      </div>
++      <div class="tips">
++        1. 支持电视浏览器、电脑浏览器、平板浏览器跨网络投屏。<br>
++        2. 手机端可在播放界面遥控暂停、快进、切集，以及切换节点转发防盗链流。<br>
++        3. 若首次浏览器阻止自动出声，请按遥控器或鼠标点击画面中心「开启声音」。
++      </div>
++    </div>
++  </section>
++
++  <section id="stage" class="stage hidden">
++    <video id="tvVideo" controls playsinline autoplay></video>
++    <div id="hudTop" class="hud-top">
++      <div style="min-width:0">
++        <div id="tvTitle" class="hud-title">正在准备播放…</div>
++        <div id="tvSub" class="hud-sub">投屏码：----</div>
++      </div>
++      <div class="hud-right">
++        <button id="btnStageFs" class="pill" type="button">全屏</button>
++        <button id="btnStopCast" class="pill" type="button">退出投屏</button>
++      </div>
++    </div>
++    <button id="btnUnmute" class="unmute-btn hidden" type="button">点击开启声音 / 继续播放</button>
++  </section>
++
++<script>
++(function(){
++  const $ = (s) => document.querySelector(s);
++  const state = {
++    code: '',
++    secret: '',
++    seq: 0,
++    hls: null,
++    pollTimer: null,
++    hudTimer: null,
++    currentPayload: null,
++    proxyTried: false,
++  };
++
++  function setStatus(msg) {
++    $('#roomStatus').textContent = msg || '';
++  }
++
++  function destroyVideo() {
++    if (state.hls) {
++      try { state.hls.destroy(); } catch {}
++      state.hls = null;
++    }
++    const v = $('#tvVideo');
++    v.pause();
++    v.removeAttribute('src');
++    v.load();
++    $('#btnUnmute').classList.add('hidden');
++  }
++
++  function showStandby(msg) {
++    destroyVideo();
++    state.currentPayload = null;
++    $('#stage').classList.add('hidden');
++    $('#standby').classList.remove('hidden');
++    if (msg) setStatus(msg);
++  }
++
++  function touchHud() {
++    const hud = $('#hudTop');
++    hud.classList.remove('fade');
++    clearTimeout(state.hudTimer);
++    state.hudTimer = setTimeout(() => hud.classList.add('fade'), 4000);
++  }
++
++  async function tryAutoPlay(v) {
++    try {
++      v.muted = false;
++      await v.play();
++      $('#btnUnmute').classList.add('hidden');
++    } catch {
++      try {
++        v.muted = true;
++        await v.play();
++        $('#btnUnmute').classList.remove('hidden');
++      } catch {
++        $('#btnUnmute').classList.remove('hidden');
++      }
++    }
++  }
++
++  function mountMedia(payload, useProxy = false) {
++    if (!payload || !payload.url) return;
++    destroyVideo();
++    state.currentPayload = payload;
++    state.proxyTried = useProxy;
++    const url = (useProxy && payload.proxy_url) ? payload.proxy_url : payload.url;
++    const v = $('#tvVideo');
++    $('#standby').classList.add('hidden');
++    $('#stage').classList.remove('hidden');
++    $('#tvTitle').textContent = payload.title + (payload.episode ? (' · ' + payload.episode) : '');
++    $('#tvSub').textContent = '投屏码：' + state.code + (useProxy ? ' · 节点转发流' : '');
++    touchHud();
++
++    const pos = Number(payload.position) || 0;
++    const applyPos = () => {
++      if (pos > 1 && !payload.is_live && isFinite(v.duration) && pos < v.duration) {
++        v.currentTime = pos;
++      }
++    };
++
++    const fallbackToProxy = () => {
++      if (!state.proxyTried && payload.proxy_url && payload.proxy_url !== url) {
++        mountMedia(payload, true);
++        return true;
++      }
++      return false;
++    };
++
++    const isHls = /\.m3u8(\?|$)/i.test(url) || url.includes('/api/live/m3u8');
++    if (isHls && window.Hls && Hls.isSupported()) {
++      const hls = new Hls({ maxBufferLength: 30 });
++      state.hls = hls;
++      hls.loadSource(url);
++      hls.attachMedia(v);
++      hls.on(Hls.Events.MANIFEST_PARSED, () => {
++        if (pos > 1 && !payload.is_live) {
++          v.addEventListener('loadedmetadata', applyPos, { once: true });
++        }
++        tryAutoPlay(v);
++      });
++      hls.on(Hls.Events.ERROR, (_e, d) => {
++        if (!d || !d.fatal) return;
++        if (!fallbackToProxy()) {
++          $('#tvSub').textContent = '投屏码：' + state.code + ' · 视频流加载失败 (' + (d.details || d.type || 'ERROR') + ')';
++        }
++      });
++    } else {
++      v.src = url;
++      if (pos > 1 && !payload.is_live) {
++        v.addEventListener('loadedmetadata', applyPos, { once: true });
++      }
++      v.onerror = () => { fallbackToProxy(); };
++      tryAutoPlay(v);
++    }
++  }
++
++  function applyCommand(cmd) {
++    if (!cmd || !cmd.action) return;
++    const v = $('#tvVideo');
++    const p = cmd.payload || {};
++    if (cmd.action === 'load') {
++      mountMedia(p, false);
++    } else if (cmd.action === 'play') {
++      tryAutoPlay(v);
++      touchHud();
++    } else if (cmd.action === 'pause') {
++      v.pause();
++      touchHud();
++    } else if (cmd.action === 'seek') {
++      if (typeof p.time === 'number' && isFinite(p.time)) {
++        v.currentTime = Math.max(0, p.time);
++      } else if (typeof p.delta === 'number' && isFinite(p.delta)) {
++        v.currentTime = Math.max(0, (v.currentTime || 0) + p.delta);
++      }
++      touchHud();
++    } else if (cmd.action === 'volume') {
++      if (typeof p.level === 'number' && isFinite(p.level)) {
++        v.muted = false;
++        v.volume = Math.max(0, Math.min(1, p.level));
++      }
++    } else if (cmd.action === 'stop') {
++      showStandby('投放端已停止投屏，可重新输入投屏码连接');
++    }
++  }
++
++  async function createRoom() {
++    setStatus('正在生成 4 位投屏码…');
++    try {
++      const r = await fetch('/api/cast/room', { method: 'POST' });
++      const d = await r.json();
++      if (!r.ok || !d.code) throw new Error(d.error || '创建房间失败');
++      state.code = d.code;
++      state.secret = d.secret;
++      state.seq = 0;
++      $('#roomCode').textContent = d.code;
++      $('#tvSub').textContent = '投屏码：' + d.code;
++      setStatus('等待手机端连接投屏（房间 6 小时内有效）');
++    } catch (e) {
++      $('#roomCode').textContent = 'ERR';
++      setStatus('连接失败：' + (e.message || e));
++    }
++  }
++
++  async function pollLoop() {
++    if (state.code && state.secret) {
++      try {
++        const u = '/api/cast/poll?code=' + encodeURIComponent(state.code)
++          + '&secret=' + encodeURIComponent(state.secret)
++          + '&since=' + state.seq;
++        const r = await fetch(u, { cache: 'no-store' });
++        if (r.status === 404) {
++          await createRoom();
++        } else if (r.ok) {
++          const d = await r.json();
++          const cmds = Array.isArray(d.commands) ? d.commands : [];
++          for (const c of cmds) {
++            if (typeof c.seq === 'number' && c.seq > state.seq) state.seq = c.seq;
++            applyCommand(c);
++          }
++          if (typeof d.seq === 'number' && d.seq > state.seq) state.seq = d.seq;
++        }
++      } catch {}
++    }
++    state.pollTimer = setTimeout(pollLoop, 1500);
++  }
++
++  function toggleFs() {
++    if (document.fullscreenElement) {
++      document.exitFullscreen().catch(() => {});
++    } else {
++      document.documentElement.requestFullscreen?.().catch(() => {});
++    }
++  }
++
++  $('#btnRefreshCode').onclick = () => createRoom();
++  $('#btnTvFs').onclick = toggleFs;
++  $('#btnStageFs').onclick = toggleFs;
++  $('#btnStopCast').onclick = () => showStandby('已退出播放，等待新的投屏推送');
++  $('#btnUnmute').onclick = () => {
++    const v = $('#tvVideo');
++    v.muted = false;
++    v.play().catch(() => {});
++    $('#btnUnmute').classList.add('hidden');
++  };
++  $('#stage').addEventListener('pointermove', touchHud);
++  $('#stage').addEventListener('click', touchHud);
++
++  createRoom().then(() => { pollLoop(); });
++})();
++</script>
++</body>
++</html>
