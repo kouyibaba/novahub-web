@@ -449,19 +449,29 @@ class Catalog:
 
     def detail(self, sid, vod_id, owner=0):
         source = self.resolve(sid, owner)
-        if not source or source['disabled'] or source['state'] != 'active': raise ValueError('该记录的线路暂不可用，请重新搜索')
+        if not source or source['disabled']:
+            raise ValueError('该记录的线路暂不可用，请重新搜索')
+        if source['state'] != 'active':
+            has_active = any(s['enabled'] for s in self.sources(owner))
+            # 当全站可用源均处于暂缓（兜底模式）或该源为暂缓但未手动停用时允许放行，避免“搜得到却点不开”
+            if has_active and source['state'] != 'paused':
+                raise ValueError('该记录的线路暂不可用，请重新搜索')
         vod_id = str(vod_id)
         if not re.fullmatch(r'[\w-]{1,100}', vod_id): raise ValueError('Invalid media ID')
         rows = self._api(source, {'ac': 'detail', 'ids': vod_id})
         row = next((r for r in rows if str(r.get('vod_id')) == vod_id), None)
         if not row: raise ValueError('影片详情暂不可用')
+        episodes = self._episodes(row)
+        if episodes and source['state'] == 'paused':
+            with self.connection() as c:
+                c.execute("UPDATE catalog_sources SET state='active', failures=0, error='' WHERE id=?", (source['id'],))
         ticket = secrets.token_urlsafe(24)
         with self.lock:
             now = time.monotonic()
             self.tickets = {k: v for k, v in self.tickets.items() if v[2] > now}
             if len(self.tickets) >= 512: self.tickets.pop(next(iter(self.tickets)))
             self.tickets[ticket] = (int(owner), source['id'], now+600)
-        return {'item': self._item(row, source['id']), 'episodes': self._episodes(row),
+        return {'item': self._item(row, source['id']), 'episodes': episodes,
                 'description': re.sub('<[^>]+>', '', str(row.get('vod_content') or ''))[:3000], 'ticket': ticket}
 
     def feedback(self, owner, body):

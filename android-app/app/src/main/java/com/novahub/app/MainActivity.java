@@ -56,6 +56,7 @@ public class MainActivity extends Activity {
     private int sessionSequence = -1;
     private boolean sessionInjected;
     private boolean pendingOpenNotifications = false;
+    private volatile boolean trustedMainPage = false;
 
     /** 供 MediaNotifyService 回调网页端控制播放状态 */
     public static void dispatchMediaAction(final String act) {
@@ -127,8 +128,10 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                boolean trusted = isTrustedPageUrl(url);
+                trustedMainPage = trusted;
                 synchronized (sessionLock) {
-                    sessionNonce = isTrustedPageUrl(url) ? UUID.randomUUID().toString() : "";
+                    sessionNonce = trusted ? UUID.randomUUID().toString() : "";
                     sessionSequence = -1;
                     sessionInjected = false;
                 }
@@ -427,8 +430,14 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public boolean downloadMedia(final String url, final String filename) {
-            if (!isTrustedNovelPage()) return false;
-            return enqueueSystemDownload(url, filename);
+            // @JavascriptInterface 运行在 JavaBridge 后台线程，禁止直接调用 webView.getUrl()
+            if (!trustedMainPage) return false;
+            try {
+                return enqueueSystemDownload(url, filename);
+            } catch (Throwable e) {
+                Log.w("NovaDownload", "Bridge download error", e);
+                return false;
+            }
         }
     }
 

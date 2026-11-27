@@ -3033,7 +3033,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.7</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.8</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -3943,8 +3943,10 @@ async function downloadViaGatewayOrNative(rawUrl, filename) {
   const base = window.__NH_API_BASE__ || "";
   const dlUrl = `${base}/api/media/download?url=${encodeURIComponent(rawUrl)}&name=${encodeURIComponent(safeName)}&ticket=${encodeURIComponent(res.ticket)}`;
   if (window.NovaNative && typeof window.NovaNative.downloadMedia === "function") {
-    const ok = window.NovaNative.downloadMedia(dlUrl, safeName);
-    if (ok) { toast(`已加入系统下载：${safeName}`); return; }
+    try {
+      const ok = window.NovaNative.downloadMedia(dlUrl, safeName);
+      if (ok) { toast(`已加入系统下载：${safeName}`); return; }
+    } catch {}
   }
   triggerBrowserFileDownload(dlUrl, safeName);
   toast(`已开始下载：${safeName}`);

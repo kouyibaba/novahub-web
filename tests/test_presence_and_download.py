@@ -79,6 +79,30 @@ class PresenceAndCatalogTests(unittest.TestCase):
         cat.set_enabled("a", False)
         self.assertEqual(cat._eligible(0), [])
 
+    def test_paused_fallback_source_allows_detail_and_recovers_active(self):
+        cat_path = str(pathlib.Path(self.tmp.name) / "cat_detail.db")
+        cat = catalog.Catalog(
+            cat_path,
+            seeds=[{"id": "a", "name": "A", "api": "https://a.example/api.php/provide/vod"}],
+            default_subscription=False,
+        )
+        with cat.connection() as c:
+            c.execute("UPDATE catalog_sources SET state='paused', disabled=0, failures=3 WHERE id='a'")
+        fake_row = {
+            "vod_id": "101",
+            "vod_name": "测试影片",
+            "vod_play_url": "第1集$https://cdn.example/1.m3u8",
+        }
+        with mock.patch.object(cat, "_api", return_value=[fake_row]):
+            d = cat.detail("c:a", "101", 0)
+        self.assertEqual(len(d["episodes"]), 1)
+        self.assertEqual(cat.sources()[0]["state"], "active")
+        self.assertEqual(cat.sources()[0]["failures"], 0)
+
+        cat.set_enabled("a", False)
+        with self.assertRaises(ValueError):
+            cat.detail("c:a", "101", 0)
+
     def test_media_download_requires_auth_and_blocks_private_targets(self):
         class DummyHandler(server.Handler):
             def __init__(self, headers, path):
