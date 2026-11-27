@@ -21,18 +21,18 @@ jobs:
 
       # Browser publication path: apply only the exact reviewed release patch.
       # Once applied, the patch is removed; ordinary builds skip this step.
-      - name: Apply reviewed v2.5.1 release bundle
+      - name: Apply reviewed v2.5.2 release bundle
         run: |
           set -euo pipefail
-          patch=reviewed-v2.5.1.patch
+          patch=reviewed-v2.5.2.patch
           if [ -f "$patch" ]; then
-            echo "fc5079071b02be28e4b69b05251ce96ac98c0f8f25e4ad541b397aad72e28077  $patch" | sha256sum --check --strict
+            echo "4469d8404bf0624e5870f379d8c148fcb76a9fb22623b26ac8919cc2e10abe18  $patch" | sha256sum --check --strict
             git apply --check "$patch"
             git apply --index "$patch"
             git rm -- "$patch"
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "fix: release v2.5.1 gate responsiveness, source recovery & HD ranking"
+            git commit -m "fix: release v2.5.2 ascii device headers for browser fetch"
             git pull --rebase origin main
             git push origin HEAD:main
           fi
