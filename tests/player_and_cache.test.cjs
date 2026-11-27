@@ -59,6 +59,25 @@ test('player UI includes +30s, +1m, next episode, fullscreen episode drawer, ski
   assert.ok(appSource.includes('function openNotificationCenter('));
   assert.ok(appSource.includes('btnVodNotify'));
   assert.ok(appSource.includes('btnNovelNotify'));
+  assert.ok(htmlSource.includes('id="btnCast"'));
+  assert.ok(htmlSource.includes('id="castBar"'));
+  assert.ok(htmlSource.includes('x-webkit-airplay="allow"'));
+  assert.ok(appSource.includes('function openCastModal('));
+  assert.ok(appSource.includes('/api/cast/command'));
+  assert.ok(appSource.includes('function cancelActiveSearch('));
+  assert.ok(appSource.includes('data-cancel-search="1"'));
+  assert.ok(appSource.includes('&name=${encodeURIComponent(songName)}&artist=${encodeURIComponent(songArtist)}'));
+});
+
+test('tv.html big-screen cast receiver parses cleanly', () => {
+  const tvHtml = fs.readFileSync('tv.html', 'utf8');
+  assert.ok(tvHtml.includes('/api/cast/room'));
+  assert.ok(tvHtml.includes('/api/cast/poll'));
+  const scripts = [...tvHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+  assert.ok(scripts.length >= 2);
+  for (const s of scripts) {
+    assert.doesNotThrow(() => new vm.Script(s[1]));
+  }
 });
 
 test('admin.html inline script parses cleanly and exposes online presence UI', () => {

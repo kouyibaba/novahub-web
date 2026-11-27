@@ -57,3 +57,25 @@
 ## 4. 部署与未完成项说明
 - 后端与静态网页已通过 **USB ADB 本地转发通道（127.0.0.1:11785）** 推送至平板 `~/novahub/` 并精准重启验证（未走公网）。
 - `android-app/`（`MainActivity.java`、`AppUpdater.java`）代码已更新并递增至 `v2.4.6 (9)`，需推送至 GitHub 由 `.github/workflows/build-apk.yml` 完成签名构建后，再经 `.\pad.ps1 -InstallApk` 走 ADB 覆盖安装验证。
+
+## 5. v2.4.9 增量交付：多方式可选投屏（2026-11-27 续）
+- **后端投屏码房间（`server.py`）**：
+  - 新增内存级 4 位无歧义投屏码房间 `_CAST_ROOMS`（6 小时 TTL、容量 200 上限），路由 `POST /api/cast/room`、`GET /api/cast/poll`（`hmac.compare_digest` 校验 `secret`）、`POST /api/cast/command`（登录鉴权 + 频率限制 + URL 白名单校验）。
+  - 将 `/tv.html` 加入 `Handler.send_head()` 静态访问白名单。
+- **大屏网页接收器（`tv.html` / `docs/tv.html`）**：
+  - 暗黑影院风独立页面，启动自动展示 4 位投屏码，每 1.5s 增量轮询指令，支持 `Hls.js` / 直连播放、直链失败自动切换 `proxy_url`、远程暂停/播放/快进快退/音量/退出与有声自动播放解锁按钮。
+- **Android 原生零依赖 DLNA 与系统投屏桥接（`android-app/`）**：
+  - 新增 `DlnaCastManager.java`（纯 Android SDK：`WifiManager.MulticastLock` + `DatagramSocket` SSDP 扫描 + `AVTransport` SOAP 推流与遥控）；
+  - `AndroidManifest.xml` 补充 `ACCESS_WIFI_STATE` 与 `CHANGE_WIFI_MULTICAST_STATE`；
+  - `MainActivity.java` 在 `NovaBridge` 暴露 `hasCastBridge`、`scanDlnaDevices`、`castDlna`、`controlDlna`、`openSystemCastSettings`、`openExternalPlayer`（严守 `trustedMainPage` 线程安全规范）；
+  - `build.gradle` 升至 `versionCode 12` / `versionName "2.4.9"`，同步更新 `RELEASE_NOTES.txt`。
+- **前端统一投屏弹窗与遥控条（`index.html`、`style.css`、`app.js` 及 `docs/`）**：
+  - `<video>` 增加 `x-webkit-airplay="allow"`，控制栏新增 `#btnCast` 与顶部遥控条 `#castBar`；
+  - 弹窗同时提供三种可选方式：局域网 DLNA 设备列表、4 位投屏码大屏投屏、系统无线投屏/外部播放器/AirPlay/复制播放链接，并支持直链与节点代理流实时切换及切集自动同步。
+- **搜索取消与流水条修复（`app.js`、`style.css`）**：
+  - 维护全局 `_searchAbort` 与统一 `cancelActiveSearch()` / `cancelSearchAndLeave()`，并在 `goBack()`、`go()`、`switchMode()` 调用，彻底解决后退/切页时 `#topProgress` 流水条卡死与音乐/小说请求未中止的问题；
+  - 搜索进行中时 `#searchBtn` 切换为可点击的「取消」按钮，居中加载卡片也增加「取消搜索」按钮。
+- **音乐歌词兜底修复（`server.py`、`app.js`）**：
+  - `server.py` `/kw?act=lrc` 支持传入 `name`、`artist`，在酷我官方歌词接口异常或为空时自动回退检索 `music-api.gdstudio.xyz`（网易云源）返回标准 LRC；
+  - `app.js` 请求 `/kw?act=lrc` 携带歌名和歌手并解除 `song.source !== "kuwo"` 限制，统一接入多源兜底。
+- **测试与验证**：新增 `tests/test_cast.py` 并扩展 `tests/player_and_cache.test.cjs` 与 `tests/test_frontend.cjs`，全部 Python 与 Node 测试通过。

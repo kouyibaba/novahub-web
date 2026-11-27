@@ -13,6 +13,7 @@ from html.parser import HTMLParser
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -53,6 +54,48 @@ _PREFETCHING_BOOKS = set()
 # 轻量滑动窗口 IP 限流器
 _RATE_BUCKETS = collections.defaultdict(collections.deque)
 _RATE_LOCK = threading.Lock()
+
+# 大屏投屏码房间状态（内存态 + 6 小时 TTL 自动回收）
+_CAST_ROOMS = {}
+_CAST_LOCK = threading.Lock()
+_CAST_TTL = 6 * 3600
+_CAST_MAX_ROOMS = 200
+_CAST_ACTIONS = {"load", "play", "pause", "seek", "stop", "volume"}
+_CAST_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+
+
+def _cast_cleanup_locked(now):
+    """清理过期投屏房间，超出容量上限时按活跃时间淘汰最旧房间。"""
+    expired = [k for k, v in _CAST_ROOMS.items() if now - v.get("updated_at", 0) > _CAST_TTL]
+    for k in expired:
+        _CAST_ROOMS.pop(k, None)
+    if len(_CAST_ROOMS) >= _CAST_MAX_ROOMS:
+        oldest = sorted(_CAST_ROOMS.items(), key=lambda kv: kv[1].get("updated_at", 0))
+        for k, _ in oldest[: max(1, len(_CAST_ROOMS) - _CAST_MAX_ROOMS + 1)]:
+            _CAST_ROOMS.pop(k, None)
+
+
+def _cast_gen_code_locked():
+    """生成 4 位无歧义大写投屏码（避开 0/O/1/I）。"""
+    for _ in range(32):
+        code = "".join(secrets.choice(_CAST_ALPHABET) for _ in range(4))
+        if code not in _CAST_ROOMS:
+            return code
+    raise RuntimeError("投屏房间已满，请稍后再试")
+
+
+def _is_http_media_url(url):
+    """校验投屏下发的媒体地址是否为合法 http/https URL。"""
+    if not isinstance(url, str):
+        return False
+    u = url.strip()
+    if len(u) < 10 or len(u) > 4096:
+        return False
+    try:
+        sp = urllib.parse.urlsplit(u)
+        return sp.scheme.lower() in ("http", "https") and bool(sp.netloc)
+    except Exception:
+        return False
 
 def _check_rate_limit(ip, bucket, limit, window_sec=60):
     """基于客户端 IP 的轻量滑动窗口限流。"""
@@ -383,7 +426,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def send_head(self):
         # One allowlist shared by inherited GET and HEAD; no directory listing.
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
-        allowed = {"/", "/index.html", "/admin.html", "/app.js", "/auth_session.js", "/history_state.js", "/vod_client.js", "/style.css",
+        allowed = {"/", "/index.html", "/tv.html", "/admin.html", "/app.js", "/auth_session.js", "/history_state.js", "/vod_client.js", "/style.css",
                    "/manifest.json", "/icon.svg", "/endpoint.json", "/apk-version.json",
                    "/apk/novahub-latest.apk"}
         relative = path[5:] if path.startswith("/docs/") else path
@@ -917,25 +960,71 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
 
             if act == "lrc":
-                rid = urllib.parse.quote(qs.get("id", [""])[0])
-                u = f"http://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId={rid}"
-                _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-                d = json.loads(raw_b.decode("utf-8", "ignore").strip())
-                lrclist = ((d.get("data") or {}).get("lrclist")) or []
-                lines = []
-                for item in lrclist:
-                    sec = float(item.get("time") or 0)
-                    mm = int(sec // 60)
-                    ss = sec - mm * 60
-                    txt = html.unescape(item.get("lineLyric") or "").strip()
-                    if txt:
-                        lines.append(f"[{mm:02d}:{ss:05.2f}]{txt}")
-                self.send_json({"lrc": "\n".join(lines)})
+                rid = urllib.parse.quote((qs.get("id") or [""])[0].strip())
+                name = (qs.get("name") or [""])[0].strip()
+                artist = (qs.get("artist") or [""])[0].strip()
+                lrc_text = ""
+                if rid:
+                    try:
+                        u = f"http://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId={rid}"
+                        _, raw_b, _ = _http_get_bytes(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
+                        d = json.loads(raw_b.decode("utf-8", "ignore").strip())
+                        lrclist = ((d.get("data") or {}).get("lrclist")) or []
+                        lines = []
+                        for item in lrclist:
+                            sec = float(item.get("time") or 0)
+                            mm = int(sec // 60)
+                            ss = sec - mm * 60
+                            txt = html.unescape(item.get("lineLyric") or "").strip()
+                            if txt:
+                                lines.append(f"[{mm:02d}:{ss:05.2f}]{txt}")
+                        lrc_text = "\n".join(lines)
+                    except Exception:
+                        lrc_text = ""
+
+                # 酷我官方歌词接口异常或为空时，按歌名+歌手自动回退网易云歌词源
+                if not lrc_text and name:
+                    lrc_text = self._fetch_gdstudio_lrc(name, artist)
+
+                self.send_json({"lrc": lrc_text})
                 return
 
             self.send_json({"error": "unknown act"}, 400)
         except Exception as e:
             self.send_json({"error": str(e)}, 502)
+
+    def _fetch_gdstudio_lrc(self, name, artist=""):
+        """按歌名与歌手从 gdstudio（网易云源）检索标准 LRC 歌词。"""
+        q_str = f"{name} {artist}".strip() if artist else name.strip()
+        if not q_str:
+            return ""
+        try:
+            su = f"https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name={urllib.parse.quote(q_str)}&count=5&pages=1"
+            _, s_raw, _ = _http_get_bytes(su, headers={"User-Agent": UA_DESKTOP}, timeout=5)
+            items = json.loads(s_raw.decode("utf-8", "ignore"))
+            if not isinstance(items, list) or not items:
+                return ""
+            norm = lambda s: re.sub(r"\s+", "", str(s or "").lower())
+            want_name = norm(name)
+            want_artist = norm(artist)
+            best = items[0]
+            for it in items:
+                it_name = norm(it.get("name"))
+                it_art = norm("/".join(it.get("artist")) if isinstance(it.get("artist"), list) else it.get("artist"))
+                if want_name and it_name == want_name and (not want_artist or want_artist in it_art or it_art in want_artist):
+                    best = it
+                    break
+            nid = str(best.get("id") or "").strip()
+            if not nid:
+                return ""
+            lu = f"https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id={urllib.parse.quote(nid)}"
+            _, l_raw, _ = _http_get_bytes(lu, headers={"User-Agent": UA_DESKTOP}, timeout=5)
+            ld = json.loads(l_raw.decode("utf-8", "ignore"))
+            if isinstance(ld, dict):
+                return str(ld.get("lyric") or ld.get("tlyric") or "").strip()
+        except Exception:
+            return ""
+        return ""
 
     # ---------- 直播流 HLS 跨域重写代理 & 媒体流式下载 ----------
     def _live_headers(self, target_url):
@@ -1237,6 +1326,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.handle_notifications_prefs_post()
         if p == "/api/notifications/check":
             return self.handle_notifications_check()
+        if p == "/api/cast/room":
+            return self.handle_cast_room_create()
+        if p == "/api/cast/command":
+            return self.handle_cast_command()
         if p == "/api/vip/redeem":
             return self.handle_vip_redeem()
         if p == "/api/sync":
@@ -1295,6 +1388,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.handle_notifications_prefs_get()
         if p == "/api/media/download":
             return self.handle_media_download(qs)
+        if p == "/api/cast/poll":
+            return self.handle_cast_poll(qs)
         if p == "/api/ops/download":
             return self.handle_ops(p)
         if p == "/kw":
@@ -1428,6 +1523,130 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         checked, updated = _check_watch_targets(targets)
         res = db.list_notifications(user["id"], limit=50)
         self.send_json({"ok": True, "checked": checked, "updated": updated, **res})
+
+    def handle_cast_room_create(self):
+        """大屏端申请 4 位投屏码与配对密钥，供手机端远程推送播放。"""
+        if not _check_rate_limit(self._client_ip(), "cast_room", 20, 60):
+            return self.send_json({"error": "申请投屏码过于频繁，请稍后再试"}, 429)
+        now = time.time()
+        secret = secrets.token_urlsafe(18)
+        with _CAST_LOCK:
+            _cast_cleanup_locked(now)
+            try:
+                code = _cast_gen_code_locked()
+            except RuntimeError as e:
+                return self.send_json({"error": str(e)}, 503)
+            _CAST_ROOMS[code] = {
+                "secret": secret,
+                "seq": 0,
+                "commands": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+        self.send_json({"ok": True, "code": code, "secret": secret, "expires_in": _CAST_TTL})
+
+    def handle_cast_poll(self, qs):
+        """大屏端增量轮询投屏指令队列。"""
+        code = str((qs.get("code") or [""])[0]).strip().upper()
+        secret = str((qs.get("secret") or [""])[0]).strip()
+        try:
+            since = max(0, int((qs.get("since") or ["0"])[0]))
+        except ValueError:
+            since = 0
+        if not code or not secret:
+            return self.send_json({"error": "缺少投屏码或密钥"}, 400)
+        now = time.time()
+        with _CAST_LOCK:
+            _cast_cleanup_locked(now)
+            room = _CAST_ROOMS.get(code)
+            if not room:
+                return self.send_json({"error": "投屏房间不存在或已过期"}, 404)
+            if not hmac.compare_digest(room["secret"], secret):
+                return self.send_json({"error": "投屏密钥校验失败"}, 403)
+            room["updated_at"] = now
+            cmds = [dict(c) for c in room["commands"] if c["seq"] > since]
+            seq = room["seq"]
+        self.send_json({"ok": True, "seq": seq, "commands": cmds, "expires_in": _CAST_TTL})
+
+    def handle_cast_command(self):
+        """手机/网页已登录用户向指定 4 位投屏码下发播放或遥控指令。"""
+        user = self._current_user()
+        if not user:
+            return self.send_json({"error": "请先登录账号"}, 401)
+        if not _check_rate_limit(f"{self._client_ip()}:{user['id']}", "cast_cmd", 120, 60):
+            return self.send_json({"error": "投屏操作过于频繁，请稍后再试"}, 429)
+        try:
+            body = self._read_json_body(16384)
+        except Exception as e:
+            return self.send_json({"error": f"请求体无效: {e}"}, 400)
+        code = str(body.get("code") or "").strip().upper()
+        action = str(body.get("action") or "").strip().lower()
+        payload = body.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        if not re.fullmatch(r"[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}", code):
+            return self.send_json({"error": "请输入有效的 4 位投屏码"}, 400)
+        if action not in _CAST_ACTIONS:
+            return self.send_json({"error": "不支持的投屏指令"}, 400)
+
+        clean_payload = {}
+        if action == "load":
+            url = str(payload.get("url") or "").strip()
+            if not _is_http_media_url(url):
+                return self.send_json({"error": "无效的投屏播放地址"}, 400)
+            clean_payload["url"] = url
+            proxy_url = str(payload.get("proxy_url") or "").strip()
+            if proxy_url and _is_http_media_url(proxy_url):
+                clean_payload["proxy_url"] = proxy_url
+            clean_payload["title"] = str(payload.get("title") or "正在投屏")[:160]
+            clean_payload["episode"] = str(payload.get("episode") or "")[:80]
+            clean_payload["is_live"] = bool(payload.get("is_live", False))
+            try:
+                pos = float(payload.get("position") or 0)
+                clean_payload["position"] = max(0.0, pos) if pos == pos else 0.0
+            except (TypeError, ValueError):
+                clean_payload["position"] = 0.0
+        elif action == "seek":
+            if "time" in payload:
+                try:
+                    t = float(payload["time"])
+                    clean_payload["time"] = max(0.0, t)
+                except (TypeError, ValueError):
+                    return self.send_json({"error": "无效的跳转时间"}, 400)
+            elif "delta" in payload:
+                try:
+                    d = float(payload["delta"])
+                    clean_payload["delta"] = max(-3600.0, min(3600.0, d))
+                except (TypeError, ValueError):
+                    return self.send_json({"error": "无效的时间偏移"}, 400)
+            else:
+                return self.send_json({"error": "缺少跳转参数"}, 400)
+        elif action == "volume":
+            try:
+                vol = float(payload.get("level", 1.0))
+                clean_payload["level"] = max(0.0, min(1.0, vol))
+            except (TypeError, ValueError):
+                return self.send_json({"error": "无效的音量值"}, 400)
+
+        now = time.time()
+        with _CAST_LOCK:
+            _cast_cleanup_locked(now)
+            room = _CAST_ROOMS.get(code)
+            if not room:
+                return self.send_json({"error": "未找到该投屏码对应的大屏，请核对后重试"}, 404)
+            room["seq"] += 1
+            seq = room["seq"]
+            room["updated_at"] = now
+            room["commands"].append({
+                "seq": seq,
+                "action": action,
+                "payload": clean_payload,
+                "ts": round(now, 3),
+                "sender": user.get("username") or "",
+            })
+            if len(room["commands"]) > 30:
+                room["commands"] = room["commands"][-30:]
+        self.send_json({"ok": True, "seq": seq, "code": code})
 
 
 def _check_watch_targets(targets):

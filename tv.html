@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#090A0E">
+<title>NovaHub · 星隅大屏接收器</title>
+<script>
+(function(){
+  const origFetch = window.fetch.bind(window);
+  window.__NH_API_BASE__ = '';
+  window.__NH_REFRESH_ENDPOINT__ = async function() {
+    if (!location.hostname.endsWith('github.io')) return '';
+    try {
+      const r = await origFetch('./endpoint.json?t=' + Date.now(), { cache: 'no-store' });
+      const d = await r.json();
+      window.__NH_API_BASE__ = ((d && d.url) || '').replace(/\/+$/, '');
+      return window.__NH_API_BASE__;
+    } catch {
+      return window.__NH_API_BASE__;
+    }
+  };
+  if (!location.hostname.endsWith('github.io')) return;
+  let ready = window.__NH_REFRESH_ENDPOINT__();
+  window.fetch = async function(input, init) {
+    await ready;
+    const isRel = typeof input === 'string' && /^\/(api|kw|proxy)(\/|\?|$)/.test(input);
+    const buildUrl = (base) => isRel && base ? base + input : input;
+    const target = buildUrl(window.__NH_API_BASE__);
+    try {
+      const resp = await origFetch(target, init);
+      if (isRel && (resp.status === 502 || resp.status === 503 || resp.status === 530)) {
+        const oldBase = window.__NH_API_BASE__;
+        const newBase = await window.__NH_REFRESH_ENDPOINT__();
+        if (newBase && newBase !== oldBase) return origFetch(buildUrl(newBase), init);
+      }
+      return resp;
+    } catch (err) {
+      if (isRel) {
+        const oldBase = window.__NH_API_BASE__;
+        const newBase = await window.__NH_REFRESH_ENDPOINT__();
+        if (newBase && newBase !== oldBase) return origFetch(buildUrl(newBase), init);
+      }
+      throw err;
+    }
+  };
+})();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #090a0e;
+  --card: rgba(20, 22, 30, 0.88);
+  --border: rgba(231, 198, 107, 0.24);
+  --accent: #e7c66b;
+  --text: #f5efe2;
+  --muted: #9a96a6;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 100%; height: 100%; overflow: hidden;
+  background: radial-gradient(circle at 50% 18%, rgba(231, 198, 107, 0.10), transparent 55%), var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.standby {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.standby.hidden { display: none; }
+.panel {
+  width: min(560px, 100%);
+  padding: 34px 28px;
+  border-radius: 24px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.65);
+  text-align: center;
+}
+.brand {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-size: 20px; font-weight: 700; letter-spacing: 0.04em; color: var(--text);
+}
+.brand span { color: var(--accent); }
+.subtitle { margin-top: 8px; font-size: 13.5px; color: var(--muted); }
+.code-box {
+  margin: 26px auto 18px;
+  padding: 20px 18px;
+  border-radius: 18px;
+  background: rgba(10, 11, 16, 0.9);
+  border: 1px dashed rgba(231, 198, 107, 0.42);
+}
+.code-label { font-size: 12px; letter-spacing: 0.14em; color: var(--muted); margin-bottom: 8px; }
+.code-val {
+  font-size: clamp(46px, 9vw, 68px);
+  font-weight: 800;
+  letter-spacing: 0.24em;
+  text-indent: 0.24em;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 26px rgba(231, 198, 107, 0.28);
+}
+.status {
+  font-size: 13.5px; color: #d8d3c8; min-height: 22px; margin-bottom: 18px;
+}
+.actions { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
+.btn {
+  padding: 10px 20px; border-radius: 999px; cursor: pointer;
+  font-size: 13.5px; font-weight: 600; border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.07); color: var(--text);
+}
+.btn.primary {
+  background: linear-gradient(135deg, #eccb73, #b98b2a);
+  color: #12100b; border-color: transparent;
+}
+.tips {
+  margin-top: 22px; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12.5px; color: var(--muted); line-height: 1.75; text-align: left;
+}
+.stage {
+  position: fixed; inset: 0; background: #000;
+  display: flex; align-items: center; justify-content: center;
+}
+.stage.hidden { display: none; }
+.stage video {
+  width: 100%; height: 100%; object-fit: contain; background: #000;
+}
+.hud-top {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 16px 22px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.82), transparent);
+  transition: opacity 0.28s ease;
+}
+.hud-top.fade { opacity: 0; pointer-events: none; }
+.hud-title { font-size: 16px; font-weight: 600; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-sub { font-size: 12px; color: rgba(255, 255, 255, 0.72); margin-top: 2px; }
+.hud-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.pill {
+  padding: 6px 14px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+  border: 1px solid rgba(231, 198, 107, 0.42); background: rgba(15, 16, 22, 0.78); color: var(--accent);
+  cursor: pointer;
+}
+.unmute-btn {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 15;
+  padding: 14px 26px; border-radius: 999px; border: 1px solid rgba(231, 198, 107, 0.65);
+  background: rgba(15, 16, 22, 0.9); color: var(--accent); font-size: 15px; font-weight: 700;
+  cursor: pointer; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65);
+}
+.unmute-btn.hidden { display: none; }
+</style>
+</head>
+<body>
+  <section id="standby" class="standby">
+    <div class="panel">
+      <div class="brand">Nova<span>.</span>Hub 大屏接收器</div>
+      <div class="subtitle">打开手机/电脑端星隅播放器，点击「投屏」输入下方 4 位投屏码</div>
+      <div class="code-box">
+        <div class="code-label">当前大屏投屏码</div>
+        <div id="roomCode" class="code-val">----</div>
+      </div>
+      <div id="roomStatus" class="status">正在连接星隅网关生成投屏码…</div>
+      <div class="actions">
+        <button id="btnRefreshCode" class="btn primary" type="button">刷新投屏码</button>
+        <button id="btnTvFs" class="btn" type="button">全屏显示</button>
+      </div>
+      <div class="tips">
+        1. 支持电视浏览器、电脑浏览器、平板浏览器跨网络投屏。<br>
+        2. 手机端可在播放界面遥控暂停、快进、切集，以及切换节点转发防盗链流。<br>
+        3. 若首次浏览器阻止自动出声，请按遥控器或鼠标点击画面中心「开启声音」。
+      </div>
+    </div>
+  </section>
+
+  <section id="stage" class="stage hidden">
+    <video id="tvVideo" controls playsinline autoplay></video>
+    <div id="hudTop" class="hud-top">
+      <div style="min-width:0">
+        <div id="tvTitle" class="hud-title">正在准备播放…</div>
+        <div id="tvSub" class="hud-sub">投屏码：----</div>
+      </div>
+      <div class="hud-right">
+        <button id="btnStageFs" class="pill" type="button">全屏</button>
+        <button id="btnStopCast" class="pill" type="button">退出投屏</button>
+      </div>
+    </div>
+    <button id="btnUnmute" class="unmute-btn hidden" type="button">点击开启声音 / 继续播放</button>
+  </section>
+
+<script>
+(function(){
+  const $ = (s) => document.querySelector(s);
+  const state = {
+    code: '',
+    secret: '',
+    seq: 0,
+    hls: null,
+    pollTimer: null,
+    hudTimer: null,
+    currentPayload: null,
+    proxyTried: false,
+  };
+
+  function setStatus(msg) {
+    $('#roomStatus').textContent = msg || '';
+  }
+
+  function destroyVideo() {
+    if (state.hls) {
+      try { state.hls.destroy(); } catch {}
+      state.hls = null;
+    }
+    const v = $('#tvVideo');
+    v.pause();
+    v.removeAttribute('src');
+    v.load();
+    $('#btnUnmute').classList.add('hidden');
+  }
+
+  function showStandby(msg) {
+    destroyVideo();
+    state.currentPayload = null;
+    $('#stage').classList.add('hidden');
+    $('#standby').classList.remove('hidden');
+    if (msg) setStatus(msg);
+  }
+
+  function touchHud() {
+    const hud = $('#hudTop');
+    hud.classList.remove('fade');
+    clearTimeout(state.hudTimer);
+    state.hudTimer = setTimeout(() => hud.classList.add('fade'), 4000);
+  }
+
+  async function tryAutoPlay(v) {
+    try {
+      v.muted = false;
+      await v.play();
+      $('#btnUnmute').classList.add('hidden');
+    } catch {
+      try {
+        v.muted = true;
+        await v.play();
+        $('#btnUnmute').classList.remove('hidden');
+      } catch {
+        $('#btnUnmute').classList.remove('hidden');
+      }
+    }
+  }
+
+  function mountMedia(payload, useProxy = false) {
+    if (!payload || !payload.url) return;
+    destroyVideo();
+    state.currentPayload = payload;
+    state.proxyTried = useProxy;
+    const url = (useProxy && payload.proxy_url) ? payload.proxy_url : payload.url;
+    const v = $('#tvVideo');
+    $('#standby').classList.add('hidden');
+    $('#stage').classList.remove('hidden');
+    $('#tvTitle').textContent = payload.title + (payload.episode ? (' · ' + payload.episode) : '');
+    $('#tvSub').textContent = '投屏码：' + state.code + (useProxy ? ' · 节点转发流' : '');
+    touchHud();
+
+    const pos = Number(payload.position) || 0;
+    const applyPos = () => {
+      if (pos > 1 && !payload.is_live && isFinite(v.duration) && pos < v.duration) {
+        v.currentTime = pos;
+      }
+    };
+
+    const fallbackToProxy = () => {
+      if (!state.proxyTried && payload.proxy_url && payload.proxy_url !== url) {
+        mountMedia(payload, true);
+        return true;
+      }
+      return false;
+    };
+
+    const isHls = /\.m3u8(\?|$)/i.test(url) || url.includes('/api/live/m3u8');
+    if (isHls && window.Hls && Hls.isSupported()) {
+      const hls = new Hls({ maxBufferLength: 30 });
+      state.hls = hls;
+      hls.loadSource(url);
+      hls.attachMedia(v);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (pos > 1 && !payload.is_live) {
+          v.addEventListener('loadedmetadata', applyPos, { once: true });
+        }
+        tryAutoPlay(v);
+      });
+      hls.on(Hls.Events.ERROR, (_e, d) => {
+        if (!d || !d.fatal) return;
+        if (!fallbackToProxy()) {
+          $('#tvSub').textContent = '投屏码：' + state.code + ' · 视频流加载失败 (' + (d.details || d.type || 'ERROR') + ')';
+        }
+      });
+    } else {
+      v.src = url;
+      if (pos > 1 && !payload.is_live) {
+        v.addEventListener('loadedmetadata', applyPos, { once: true });
+      }
+      v.onerror = () => { fallbackToProxy(); };
+      tryAutoPlay(v);
+    }
+  }
+
+  function applyCommand(cmd) {
+    if (!cmd || !cmd.action) return;
+    const v = $('#tvVideo');
+    const p = cmd.payload || {};
+    if (cmd.action === 'load') {
+      mountMedia(p, false);
+    } else if (cmd.action === 'play') {
+      tryAutoPlay(v);
+      touchHud();
+    } else if (cmd.action === 'pause') {
+      v.pause();
+      touchHud();
+    } else if (cmd.action === 'seek') {
+      if (typeof p.time === 'number' && isFinite(p.time)) {
+        v.currentTime = Math.max(0, p.time);
+      } else if (typeof p.delta === 'number' && isFinite(p.delta)) {
+        v.currentTime = Math.max(0, (v.currentTime || 0) + p.delta);
+      }
+      touchHud();
+    } else if (cmd.action === 'volume') {
+      if (typeof p.level === 'number' && isFinite(p.level)) {
+        v.muted = false;
+        v.volume = Math.max(0, Math.min(1, p.level));
+      }
+    } else if (cmd.action === 'stop') {
+      showStandby('投放端已停止投屏，可重新输入投屏码连接');
+    }
+  }
+
+  async function createRoom() {
+    setStatus('正在生成 4 位投屏码…');
+    try {
+      const r = await fetch('/api/cast/room', { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok || !d.code) throw new Error(d.error || '创建房间失败');
+      state.code = d.code;
+      state.secret = d.secret;
+      state.seq = 0;
+      $('#roomCode').textContent = d.code;
+      $('#tvSub').textContent = '投屏码：' + d.code;
+      setStatus('等待手机端连接投屏（房间 6 小时内有效）');
+    } catch (e) {
+      $('#roomCode').textContent = 'ERR';
+      setStatus('连接失败：' + (e.message || e));
+    }
+  }
+
+  async function pollLoop() {
+    if (state.code && state.secret) {
+      try {
+        const u = '/api/cast/poll?code=' + encodeURIComponent(state.code)
+          + '&secret=' + encodeURIComponent(state.secret)
+          + '&since=' + state.seq;
+        const r = await fetch(u, { cache: 'no-store' });
+        if (r.status === 404) {
+          await createRoom();
+        } else if (r.ok) {
+          const d = await r.json();
+          const cmds = Array.isArray(d.commands) ? d.commands : [];
+          for (const c of cmds) {
+            if (typeof c.seq === 'number' && c.seq > state.seq) state.seq = c.seq;
+            applyCommand(c);
+          }
+          if (typeof d.seq === 'number' && d.seq > state.seq) state.seq = d.seq;
+        }
+      } catch {}
+    }
+    state.pollTimer = setTimeout(pollLoop, 1500);
+  }
+
+  function toggleFs() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      document.documentElement.requestFullscreen?.().catch(() => {});
+    }
+  }
+
+  $('#btnRefreshCode').onclick = () => createRoom();
+  $('#btnTvFs').onclick = toggleFs;
+  $('#btnStageFs').onclick = toggleFs;
+  $('#btnStopCast').onclick = () => showStandby('已退出播放，等待新的投屏推送');
+  $('#btnUnmute').onclick = () => {
+    const v = $('#tvVideo');
+    v.muted = false;
+    v.play().catch(() => {});
+    $('#btnUnmute').classList.add('hidden');
+  };
+  $('#stage').addEventListener('pointermove', touchHud);
+  $('#stage').addEventListener('click', touchHud);
+
+  createRoom().then(() => { pollLoop(); });
+})();
+</script>
+</body>
+</html>

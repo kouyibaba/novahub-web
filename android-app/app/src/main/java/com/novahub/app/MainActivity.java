@@ -50,6 +50,7 @@ public class MainActivity extends Activity {
     private boolean backNavigationPending;
     private android.window.OnBackInvokedCallback systemBackCallback;
     private NovelTtsController novelTts;
+    private DlnaCastManager dlnaCastManager;
     private SessionStore sessionStore;
     private final Object sessionLock = new Object();
     private String sessionNonce = "";
@@ -87,6 +88,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         activeRef = new WeakReference<>(this);
         sessionStore = new SessionStore(this);
+        dlnaCastManager = new DlnaCastManager(this);
 
         Window window = getWindow();
         window.setStatusBarColor(Color.parseColor("#090A0D"));
@@ -439,6 +441,92 @@ public class MainActivity extends Activity {
                 return false;
             }
         }
+
+        @JavascriptInterface
+        public boolean hasCastBridge() {
+            return trustedMainPage;
+        }
+
+        @JavascriptInterface
+        public void scanDlnaDevices() {
+            if (!trustedMainPage || dlnaCastManager == null) return;
+            dlnaCastManager.scanDevices((devices, error) -> {
+                JSONObject res = new JSONObject();
+                try {
+                    res.put("ok", error == null);
+                    res.put("devices", devices != null ? devices : new org.json.JSONArray());
+                    if (error != null) res.put("error", error);
+                } catch (Throwable ignored) {}
+                final String json = res.toString();
+                mainHandler.post(() -> {
+                    if (!isFinishing() && webView != null && isTrustedNovelPage()) {
+                        webView.evaluateJavascript("window.__nhDlnaDevices && window.__nhDlnaDevices(" + json + ")", null);
+                    }
+                });
+            });
+        }
+
+        @JavascriptInterface
+        public void castDlna(final String udn, final String url, final String title) {
+            if (!trustedMainPage || dlnaCastManager == null) return;
+            dlnaCastManager.castUrl(udn, url, title, (ok, msg) -> notifyDlnaResult("cast", ok, msg));
+        }
+
+        @JavascriptInterface
+        public void controlDlna(final String action, final String value) {
+            if (!trustedMainPage || dlnaCastManager == null) return;
+            dlnaCastManager.control(action, value, (ok, msg) -> notifyDlnaResult(action, ok, msg));
+        }
+
+        @JavascriptInterface
+        public boolean openSystemCastSettings() {
+            if (!trustedMainPage) return false;
+            runOnUiThread(() -> {
+                try {
+                    startActivity(new android.content.Intent(Settings.ACTION_CAST_SETTINGS));
+                } catch (Throwable ignored) {
+                    try {
+                        startActivity(new android.content.Intent(Settings.ACTION_DISPLAY_SETTINGS));
+                    } catch (Throwable e2) {
+                        Toast.makeText(MainActivity.this, "请在系统设置中打开无线投屏", Toast.LENGTH_SHORT).show();
+                    }
+                }
+            });
+            return true;
+        }
+
+        @JavascriptInterface
+        public boolean openExternalPlayer(final String url, final String title) {
+            if (!trustedMainPage || url == null || (!url.startsWith("http://") && !url.startsWith("https://"))) {
+                return false;
+            }
+            runOnUiThread(() -> {
+                try {
+                    android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+                    intent.setDataAndType(Uri.parse(url), "video/*");
+                    if (title != null && !title.isEmpty()) intent.putExtra("title", title);
+                    startActivity(android.content.Intent.createChooser(intent, "选择外部播放器播放/投屏"));
+                } catch (Throwable e) {
+                    Toast.makeText(MainActivity.this, "未找到可用的外部播放器", Toast.LENGTH_SHORT).show();
+                }
+            });
+            return true;
+        }
+    }
+
+    private void notifyDlnaResult(final String action, final boolean ok, final String message) {
+        JSONObject res = new JSONObject();
+        try {
+            res.put("action", action != null ? action : "");
+            res.put("ok", ok);
+            res.put("message", message != null ? message : "");
+        } catch (Throwable ignored) {}
+        final String json = res.toString();
+        mainHandler.post(() -> {
+            if (!isFinishing() && webView != null && isTrustedNovelPage()) {
+                webView.evaluateJavascript("window.__nhDlnaResult && window.__nhDlnaResult(" + json + ")", null);
+            }
+        });
     }
 
     private boolean enqueueSystemDownload(String url, String rawFilename) {
@@ -544,6 +632,7 @@ public class MainActivity extends Activity {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(systemBackCallback);
         }
         if (novelTts != null) novelTts.shutdown();
+        if (dlnaCastManager != null) dlnaCastManager.shutdown();
         MediaNotifyService.clear(this);
         super.onDestroy();
     }

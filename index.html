@@ -67,7 +67,7 @@
 })();
 </script>
 <link rel="manifest" href="manifest.json">
-<link rel="stylesheet" href="style.css?v=20261127-v248">
+<link rel="stylesheet" href="style.css?v=20261127-v249">
 <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
 <style>
@@ -145,8 +145,9 @@
     <span id="playerTitle" class="player-title"></span>
     <button id="playerFav" class="btn-back"></button>
   </div>
+  <div id="castBar" class="cast-bar hidden" aria-live="polite"></div>
   <div class="player-box">
-    <video id="video" playsinline webkit-playsinline x5-video-player-type="h5"></video>
+    <video id="video" playsinline webkit-playsinline x-webkit-airplay="allow" x5-video-player-type="h5"></video>
     <div id="playerDimmer" class="player-dimmer" aria-hidden="true"></div>
     <div id="playerTip" class="player-tip"></div>
     <div id="playerGestureToast" class="player-gesture-toast hidden" aria-hidden="true"></div>
@@ -183,6 +184,7 @@
         <button id="btnFsEp" class="player-tool-btn fs-ep-btn hidden" type="button" aria-label="全屏选集">选集</button>
         <button id="btnSkipCfg" class="player-tool-btn" type="button" aria-label="片头片尾设置">片头尾</button>
         <button id="btnVodDownload" class="player-tool-btn" type="button" aria-label="下载本集">下载</button>
+        <button id="btnCast" class="player-tool-btn" type="button" aria-label="投屏">投屏</button>
         <button id="btnFit" class="player-fit-btn" type="button" aria-label="切换画面铺满">铺满</button>
       </div>
       <button id="btnFs" class="player-fs-btn" type="button" aria-label="全屏"></button>
@@ -265,9 +267,9 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="history_state.js?v=20261127-v248"></script>
-<script src="vod_client.js?v=20261127-v248"></script>
-<script src="auth_session.js?v=20261127-v248"></script>
-<script src="app.js?v=20261127-v248"></script>
+<script src="history_state.js?v=20261127-v249"></script>
+<script src="vod_client.js?v=20261127-v249"></script>
+<script src="auth_session.js?v=20261127-v249"></script>
+<script src="app.js?v=20261127-v249"></script>
 </body>
 </html>

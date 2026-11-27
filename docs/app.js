@@ -254,6 +254,9 @@ function closePlayer(fromPop = false) {
     const v = $("#video");
     if (v && v.currentTime > 1) saveProgress(P.vodKey, P.idx, v.currentTime, true);
   }
+  if (typeof castState !== "undefined" && castState.active && typeof stopActiveCast === "function") {
+    stopActiveCast(true);
+  }
   if (typeof openFsEpDrawer === "function") openFsEpDrawer(false);
   if (typeof setPlayerFullscreen === "function") setPlayerFullscreen(false);
   destroyPlayers();
@@ -278,7 +281,8 @@ function closeReader() {
   syncModeFab();
 }
 function goBack(fromPop = false) {
-  if (typeof vodClient !== "undefined") { vodClient.cancel(); viewRequest++; }
+  if (typeof cancelActiveSearch === "function") cancelActiveSearch(true);
+  else if (typeof vodClient !== "undefined") { vodClient.cancel(); viewRequest++; }
   if (!$("#tocMask").classList.contains("hidden")) { $("#tocMask").classList.add("hidden"); return; }
   if (!$("#readerLayer").classList.contains("hidden")) { closeReader(); return; }
   if (!$("#playerLayer").classList.contains("hidden")) { closePlayer(fromPop); return; }
@@ -393,6 +397,7 @@ function updateTopbar() {
 }
 
 function switchMode(mode, targetRoute) {
+  if (typeof cancelActiveSearch === "function") cancelActiveSearch(true);
   appMode = mode;
   set(K.MODE, mode);
   updateTopbar();
@@ -404,7 +409,8 @@ function switchMode(mode, targetRoute) {
 let _bootDone = false;
 function go(route) {
   const applyRoute = () => {
-    vodClient.cancel(); viewRequest++;
+    if (typeof cancelActiveSearch === "function") cancelActiveSearch(true);
+    else { vodClient.cancel(); viewRequest++; }
     currentRoute = route;
     viewStack.length = 0;
     document.body.classList.remove("detail-view");
@@ -463,12 +469,38 @@ function syncSearchClear() {
   const inp = $("#searchInput"), clr = $("#searchClear");
   if (inp && clr) clr.classList.toggle("hidden", !inp.value.trim());
 }
+let _searchAbort = null;
+let _searchLoading = false;
 function setSearchLoading(on) {
+  _searchLoading = !!on;
   const bar = $("#topProgress"), btn = $("#searchBtn");
   if (bar) bar.classList.toggle("hidden", !on);
   if (btn) {
-    btn.disabled = !!on;
-    btn.innerHTML = on ? `<progress aria-label="检索中" class="loading-spinner"></progress>` : "搜索";
+    btn.disabled = false;
+    btn.classList.toggle("is-cancel", !!on);
+    btn.setAttribute("aria-label", on ? "取消搜索" : "搜索");
+    btn.textContent = on ? "取消" : "搜索";
+  }
+}
+function cancelActiveSearch(silent = false) {
+  const hadActive = _searchLoading || !!_searchAbort;
+  if (_searchAbort) {
+    try { _searchAbort.abort(); } catch {}
+    _searchAbort = null;
+  }
+  if (typeof vodClient !== "undefined" && typeof vodClient.cancel === "function") {
+    vodClient.cancel();
+  }
+  if (typeof viewRequest !== "undefined") viewRequest++;
+  setSearchLoading(false);
+  if (!silent && hadActive && typeof toast === "function") toast("已取消搜索");
+}
+function cancelSearchAndLeave() {
+  cancelActiveSearch(false);
+  if (viewStack.length > 0) {
+    goBack();
+  } else if (typeof routes[currentRoute] === "function") {
+    routes[currentRoute]();
   }
 }
 function renderSearchLoadingHtml(q, sub = "正在匹配多路资源，请稍候…") {
@@ -476,6 +508,7 @@ function renderSearchLoadingHtml(q, sub = "正在匹配多路资源，请稍候�
     <div class="nh-spinner-lg" aria-hidden="true"></div>
     <div class="search-loading-title">正在搜索「${esc(q)}」</div>
     <div class="search-loading-sub">${esc(sub)}</div>
+    <button type="button" class="btn ghost" data-cancel-search="1" style="margin-top:12px;padding:6px 18px;font-size:12.5px">取消搜索</button>
   </div>`;
 }
 function renderSkeletonHtml(type = "grid", count = 6, bare = false) {
@@ -507,7 +540,15 @@ const triggerSearch = () => {
     if (q) doSearch(q); else go("home");
   }
 };
-$("#searchBtn").addEventListener("click", triggerSearch);
+$("#searchBtn").addEventListener("click", () => {
+  if (_searchLoading) { cancelSearchAndLeave(); return; }
+  triggerSearch();
+});
+document.addEventListener("click", (e) => {
+  if (e.target && e.target.closest && e.target.closest("[data-cancel-search]")) {
+    cancelSearchAndLeave();
+  }
+});
 $("#searchInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); triggerSearch(); }
 });
@@ -683,6 +724,10 @@ function sortByExactMatch(list, query, getTitle, getSub) {
 
 async function searchMusic(q) {
   if (!q) return;
+  cancelActiveSearch(true);
+  const mine = ++viewRequest;
+  const ac = new AbortController();
+  _searchAbort = ac;
   setSearchLoading(true);
   const view = $("#view");
   if (view) view.innerHTML = `<div class="section-title">${ico("search")} 搜索：${esc(q)}</div>${renderSearchLoadingHtml(q, "正在检索曲库与歌单…")}`;
@@ -693,7 +738,9 @@ async function searchMusic(q) {
   };
   try {
     // 优先检索高可播率酷我曲库，并清理歌手转义分隔符
-    const kwRes = await fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`).then((r) => r.ok ? r.json() : []).catch(() => []);
+    const kwRes = await fetch(`/kw?act=search&q=${encodeURIComponent(q)}&rn=45`, { signal: ac.signal })
+      .then((r) => r.ok ? r.json() : []).catch(() => []);
+    if (mine !== viewRequest || ac.signal.aborted) return;
     if (Array.isArray(kwRes)) {
       kwRes.forEach((x) => {
         const nm = String(x.name || "").replace(/\u00a0/g, " ").trim();
@@ -708,7 +755,9 @@ async function searchMusic(q) {
     }
     // 仅当酷我有效结果不足 5 首时才回退补充网易云曲库，减少不可播杂曲
     if (kwList.length < 5) {
-      const neRes = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=30&pages=1`, 7000).catch(() => []);
+      const neRes = await fetch(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(q)}&count=30&pages=1`, { signal: ac.signal })
+        .then((r) => r.ok ? r.json() : []).catch(() => []);
+      if (mine !== viewRequest || ac.signal.aborted) return;
       if (Array.isArray(neRes)) {
         neRes.forEach((x) => {
           const nm = String(x.name || "").trim() || "未知歌曲";
@@ -727,8 +776,10 @@ async function searchMusic(q) {
       }
     }
   } finally {
-    setSearchLoading(false);
+    if (_searchAbort === ac) _searchAbort = null;
+    if (mine === viewRequest) setSearchLoading(false);
   }
+  if (mine !== viewRequest || ac.signal.aborted) return;
   const seen = new Set();
   const merged = [];
   kwList.concat(neList).forEach((item) => {
@@ -864,26 +915,48 @@ async function resolveSongUrl(song, brOverride = null) {
 async function loadSongLyrics(song, token) {
   curLyrics = []; activeLrcIdx = -1;
   const targets = [];
+  const songName = String(song.name || "").trim();
+  const songArtist = String(song.artist || "").trim();
   if (song.source === "kuwo" || song._kwRid) {
     const rid = song._kwRid || song.id;
     targets.push(async () => {
-      const r = await fetch(`/kw?act=lrc&id=${encodeURIComponent(rid)}`);
+      const r = await fetch(`/kw?act=lrc&id=${encodeURIComponent(rid)}&name=${encodeURIComponent(songName)}&artist=${encodeURIComponent(songArtist)}`);
       const d = r.ok ? await r.json() : null;
       return d?.lrc || "";
     });
+  }
+  if (song.lrc) targets.push(() => fetchText(song.lrc, 5000));
+  if (song.id && song.source !== "kuwo" && song.source !== "tencent") {
     targets.push(async () => {
-      const s = await fetchJson(`https://api.vkeys.cn/v2/music/tencent?word=${encodeURIComponent(song.name + " " + (song.artist || ""))}&choose=1`, 5000);
-      const tid = s?.data?.id;
-      if (!tid) return "";
-      const ld = await fetchJson(`https://api.vkeys.cn/v2/music/tencent/lyric?id=${tid}`, 5000);
-      return ld?.data?.lrc || "";
+      const d = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id=${encodeURIComponent(song.id)}`, 5000);
+      return d?.lyric || "";
     });
   }
-  if (song.source !== "kuwo") {
-    if (song.lrc) targets.push(() => fetchText(song.lrc, 5000));
-    if (song.id && song.source !== "tencent") targets.push(async () => {
-      const d = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id=${song.id}`, 5000);
-      return d?.lyric || "";
+  // 全曲源统一兜底：按歌名+歌手检索 gdstudio（网易云）标准 LRC，覆盖酷我/收藏旧曲目
+  if (songName) {
+    targets.push(async () => {
+      const kw = `${songName} ${songArtist}`.trim();
+      const list = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=${encodeURIComponent(kw)}&count=5&pages=1`, 5000);
+      if (!Array.isArray(list) || !list.length) return "";
+      const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, "");
+      const wn = norm(songName), wa = norm(songArtist);
+      const hit = list.find((it) => {
+        const iname = norm(it?.name);
+        const iart = norm(Array.isArray(it?.artist) ? it.artist.join("/") : it?.artist);
+        return wn && iname === wn && (!wa || iart.includes(wa) || wa.includes(iart));
+      }) || list[0];
+      if (!hit?.id) return "";
+      const ld = await fetchJson(`https://music-api.gdstudio.xyz/api.php?types=lyric&source=netease&id=${encodeURIComponent(hit.id)}`, 5000);
+      return ld?.lyric || ld?.tlyric || "";
+    });
+  }
+  if (song.source === "kuwo" || song._kwRid) {
+    targets.push(async () => {
+      const s = await fetchJson(`https://api.vkeys.cn/v2/music/tencent?word=${encodeURIComponent((songName + " " + songArtist).trim())}&choose=1`, 3500);
+      const tid = s?.data?.id;
+      if (!tid) return "";
+      const ld = await fetchJson(`https://api.vkeys.cn/v2/music/tencent/lyric?id=${tid}`, 3500);
+      return ld?.data?.lrc || "";
     });
   }
   for (const fn of targets) {
@@ -2118,6 +2191,9 @@ function selectEpisodeIndex(i) {
   renderEpisodes();
   mountSource(P.eps[i].url);
   $("#playerTitle").textContent = P.title.replace(/ · .*$/, "") + " · " + P.eps[i].name;
+  if (typeof castState !== "undefined" && castState.active && typeof syncCastEpisode === "function") {
+    syncCastEpisode();
+  }
 }
 function renderEpisodes() {
   const el = $("#epList");
@@ -2558,6 +2634,375 @@ $("#btnVodDownload")?.addEventListener("click", () => {
   const title = (P.title || "视频").split(" · ")[0];
   downloadVodEpisode(title, ep.name || "正片", ep.url);
 });
+$("#btnCast")?.addEventListener("click", openCastModal);
+
+/* ============ 多方式可选投屏（DLNA + 4位投屏码大屏 + 系统投屏/外部播放器/AirPlay） ============ */
+const castState = {
+  active: false,
+  mode: "", // "dlna" | "room"
+  targetName: "",
+  udn: "",
+  code: "",
+  paused: false,
+  useProxy: false,
+  devices: [],
+  scanning: false,
+};
+
+function getCurrentCastRawUrl() {
+  const ep = (P.eps && P.eps[P.idx]) || null;
+  if (ep && ep.url) return ep.url;
+  const v = $("#video");
+  return v?.currentSrc || v?.src || "";
+}
+
+async function resolveCastUrls() {
+  const rawUrl = getCurrentCastRawUrl();
+  if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return null;
+  let gatewayBase = window.__NH_API_BASE__ || "";
+  if (!gatewayBase && location.protocol.startsWith("http") && !location.hostname.endsWith("github.io")) {
+    gatewayBase = location.origin;
+  }
+  let proxyUrl = "";
+  if (gatewayBase && !rawUrl.includes("/api/live/m3u8")) {
+    try {
+      const t = await nhApi("/api/media/ticket");
+      if (t && t.ticket) {
+        proxyUrl = `${gatewayBase.replace(/\/+$/, "")}/api/live/m3u8?url=${encodeURIComponent(rawUrl)}&ticket=${encodeURIComponent(t.ticket)}`;
+      }
+    } catch {}
+  }
+  const titleParts = (P.title || "星隅视频").split(" · ");
+  const title = titleParts[0] || "星隅视频";
+  const episode = (P.eps && P.eps[P.idx] && P.eps[P.idx].name) || titleParts[1] || "";
+  const v = $("#video");
+  const position = (!P.isLive && v && isFinite(v.currentTime)) ? Math.floor(v.currentTime) : 0;
+  return {
+    rawUrl,
+    proxyUrl,
+    title,
+    episode,
+    position,
+    is_live: !!P.isLive,
+  };
+}
+
+function renderCastBar() {
+  const bar = $("#castBar");
+  if (!bar) return;
+  if (!castState.active) {
+    bar.classList.add("hidden");
+    bar.innerHTML = "";
+    $("#btnCast")?.classList.remove("active");
+    return;
+  }
+  $("#btnCast")?.classList.add("active");
+  const modeLabel = castState.mode === "dlna"
+    ? `DLNA · ${castState.targetName || "电视"}`
+    : `投屏码 ${castState.code}`;
+  const hasNext = !!(P.eps && P.eps.length > 1 && !P.isLive && P.idx + 1 < P.eps.length);
+  bar.classList.remove("hidden");
+  bar.innerHTML = `
+    <div class="cast-bar-meta">
+      <span class="cast-dot"></span>
+      <span>正在投屏：${esc(modeLabel)}${castState.useProxy ? "（代理流）" : ""}</span>
+    </div>
+    <div class="cast-bar-btns">
+      <button type="button" class="cast-mini-btn accent" data-cast-act="toggle">${castState.paused ? "继续" : "暂停"}</button>
+      ${!P.isLive ? `<button type="button" class="cast-mini-btn" data-cast-act="rew">-30s</button>
+      <button type="button" class="cast-mini-btn" data-cast-act="fwd">+30s</button>` : ""}
+      ${hasNext ? `<button type="button" class="cast-mini-btn" data-cast-act="next">下一集</button>` : ""}
+      <button type="button" class="cast-mini-btn" data-cast-act="proxy">${castState.useProxy ? "切直链" : "切代理"}</button>
+      <button type="button" class="cast-mini-btn danger" data-cast-act="stop">退出</button>
+    </div>`;
+  bar.querySelectorAll("[data-cast-act]").forEach((btn) => {
+    btn.onclick = () => handleCastBarAction(btn.dataset.castAct);
+  });
+}
+
+async function handleCastBarAction(act) {
+  if (!castState.active) return;
+  if (act === "stop") {
+    await stopActiveCast(false);
+    return;
+  }
+  if (act === "next") {
+    playNextEpisode();
+    return;
+  }
+  if (act === "proxy") {
+    castState.useProxy = !castState.useProxy;
+    await syncCastEpisode();
+    renderCastBar();
+    return;
+  }
+  if (act === "toggle") {
+    const nextAction = castState.paused ? "play" : "pause";
+    if (castState.mode === "dlna") {
+      window.NovaNative?.controlDlna?.(nextAction, "");
+      castState.paused = !castState.paused;
+      renderCastBar();
+    } else if (castState.mode === "room") {
+      try {
+        await nhApi("/api/cast/command", "POST", { code: castState.code, action: nextAction });
+        castState.paused = !castState.paused;
+        renderCastBar();
+      } catch (e) { toast(e.message || "遥控失败"); }
+    }
+    return;
+  }
+  if (act === "rew" || act === "fwd") {
+    const delta = act === "rew" ? -30 : 30;
+    if (castState.mode === "room") {
+      try {
+        await nhApi("/api/cast/command", "POST", { code: castState.code, action: "seek", payload: { delta } });
+        toast(delta > 0 ? "大屏已快进 30 秒" : "大屏已快退 30 秒");
+      } catch (e) { toast(e.message || "大屏跳转失败"); }
+    } else if (castState.mode === "dlna") {
+      const v = $("#video");
+      const baseSec = Math.max(0, Math.floor((v?.currentTime || 0) + delta));
+      if (v) v.currentTime = baseSec;
+      window.NovaNative?.controlDlna?.("seek", String(baseSec));
+      toast(`已发送跳转指令（${fmt(baseSec)}）`);
+    }
+  }
+}
+
+async function syncCastEpisode() {
+  if (!castState.active) return;
+  const info = await resolveCastUrls();
+  if (!info) return toast("当前播放源地址不支持投屏");
+  const targetUrl = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
+  if (castState.mode === "dlna" && castState.udn) {
+    window.NovaNative?.castDlna?.(castState.udn, targetUrl, `${info.title} ${info.episode}`.trim());
+  } else if (castState.mode === "room" && castState.code) {
+    try {
+      await nhApi("/api/cast/command", "POST", {
+        code: castState.code,
+        action: "load",
+        payload: {
+          url: targetUrl,
+          proxy_url: info.proxyUrl || "",
+          title: info.title,
+          episode: info.episode,
+          position: info.position,
+          is_live: info.is_live,
+        },
+      });
+      toast(`已同步推送到投屏码 ${castState.code}`);
+    } catch (e) {
+      toast(e.message || "同步投屏失败");
+    }
+  }
+}
+
+async function stopActiveCast(silent = false) {
+  const prevMode = castState.mode;
+  const prevCode = castState.code;
+  castState.active = false;
+  castState.mode = "";
+  castState.paused = false;
+  renderCastBar();
+  if (prevMode === "dlna") {
+    try { window.NovaNative?.controlDlna?.("stop", ""); } catch {}
+  } else if (prevMode === "room" && prevCode) {
+    try { await nhApi("/api/cast/command", "POST", { code: prevCode, action: "stop" }); } catch {}
+  }
+  if (!silent) toast("已退出投屏");
+}
+
+async function startDlnaCast(udn, name) {
+  const info = await resolveCastUrls();
+  if (!info) return toast("当前线路不支持投屏");
+  const targetUrl = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
+  try { $("#video")?.pause(); } catch {}
+  castState.active = true;
+  castState.mode = "dlna";
+  castState.udn = udn;
+  castState.targetName = name || "DLNA 电视";
+  castState.paused = false;
+  renderCastBar();
+  window.NovaNative.castDlna(udn, targetUrl, `${info.title} ${info.episode}`.trim());
+  toast(`正在推送至 ${castState.targetName}…`);
+}
+
+async function startRoomCast(rawCode) {
+  const code = String(rawCode || "").trim().toUpperCase();
+  if (!/^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}$/.test(code)) {
+    return toast("请输入 4 位大屏投屏码");
+  }
+  const info = await resolveCastUrls();
+  if (!info) return toast("当前线路不支持投屏");
+  const targetUrl = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
+  await nhApi("/api/cast/command", "POST", {
+    code,
+    action: "load",
+    payload: {
+      url: targetUrl,
+      proxy_url: info.proxyUrl || "",
+      title: info.title,
+      episode: info.episode,
+      position: info.position,
+      is_live: info.is_live,
+    },
+  });
+  localStorage.setItem("nh_last_cast_code", code);
+  try { $("#video")?.pause(); } catch {}
+  castState.active = true;
+  castState.mode = "room";
+  castState.code = code;
+  castState.targetName = `大屏 ${code}`;
+  castState.paused = false;
+  renderCastBar();
+  toast(`已投屏至大屏 ${code}`);
+}
+
+function closeCastModal() {
+  const m = $("#modal");
+  if (m) m.classList.add("hidden");
+  $("#modalOk").onclick = $("#modalCancel").onclick = null;
+}
+
+function renderCastDeviceList() {
+  const box = $("#castDlnaList");
+  if (!box) return;
+  if (castState.scanning) {
+    box.innerHTML = `<div class="hint" style="padding:6px 0">正在扫描局域网支持 DLNA 的电视/盒子…</div>`;
+    return;
+  }
+  if (!castState.devices.length) {
+    box.innerHTML = `<div class="hint" style="padding:6px 0">未发现 DLNA 电视，请确保手机与电视在同一 Wi-Fi，或改用下方投屏码/系统投屏。</div>`;
+    return;
+  }
+  box.innerHTML = castState.devices.map((d) => `
+    <button type="button" class="cast-dev-item" data-dlna-udn="${esc(d.udn)}" data-dlna-name="${esc(d.name)}">
+      <span>${esc(d.name)}</span>
+      <small>${esc(d.host || "DLNA")} · 点击投屏</small>
+    </button>`).join("");
+  box.querySelectorAll("[data-dlna-udn]").forEach((btn) => {
+    btn.onclick = () => {
+      closeCastModal();
+      startDlnaCast(btn.dataset.dlnaUdn, btn.dataset.dlnaName);
+    };
+  });
+}
+
+window.__nhDlnaDevices = (res) => {
+  castState.scanning = false;
+  castState.devices = Array.isArray(res?.devices) ? res.devices : [];
+  renderCastDeviceList();
+};
+
+window.__nhDlnaResult = (res) => {
+  if (!res) return;
+  if (res.message) toast(res.message);
+  if (!res.ok && res.action === "cast") {
+    castState.active = false;
+    renderCastBar();
+  }
+};
+
+function triggerDlnaScan() {
+  if (!window.NovaNative || typeof window.NovaNative.scanDlnaDevices !== "function") return;
+  castState.scanning = true;
+  renderCastDeviceList();
+  window.NovaNative.scanDlnaDevices();
+}
+
+async function openCastModal() {
+  const rawUrl = getCurrentCastRawUrl();
+  if (!rawUrl) return toast("当前没有可投屏的视频地址");
+  const hasNativeCast = !!(window.NovaNative && typeof window.NovaNative.hasCastBridge === "function" && window.NovaNative.hasCastBridge());
+  const hasAirPlay = !!(typeof $("#video")?.webkitShowPlaybackTargetPicker === "function");
+  const lastCode = localStorage.getItem("nh_last_cast_code") || "";
+  const tvPageUrl = new URL("tv.html", location.href).href;
+
+  const modalPromise = modal("选择投屏方式", `
+    <div style="text-align:left">
+      <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-2);margin-bottom:10px;cursor:pointer">
+        <input id="castProxyChk" type="checkbox" style="width:auto" ${castState.useProxy ? "checked" : ""}>
+        <span>使用节点代理转发（直链黑屏或防盗链时勾选）</span>
+      </label>
+
+      ${hasNativeCast ? `
+      <div class="cast-section">
+        <div class="cast-section-head">
+          <span>1. 局域网 DLNA 电视直投</span>
+          <button type="button" id="btnScanDlna" class="cast-mini-btn accent">重新扫描</button>
+        </div>
+        <div id="castDlnaList" class="cast-dev-list"></div>
+      </div>` : ""}
+
+      <div class="cast-section">
+        <div class="cast-section-head">
+          <span>${hasNativeCast ? "2." : "1."} 4 位投屏码大屏投屏（跨网可用）</span>
+          <button type="button" id="btnCopyTvUrl" class="cast-mini-btn">复制大屏地址</button>
+        </div>
+        <div class="hint" style="font-size:11.5px;word-break:break-all">电视/电脑浏览器打开：${esc(tvPageUrl)}</div>
+        <div class="cast-code-row">
+          <input id="castCodeIn" class="cast-code-input" maxlength="4" placeholder="4位码" value="${esc(lastCode)}">
+          <button type="button" id="btnSendRoomCast" class="btn primary" style="padding:8px 14px;flex-shrink:0">推送大屏</button>
+        </div>
+      </div>
+
+      <div class="cast-section" style="margin-bottom:0">
+        <div class="cast-section-head">
+          <span>${hasNativeCast ? "3." : "2."} 更多投屏与播放方式</span>
+        </div>
+        <div class="cast-more-grid">
+          ${hasNativeCast ? `<button type="button" id="btnSysCast" class="cast-more-btn">系统无线投屏</button>
+          <button type="button" id="btnExtPlay" class="cast-more-btn">外部播放器打开</button>` : ""}
+          ${hasAirPlay ? `<button type="button" id="btnAirPlay" class="cast-more-btn">AirPlay 隔空播放</button>` : ""}
+          <button type="button" id="btnCopyCastUrl" class="cast-more-btn">复制播放链接</button>
+        </div>
+      </div>
+    </div>`);
+
+  setTimeout(() => {
+    $("#castProxyChk")?.addEventListener("change", (e) => { castState.useProxy = !!e.target.checked; });
+    if (hasNativeCast) {
+      $("#btnScanDlna")?.addEventListener("click", triggerDlnaScan);
+      triggerDlnaScan();
+      $("#btnSysCast")?.addEventListener("click", () => {
+        closeCastModal();
+        window.NovaNative.openSystemCastSettings();
+      });
+      $("#btnExtPlay")?.addEventListener("click", async () => {
+        const info = await resolveCastUrls();
+        if (!info) return toast("无法获取播放地址");
+        const u = (castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl;
+        closeCastModal();
+        window.NovaNative.openExternalPlayer(u, `${info.title} ${info.episode}`.trim());
+      });
+    }
+    $("#btnCopyTvUrl")?.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(tvPageUrl); toast("已复制大屏接收地址"); }
+      catch { toast(tvPageUrl, 3000); }
+    });
+    $("#btnSendRoomCast")?.addEventListener("click", async () => {
+      const code = $("#castCodeIn")?.value || "";
+      try {
+        await startRoomCast(code);
+        closeCastModal();
+      } catch (e) {
+        toast(e.message || "大屏投屏失败");
+      }
+    });
+    $("#btnAirPlay")?.addEventListener("click", () => {
+      closeCastModal();
+      try { $("#video")?.webkitShowPlaybackTargetPicker?.(); }
+      catch { toast("当前设备暂不支持 AirPlay 弹窗"); }
+    });
+    $("#btnCopyCastUrl")?.addEventListener("click", async () => {
+      const info = await resolveCastUrls();
+      const u = info ? ((castState.useProxy && info.proxyUrl) ? info.proxyUrl : info.rawUrl) : rawUrl;
+      try { await navigator.clipboard.writeText(u); toast("已复制视频播放链接"); }
+      catch { toast(u, 3000); }
+    });
+  }, 0);
+
+  await modalPromise;
+}
 ["pointerdown", "input", "change"].forEach((ev) => {
   $(".player-ctrl")?.addEventListener(ev, () => showFsControls(true));
   $(".player-head")?.addEventListener(ev, () => showFsControls(true));
@@ -3033,7 +3478,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.8</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.9</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -3291,6 +3736,10 @@ async function loadNovelCategory(cat = curNovelCat) {
 
 async function searchNovel(q) {
   if (!q) return;
+  cancelActiveSearch(true);
+  const mine = ++viewRequest;
+  const ac = new AbortController();
+  _searchAbort = ac;
   novelIsSearch = true;
   novelSearchKw = q;
   if (currentRoute !== "n_store") {
@@ -3301,14 +3750,17 @@ async function searchNovel(q) {
   setSearchLoading(true);
   $("#view").innerHTML = `<div class="section-title">${ico("search")} 搜索：${esc(q)}</div>${renderSearchLoadingHtml(q, "正在检索书城书库…")}`;
   try {
-    const r = await fetch(`/api/novel/search?q=${encodeURIComponent(q)}`);
+    const r = await fetch(`/api/novel/search?q=${encodeURIComponent(q)}`, { signal: ac.signal });
     const d = await r.json();
+    if (mine !== viewRequest || ac.signal.aborted) return;
     novelStoreList = sortByExactMatch(Array.isArray(d.items) ? d.items : [], q, (x) => x.title || x.name, (x) => x.author);
     renderNovelStore();
   } catch (e) {
+    if (mine !== viewRequest || ac.signal.aborted) return;
     $("#view").innerHTML = `<div class="empty">检索失败：${esc(e.message)}</div>`;
   } finally {
-    setSearchLoading(false);
+    if (_searchAbort === ac) _searchAbort = null;
+    if (mine === viewRequest) setSearchLoading(false);
   }
 }
 

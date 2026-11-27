@@ -20,7 +20,7 @@ ctx.window.fetch('https://untrusted.example/api/live/seg');
 assert.equal(calls.at(-1)[1].headers, undefined);
 ctx.window.fetch('https://fixture.trycloudflare.com/api/live/seg');
 assert.equal(calls.at(-1)[1].headers.get('Authorization'), 'Bearer fixture-token');
-for (const file of ['index.html', 'app.js', 'auth_session.js', 'history_state.js', 'vod_client.js', 'admin.html', 'style.css', 'manifest.json', 'icon.svg']) {
+for (const file of ['index.html', 'tv.html', 'app.js', 'auth_session.js', 'history_state.js', 'vod_client.js', 'admin.html', 'style.css', 'manifest.json', 'icon.svg']) {
   assert.equal(fs.readFileSync(file, 'utf8'), fs.readFileSync('docs/' + file, 'utf8'), `${file} differs from docs`);
 }
 assert.ok(!code.includes('const DEFAULT_SOURCES ='), 'upstream catalogs should be managed by backend');
