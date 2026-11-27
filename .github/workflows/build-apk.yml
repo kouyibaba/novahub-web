@@ -21,18 +21,18 @@ jobs:
 
       # Browser publication path: apply only the exact reviewed release patch.
       # Once applied, the patch is removed; ordinary builds skip this step.
-      - name: Apply reviewed v2.5.0 release bundle
+      - name: Apply reviewed v2.5.1 release bundle
         run: |
           set -euo pipefail
-          patch=reviewed-v2.5.0.patch
+          patch=reviewed-v2.5.1.patch
           if [ -f "$patch" ]; then
-            echo "32282b9baca2ec6a23a52fdd4bbc0bcc6aeb1ab7b30c2c631aec01e486070e7a  $patch" | sha256sum --check --strict
+            echo "fc5079071b02be28e4b69b05251ce96ac98c0f8f25e4ad541b397aad72e28077  $patch" | sha256sum --check --strict
             git apply --check "$patch"
             git apply --index "$patch"
             git rm -- "$patch"
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "feat: release v2.5.0 3-day trial and strict redeem gate"
+            git commit -m "fix: release v2.5.1 gate responsiveness, source recovery & HD ranking"
             git pull --rebase origin main
             git push origin HEAD:main
           fi
