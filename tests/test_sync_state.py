@@ -29,3 +29,18 @@ class SyncTests(unittest.TestCase):
         state=db.get_user_sync(1)['data'];self.assertEqual(state['history'],[]);self.assertEqual(state['progress'],{})
         db.save_user_sync(1,{'history':[{'srcId':'a','id':'1','at':1000,'deleted_at':100}], 'progress':{'a:1':{'time':42,'at':1000,'deleted_at':100}}})
         state=db.get_user_sync(1)['data'];self.assertEqual(len(state['history']),1);self.assertEqual(state['progress']['a:1']['time'],42)
+
+    def test_app_progress_takes_priority_over_newer_web_progress(self):
+        db.save_user_sync(1, {'progress': {'a:1': {'idx': 2, 'time': 120, 'at': 500, 'src': 'app'}}})
+        db.save_user_sync(1, {'progress': {'a:1': {'idx': 0, 'time': 45, 'at': 9000, 'src': 'web'}}})
+        data = db.get_user_sync(1)['data']
+        self.assertEqual(data['progress']['a:1']['src'], 'app')
+        self.assertEqual(data['progress']['a:1']['idx'], 2)
+        self.assertEqual(data['progress']['a:1']['time'], 120)
+
+    def test_skip_cfg_is_preserved_in_cloud_sync(self):
+        db.save_user_sync(1, {'skip_cfg': {'c:a:1': {'intro': 90, 'outro': 120, 'enabled': True}}})
+        data = db.get_user_sync(1)['data']
+        self.assertEqual(data['skip_cfg']['c:a:1']['intro'], 90)
+        self.assertEqual(data['skip_cfg']['c:a:1']['outro'], 120)
+        self.assertTrue(data['skip_cfg']['c:a:1']['enabled'])

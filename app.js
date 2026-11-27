@@ -16,6 +16,26 @@ const NH = {
   cfg: get("nh_site_cfg", { ad_enabled: false, ad_title: "", ad_desc: "", ad_url: "", ad_btn: "了解 Pro", sponsor_tip: "" }),
 };
 const isProUser = () => !!(NH.user && NH.user.is_pro);
+const isAppClient = () => !!(window.NovaNative && typeof window.NovaNative.getAppVersion === "function");
+const getDeviceId = () => {
+  let id = get("nh_device_id", "");
+  if (!id) {
+    id = "d_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    try { localStorage.setItem("nh_device_id", JSON.stringify(id)); } catch {}
+  }
+  return id;
+};
+const getDeviceInfo = () => {
+  if (isAppClient()) {
+    try { return "Android App " + (window.NovaNative.getAppVersion() || ""); } catch { return "Android App"; }
+  }
+  const ua = navigator.userAgent || "";
+  if (/Android/i.test(ua)) return "Android 浏览器";
+  if (/iPhone|iPad/i.test(ua)) return "iOS 浏览器";
+  if (/Windows/i.test(ua)) return "Windows 浏览器";
+  if (/Mac/i.test(ua)) return "macOS 浏览器";
+  return "Web 浏览器";
+};
 // Media API requests need the same account token as nhApi, including Pages routing.
 const _mediaFetch = window.fetch.bind(window);
 window.fetch = (input, init = {}) => {
@@ -23,7 +43,7 @@ window.fetch = (input, init = {}) => {
     const target = new URL(input, location.href);
     const apiOrigin = window.__NH_API_BASE__ ? new URL(window.__NH_API_BASE__).origin : location.origin;
     if ((target.origin === location.origin || target.origin === apiOrigin) &&
-        (target.pathname === "/kw" || target.pathname.startsWith("/api/live/"))) {
+        (target.pathname === "/kw" || target.pathname.startsWith("/api/live/") || target.pathname.startsWith("/api/media/"))) {
       const headers = new Headers(init.headers || {});
       if (!headers.has("Authorization")) headers.set("Authorization", "Bearer " + NH.token);
       init = { ...init, headers };
@@ -33,7 +53,7 @@ window.fetch = (input, init = {}) => {
 };
 const SYNC_KEYS = [
   K.LIKE, K.HISTORY, "history_deleted", "history_cleared_at", "channels", "music_favs", "music_fav_groups",
-  "music_hist", "m_br", "progress", "novel_shelf", "novel_hist", "novel_prog",
+  "music_hist", "m_br", "progress", "skip_cfg", "novel_shelf", "novel_hist", "novel_prog",
   "novel_cfg", "nh_shist_vod", "nh_shist_music", "nh_shist_novel",
 ];
 const SYNC_WATCH = new Set(SYNC_KEYS);
@@ -114,6 +134,7 @@ const IC = {
   pip: `<svg class="svg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="15" rx="2"/><rect x="11.5" y="10.5" width="7" height="5.5" rx="1" fill="currentColor" stroke="none"/></svg>`,
   volume: `<svg class="svg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.8a9 9 0 0 1 0 12.4"/></svg>`,
   sun: `<svg class="svg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M2.5 12H5M19 12h2.5M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg>`,
+  bell: `<svg class="svg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>`,
 };
 const ico = (name) => IC[name] || "";
 window._imgPh = (el, iconName, cls) => {
@@ -229,6 +250,11 @@ function pushView(fn) {
 let _playerPushed = false;
 let _skipNextPop = false;
 function closePlayer(fromPop = false) {
+  if (typeof P !== "undefined" && P.vodKey && !P.isLive) {
+    const v = $("#video");
+    if (v && v.currentTime > 1) saveProgress(P.vodKey, P.idx, v.currentTime, true);
+  }
+  if (typeof openFsEpDrawer === "function") openFsEpDrawer(false);
   if (typeof setPlayerFullscreen === "function") setPlayerFullscreen(false);
   destroyPlayers();
   $("#playerLayer").classList.add("hidden");
@@ -276,6 +302,7 @@ function requestAppBack() {
     return element && !element.classList.contains("hidden");
   };
   if (visible("#modal")) { $("#modalCancel").click(); return true; }
+  if (visible("#fsEpDrawer")) { openFsEpDrawer(false); return true; }
   if (visible("#tocMask")) { $("#tocMask").classList.add("hidden"); return true; }
   if (visible("#searchHistPop")) { hideSearchHistPop(); return true; }
   if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return true; }
@@ -439,13 +466,24 @@ function syncSearchClear() {
 function setSearchLoading(on) {
   const bar = $("#topProgress"), btn = $("#searchBtn");
   if (bar) bar.classList.toggle("hidden", !on);
-  if (btn) btn.innerHTML = on ? `<progress aria-label="检索中" class="loading-spinner"></progress>` : "搜索";
+  if (btn) {
+    btn.disabled = !!on;
+    btn.innerHTML = on ? `<progress aria-label="检索中" class="loading-spinner"></progress>` : "搜索";
+  }
 }
-function renderSkeletonHtml(type = "grid", count = 6) {
+function renderSearchLoadingHtml(q, sub = "正在匹配多路资源，请稍候…") {
+  return `<div class="search-loading-box" role="status" aria-live="polite">
+    <div class="nh-spinner-lg" aria-hidden="true"></div>
+    <div class="search-loading-title">正在搜索「${esc(q)}」</div>
+    <div class="search-loading-sub">${esc(sub)}</div>
+  </div>`;
+}
+function renderSkeletonHtml(type = "grid", count = 6, bare = false) {
   if (type === "list") {
     return `<div class="sk-list">${Array.from({ length: count }, () => `<div class="sk-row"></div>`).join("")}</div>`;
   }
-  return `<div class="sk-grid">${Array.from({ length: count }, () => `<div class="sk-card"><div class="sk-poster"></div><div class="sk-line"></div></div>`).join("")}</div>`;
+  const cards = Array.from({ length: count }, () => `<div class="sk-card"><div class="sk-poster"></div><div class="sk-line"></div><div class="sk-line short"></div></div>`).join("");
+  return bare ? cards : `<div class="sk-grid">${cards}</div>`;
 }
 function applyStagger(container) {
   if (!container) return;
@@ -646,10 +684,8 @@ function sortByExactMatch(list, query, getTitle, getSub) {
 async function searchMusic(q) {
   if (!q) return;
   setSearchLoading(true);
-  if (currentRoute === "m_discover") {
-    const view = $("#view");
-    if (view) view.innerHTML = `<div class="section-title">${ico("search")} 正在检索「${esc(q)}」…</div>${renderSkeletonHtml("list", 6)}`;
-  }
+  const view = $("#view");
+  if (view) view.innerHTML = `<div class="section-title">${ico("search")} 搜索：${esc(q)}</div>${renderSearchLoadingHtml(q, "正在检索曲库与歌单…")}`;
   const kwList = [], neList = [];
   const normTrackKey = (nm, ar) => {
     const c = (s) => String(s || "").toLowerCase().replace(/\s*\([^)]*\)|\s*\[[^\]]*\]|\s*（[^）]*）|[^\u4e00-\u9fa5a-z0-9]/g, "");
@@ -715,6 +751,7 @@ async function searchMusic(q) {
     else go("m_discover");
     return;
   }
+  if ($("#view")) $("#view").innerHTML = `<div class="empty">未找到「${esc(q)}」相关曲目<br>请尝试更换歌名或歌手关键词</div>`;
   toast("未找到匹配的曲目");
 }
 
@@ -1258,8 +1295,15 @@ function paintMusicList(container, list) {
         <div class="r-title">${active ? `<span class="m-playing-ind">${ico("wave")}</span>` : ""}${esc(m.name)}</div>
         <div class="r-sub">${esc(sub)}</div>
       </div>
+      <button class="m-dl-btn" type="button" aria-label="下载歌曲" title="下载">${ico("download")}</button>
       <button class="m-fav ${fav ? "on" : ""}" aria-label="收藏">${ico(fav ? "heartFill" : "heart")}</button>`;
     row.onclick = (e) => {
+      const dlBtn = e.target.closest(".m-dl-btn");
+      if (dlBtn) {
+        e.stopPropagation();
+        downloadMusicTrack(m);
+        return;
+      }
       const favBtn = e.target.closest(".m-fav");
       if (favBtn) {
         e.stopPropagation();
@@ -1502,6 +1546,7 @@ function renderMusicPlayer() {
       <div class="m-tools">
         <button id="mSleepBtn" class="m-tool-btn ${mSleepMode ? "active" : ""}">${ico("clock")} <span id="mSleepTxt">${sleepLabel()}</span></button>
         <button id="mPipBtn" class="m-tool-btn ${pipActive ? "active" : ""}">${ico("pip")} 悬浮歌词</button>
+        <button id="mDownloadBtn" class="m-tool-btn">${ico("download")} 下载</button>
         ${brSelectHtml()}
       </div>
       <div class="m-prog">
@@ -1532,6 +1577,7 @@ function renderMusicPlayer() {
   };
   $("#mSleepBtn").onclick = cycleSleepTimer;
   $("#mPipBtn").onclick = togglePipLyrics;
+  $("#mDownloadBtn")?.addEventListener("click", () => downloadMusicTrack(curSong));
   $("#mPlayerFav").onclick = () => toggleMusicFav(curSong);
   $("#mModeBtn").onclick = () => {
     mPlayMode = M_MODES[(M_MODES.indexOf(mPlayMode) + 1) % M_MODES.length];
@@ -1657,17 +1703,52 @@ function renderMusicFav() {
   paintMusicList($("#mHistList"), hist);
 }
 
-/* ============ 影视首页 ============ */
+/* ============ 影视首页（5 分钟本地缓存复用 + 后台静默更新） ============ */
+const HOME_CACHE_TTL = 5 * 60 * 1000;
+const _homeVodCache = (() => {
+  try {
+    const raw = sessionStorage.getItem("nh_home_vod_cache");
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && Array.isArray(parsed.items) && parsed.items.length) {
+      return { items: parsed.items, ts: Number(parsed.ts) || 0, inflight: null };
+    }
+  } catch {}
+  return { items: [], ts: 0, inflight: null };
+})();
+function saveHomeVodCache(items) {
+  if (!Array.isArray(items) || !items.length) return;
+  _homeVodCache.items = items.slice(0, 24);
+  _homeVodCache.ts = Date.now();
+  try {
+    sessionStorage.setItem("nh_home_vod_cache", JSON.stringify({ items: _homeVodCache.items, ts: _homeVodCache.ts }));
+  } catch {}
+}
+function fetchHomeVod(force = false) {
+  if (!force && _homeVodCache.inflight) return _homeVodCache.inflight;
+  const p = nhApi("/api/vod/home").then((d) => {
+    const items = Array.isArray(d?.items) ? d.items.slice(0, 24) : [];
+    if (items.length) saveHomeVodCache(items);
+    return items;
+  }).finally(() => {
+    if (_homeVodCache.inflight === p) _homeVodCache.inflight = null;
+  });
+  _homeVodCache.inflight = p;
+  return p;
+}
+
 function renderHome() {
   const mine=++viewRequest;
   vodClient.cancel();
   const likes=get(K.LIKE,[]);
   const rows=NovaHistory.merge({},historyState()).history.filter(x=>x.srcId && !String(x.id).startsWith('ep-'));
+  const cachedItems = _homeVodCache.items;
+  const hasCached = cachedItems.length > 0;
   $('#view').innerHTML=`
     ${rows.length?`<div class="section-title" style="justify-content:space-between"><span>${ico('clock')} 继续观看</span><div><button class="btn ghost" id="manageHistory">管理</button><button class="btn ghost" id="clearHistory">清空</button></div></div><div class="grid" id="histGrid"></div>`:''}
     ${renderAdSlotHtml('home')}
     ${likes.length?`<div class="section-title">${ico('heart')} 我的片单</div><div class="grid" id="likeGrid"></div>`:''}
-    <div class="section-title">${ico('film')} 最近更新</div><div class="grid" id="homeGrid">${renderSkeletonHtml('grid',6)}</div>`;
+    <div class="section-title" style="justify-content:space-between"><span>${ico('film')} 最近更新</span><button class="btn ghost" id="refreshHomeVod" type="button" style="padding:3px 9px;font-size:11.5px">刷新</button></div>
+    <div class="grid" id="homeGrid">${hasCached ? '' : renderSkeletonHtml('grid', 12, true)}</div>`;
   if(rows.length) {
     paintGrid($('#histGrid'),rows.slice(0,12).map(x=>({...x,_fromHistory:true,remark:getProgress(NovaHistory.key(x))?`第${getProgress(NovaHistory.key(x)).idx+1}集 ${fmt(getProgress(NovaHistory.key(x)).time)}`:x.remark})));
     $('#manageHistory').onclick=()=>renderHistoryManager();
@@ -1675,11 +1756,41 @@ function renderHome() {
   }
   if(likes.length)paintGrid($('#likeGrid'),likes.slice(0,12));
   bindAdSlots($('#view'));
-  nhApi('/api/vod/home').then(d=>{
-    if(mine!==viewRequest || !$('#homeGrid'))return;
-    if(d.items?.length)paintGrid($('#homeGrid'),d.items.slice(0,24));
-    else $('#homeGrid').innerHTML='<div class="empty">片库正在更新，可使用顶部搜索</div>';
-  }).catch(()=>{if(mine===viewRequest && $('#homeGrid'))$('#homeGrid').innerHTML='<div class="empty">片库暂时无法连接，请稍后重试</div>';});
+  if (hasCached && $('#homeGrid')) {
+    paintGrid($('#homeGrid'), cachedItems);
+  }
+  const loadHome = (force = false) => {
+    const btn = $('#refreshHomeVod');
+    if (btn && force) { btn.disabled = true; btn.textContent = '刷新中…'; }
+    fetchHomeVod(force).then((items) => {
+      if (mine !== viewRequest || !$('#homeGrid')) return;
+      if (items.length) {
+        paintGrid($('#homeGrid'), items);
+      } else if (!_homeVodCache.items.length) {
+        $('#homeGrid').innerHTML = '<div class="empty" style="grid-column:1/-1">暂未加载到推荐影片<br><button class="btn ghost" id="retryHomeBtn" style="margin-top:10px" type="button">点击重试</button></div>';
+        $('#retryHomeBtn')?.addEventListener('click', () => {
+          if ($('#homeGrid')) $('#homeGrid').innerHTML = renderSkeletonHtml('grid', 12, true);
+          loadHome(true);
+        });
+      }
+    }).catch(() => {
+      if (mine !== viewRequest || !$('#homeGrid')) return;
+      if (!_homeVodCache.items.length) {
+        $('#homeGrid').innerHTML = '<div class="empty" style="grid-column:1/-1">网络连接较慢<br><button class="btn ghost" id="retryHomeBtn" style="margin-top:10px" type="button">重新加载</button></div>';
+        $('#retryHomeBtn')?.addEventListener('click', () => {
+          if ($('#homeGrid')) $('#homeGrid').innerHTML = renderSkeletonHtml('grid', 12, true);
+          loadHome(true);
+        });
+      }
+    }).finally(() => {
+      const b = $('#refreshHomeVod');
+      if (b) { b.disabled = false; b.textContent = '刷新'; }
+    });
+  };
+  $('#refreshHomeVod')?.addEventListener('click', () => loadHome(true));
+  if (!hasCached || Date.now() - _homeVodCache.ts >= HOME_CACHE_TTL) {
+    loadHome(false);
+  }
 }
 function renderHistoryManager(_fromBack=false) {
   if(!_fromBack)pushView(()=>renderHistoryManager(true));
@@ -1765,8 +1876,11 @@ async function openDetail(v, _fromBack) {
   if(!_fromBack)pushView(()=>openDetail(v,true));
   vodClient.cancel();const mine=++viewRequest;
   if(!v.srcId||!v.id)return toast('该记录缺少线路信息，请重新搜索');
-  $('#view').innerHTML=backBar(v.name)+'<div class="empty">正在载入影片详情…</div>';
+  $('#view').innerHTML=backBar(v.name)+renderSearchLoadingHtml(v.name, '正在载入影片详情与分集…');
   try {
+    if (NH.user && Date.now() - (_lastCloudPullAt || 0) > 10000) {
+      await Promise.race([cloudSyncPull(true), new Promise((r) => setTimeout(r, 1200))]).catch(() => {});
+    }
     await migrateLegacySources();
     const d=await nhApi('/api/vod/detail?source='+encodeURIComponent(v.srcId)+'&id='+encodeURIComponent(v.id));
     if(mine!==viewRequest)return;
@@ -1775,7 +1889,8 @@ async function openDetail(v, _fromBack) {
     const vodKey=NovaHistory.key(v);
     const eps=(d.episodes||[]).map(e=>({name:e.n,url:e.url}));
     const liked=get(K.LIKE,[]).some(x=>NovaHistory.key(x)===vodKey);
-    $('#view').innerHTML=`${backBar(item.name)}<div class="form"><div style="display:flex;gap:12px">${item.pic?`<img src="${esc(item.pic)}" style="width:94px;aspect-ratio:3/4.2;object-fit:cover;border-radius:8px" onerror="this.style.display='none'">`:''}<div><div style="font-size:16px;font-weight:600">${esc(item.name)}</div><div class="hint">${esc([item.year,item.lang,item.typeName].filter(Boolean).join(' · '))}</div></div></div><div class="hint" style="margin-top:10px">${esc(d.description||'暂无剧情简介')}</div><div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary" id="btnPlay0">${ico('play')} 立即播放</button><button class="btn ghost" id="btnLike">${ico(liked?'heartFill':'heart')} ${liked?'已收藏':'收藏'}</button></div></div><div id="eps" style="margin-top:12px"></div>`;
+    const notifyOn = getWatchNotifyEnabled('vod', vodKey);
+    $('#view').innerHTML=`${backBar(item.name)}<div class="form"><div style="display:flex;gap:12px">${item.pic?`<img src="${esc(item.pic)}" style="width:94px;aspect-ratio:3/4.2;object-fit:cover;border-radius:8px" onerror="this.style.display='none'">`:''}<div><div style="font-size:16px;font-weight:600">${esc(item.name)}</div><div class="hint">${esc([item.year,item.lang,item.typeName].filter(Boolean).join(' · '))}</div></div></div><div class="hint" style="margin-top:10px">${esc(d.description||'暂无剧情简介')}</div><div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" id="btnPlay0">${ico('play')} 立即播放</button><button class="btn ghost" id="btnLike">${ico(liked?'heartFill':'heart')} ${liked?'已收藏':'收藏'}</button>${NH.user ? `<button class="btn ghost ${liked?'':'hidden'}" id="btnVodNotify">${ico('bell')} ${notifyOn?'提醒开':'提醒关'}</button>` : ''}${eps.length ? `<button class="btn ghost" id="btnVodDetailDownload">${ico('download')} 下载</button>` : ''}</div></div><div id="eps" style="margin-top:12px"></div>`;
     const saved=getProgress(vodKey);
     const start=(idx,time=0)=>{
       if(!eps[idx])return toast('暂无可用播放线路');
@@ -1785,11 +1900,22 @@ async function openDetail(v, _fromBack) {
     };
     renderPagedEpisodes($('#eps'),eps,saved?.idx??-1,i=>start(i),{page:null,reversed:false},true);
     $('#btnPlay0').onclick=()=>start(saved&&saved.idx<eps.length?saved.idx:0,saved?.time||0);
+    $('#btnVodDetailDownload')?.addEventListener('click', () => {
+      const targetIdx = saved && saved.idx < eps.length ? saved.idx : 0;
+      const ep = eps[targetIdx];
+      if (!ep) return toast('暂无可下载的剧集');
+      downloadVodEpisode(item.name, ep.name, ep.url);
+    });
     $('#btnLike').onclick=()=>{
       const list=get(K.LIKE,[]);const i=list.findIndex(x=>NovaHistory.key(x)===vodKey);
       if(i<0)list.unshift({...v,name:item.name,pic:item.pic,remark:item.remark});else list.splice(i,1);
       set(K.LIKE,list);$('#btnLike').innerHTML=ico(i<0?'heartFill':'heart')+(i<0?' 已收藏':' 收藏');
+      $('#btnVodNotify')?.classList.toggle('hidden', i >= 0);
     };
+    $('#btnVodNotify')?.addEventListener('click', async () => {
+      const cur = getWatchNotifyEnabled('vod', vodKey);
+      await toggleWatchNotify('vod', vodKey, !cur, item.name, { srcId: v.srcId, id: v.id, name: item.name, pic: item.pic }, $('#btnVodNotify'));
+    });
     if(v._fromHistory&&eps.length)$('#btnPlay0').click();
   } catch(e) {if(mine===viewRequest)$('#view').innerHTML=backBar(v.name)+`<div class="empty">${esc(e.message)}</div>`;}
 }
@@ -1799,9 +1925,13 @@ function addHistory(item) {
   state.history=[row,...state.history.filter(x=>NovaHistory.key(x)!==k)].slice(0,100);
   applyHistoryState(NovaHistory.merge({},state));
 }
-function saveProgress(vodKey,idx,time) {
+function saveProgress(vodKey,idx,time,immediate=false) {
   if(!vodKey||!time||time<1||historyBlocked.has(vodKey))return;
-  const p=get('progress',{});p[vodKey]={idx,time:Math.floor(time),at:Date.now(),...(P.vodKey===vodKey?P.historyVersion||{}:{})};set('progress',p);
+  const src=(typeof isAppClient==='function'&&isAppClient())?'app':'web';
+  const p=get('progress',{});p[vodKey]={idx,time:Math.floor(time),at:Date.now(),src,...(P.vodKey===vodKey?P.historyVersion||{}:{})};set('progress',p);
+  if(immediate&&typeof cloudSyncPush==='function'&&typeof NH!=='undefined'&&NH.user){
+    cloudSyncPush(true,typeof document!=='undefined'&&document.visibilityState==='hidden');
+  }
 }
 function getProgress(vodKey) { return vodKey?(get('progress',{})[vodKey]||null):null; }
 
@@ -1850,7 +1980,7 @@ async function doSearch(q,_fromBack) {
   if(!_fromBack)pushView(()=>doSearch(q,true));
   const mine=++viewRequest;
   if(_fromBack&&_searchCache.has(q)&&Date.now()-_searchCache.get(q).ts<120000){vodClient.cancel();setSearchLoading(false);renderSearchResults(q);return;}
-  setSearchLoading(true);$('#view').innerHTML=backBar('搜索：'+q)+renderSkeletonHtml('grid',6);
+  setSearchLoading(true);$('#view').innerHTML=backBar('搜索：'+q)+renderSearchLoadingHtml(q, '正在并发检索优选片源…');
   try {
     await migrateLegacySources();
     if(mine!==viewRequest)return;
@@ -1866,6 +1996,87 @@ async function doSearch(q,_fromBack) {
 
 /* ============ 视频播放器 ============ */
 const P = { hls: null, flv: null, eps: [], idx: 0, title: "", vodKey: "", isLive: false, _epState: null };
+function getSkipCfg(vodKey) {
+  if (!vodKey) return null;
+  const map = get("skip_cfg", {});
+  const cfg = map && typeof map === "object" ? map[vodKey] : null;
+  if (!cfg || typeof cfg !== "object") return null;
+  return {
+    intro: Math.max(0, Math.min(600, Math.floor(Number(cfg.intro) || 0))),
+    outro: Math.max(0, Math.min(600, Math.floor(Number(cfg.outro) || 0))),
+    enabled: cfg.enabled !== false,
+  };
+}
+function saveSkipCfg(vodKey, cfg) {
+  if (!vodKey) return;
+  const map = { ...(get("skip_cfg", {}) || {}) };
+  const intro = Math.max(0, Math.min(600, Math.floor(Number(cfg?.intro) || 0)));
+  const outro = Math.max(0, Math.min(600, Math.floor(Number(cfg?.outro) || 0)));
+  const enabled = !!cfg?.enabled && (intro > 0 || outro > 0);
+  if (!intro && !outro) delete map[vodKey];
+  else map[vodKey] = { intro, outro, enabled };
+  set("skip_cfg", map);
+  syncVodToolButtons();
+}
+async function openSkipCfgModal() {
+  if (P.isLive || !P.vodKey) return toast("当前视频不支持片头片尾设置");
+  const cur = getSkipCfg(P.vodKey) || { intro: 0, outro: 0, enabled: true };
+  const curSec = Math.floor($("#video")?.currentTime || 0);
+  const okPromise = modal("跳过片头 / 片尾（本剧记忆）", `
+    <div class="form" style="margin:0;border:none;padding:0">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
+        <input id="skipEnabledIn" type="checkbox" style="width:auto" ${(cur.enabled || (!cur.intro && !cur.outro)) ? "checked" : ""}>
+        <span>启用本剧自动跳过片头 / 片尾</span>
+      </label>
+      <label>跳过片头（秒）</label>
+      <input id="skipIntroIn" type="number" min="0" max="600" value="${cur.intro}">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <button type="button" class="m-chip" data-skip-intro="${curSec}">设为当前 (${fmt(curSec)})</button>
+        <button type="button" class="m-chip" data-skip-intro="90">90s</button>
+        <button type="button" class="m-chip" data-skip-intro="120">120s</button>
+        <button type="button" class="m-chip" data-skip-intro="0">清空</button>
+      </div>
+      <label style="margin-top:10px">提前跳过片尾（秒，连播下一集）</label>
+      <input id="skipOutroIn" type="number" min="0" max="600" value="${cur.outro}">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <button type="button" class="m-chip" data-skip-outro="60">60s</button>
+        <button type="button" class="m-chip" data-skip-outro="90">90s</button>
+        <button type="button" class="m-chip" data-skip-outro="120">120s</button>
+        <button type="button" class="m-chip" data-skip-outro="0">清空</button>
+      </div>
+      <div class="hint" style="margin-top:8px">设置按剧集记忆并随账号云端同步；续播历史进度时不会覆盖你的历史断点。</div>
+    </div>`);
+  setTimeout(() => {
+    document.querySelectorAll("[data-skip-intro]").forEach((b) => {
+      b.onclick = () => { const el = $("#skipIntroIn"); if (el) el.value = b.dataset.skipIntro; };
+    });
+    document.querySelectorAll("[data-skip-outro]").forEach((b) => {
+      b.onclick = () => { const el = $("#skipOutroIn"); if (el) el.value = b.dataset.skipOutro; };
+    });
+  }, 0);
+  if (!(await okPromise)) return;
+  const intro = Number($("#skipIntroIn")?.value) || 0;
+  const outro = Number($("#skipOutroIn")?.value) || 0;
+  const enabled = !!$("#skipEnabledIn")?.checked;
+  saveSkipCfg(P.vodKey, { intro, outro, enabled });
+  toast(enabled && (intro > 0 || outro > 0) ? `已保存片头 ${intro}s / 片尾 ${outro}s` : "已关闭本剧跳过片头片尾");
+}
+
+function syncVodToolButtons() {
+  const isLive = !!P.isLive;
+  const hasMulti = !!(P.eps && P.eps.length > 1);
+  const hasNext = !isLive && hasMulti && P.idx + 1 < P.eps.length;
+  const skipCfg = !isLive && P.vodKey ? getSkipCfg(P.vodKey) : null;
+  const skipOn = !!(skipCfg && skipCfg.enabled && (skipCfg.intro > 0 || skipCfg.outro > 0));
+  $("#btnFwd30")?.classList.toggle("hidden", isLive);
+  $("#btnFwd60")?.classList.toggle("hidden", isLive);
+  $("#btnSkipCfg")?.classList.toggle("hidden", isLive || !P.vodKey);
+  $("#btnSkipCfg")?.classList.toggle("active", skipOn);
+  $("#btnVodDownload")?.classList.toggle("hidden", isLive);
+  $("#btnNextEp")?.classList.toggle("hidden", !hasNext);
+  $("#btnFsEp")?.classList.toggle("hidden", !hasMulti);
+}
+
 function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0, isLive = false) {
   if (!NH.user) {
     toast("请先登录账号后观看（5 秒免费注册）");
@@ -1876,12 +2087,14 @@ function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0, isLive =
   const layer = $("#playerLayer");
   const wasHidden = layer.classList.contains("hidden");
   P.managed = null;
-  P.title = title; P.eps = eps; P.idx = idx; P.vodKey = vodKey; P.isLive = !!isLive;
+  P.title = title; P.eps = eps; P.idx = idx; P.vodKey = vodKey; P.isLive = !!isLive; P._outroSkippedIdx = -1;
   P._epState = { page: null, reversed: false };
   $("#playerTitle").textContent = title;
   $("#seek")?.classList.toggle("hidden", P.isLive);
   $("#timeText")?.classList.toggle("hidden", P.isLive);
   $("#liveBadge")?.classList.toggle("hidden", !P.isLive);
+  syncVodToolButtons();
+  if (typeof openFsEpDrawer === "function") openFsEpDrawer(false);
   layer.classList.remove("hidden");
   document.body.style.overflow = "hidden";
   if (wasHidden) {
@@ -1892,16 +2105,29 @@ function play(title, url, eps = [], idx = 0, vodKey = "", seekTime = 0, isLive =
   renderEpisodes();
   mountSource(url, seekTime);
 }
+function selectEpisodeIndex(i) {
+  if (!P.eps || !P.eps[i]) return;
+  if (P.vodKey && !P.isLive) {
+    const v = $("#video");
+    if (v && v.currentTime > 1) saveProgress(P.vodKey, P.idx, v.currentTime, true);
+  }
+  if (P.managed) P.managed.generation++;
+  P.idx = i;
+  P._outroSkippedIdx = -1;
+  syncVodToolButtons();
+  renderEpisodes();
+  mountSource(P.eps[i].url);
+  $("#playerTitle").textContent = P.title.replace(/ · .*$/, "") + " · " + P.eps[i].name;
+}
 function renderEpisodes() {
   const el = $("#epList");
+  syncVodToolButtons();
   if (!P.eps || P.eps.length <= 1) { if (el) el.innerHTML = ""; return; }
-  renderPagedEpisodes(el, P.eps, P.idx, (i) => {
-    if(P.managed)P.managed.generation++;
-    P.idx = i;
-    renderEpisodes();
-    mountSource(P.eps[i].url);
-    $("#playerTitle").textContent = P.title.replace(/ · .*$/, "") + " · " + P.eps[i].name;
-  }, P._epState || (P._epState = { page: null, reversed: false }), false);
+  renderPagedEpisodes(el, P.eps, P.idx, selectEpisodeIndex, P._epState || (P._epState = { page: null, reversed: false }), false);
+  const fsBody = $("#fsEpBody");
+  if (fsBody && !$("#fsEpDrawer")?.classList.contains("hidden")) {
+    renderPagedEpisodes(fsBody, P.eps, P.idx, (i) => { selectEpisodeIndex(i); openFsEpDrawer(false); }, P._epState, false);
+  }
 }
 async function retryManagedPlayback(mountToken) {
   const ctx=P.managed;
@@ -1945,6 +2171,14 @@ function tip(msg, isHtml = false) {
   else el.textContent = msg || "";
   el.style.display = msg ? "flex" : "none";
 }
+async function ensureHlsReady() {
+  if (window.Hls) return true;
+  for (let i = 0; i < 25; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    if (window.Hls) return true;
+  }
+  return false;
+}
 async function mountSource(url, seekTime = 0, _proxyTried = false) {
   destroyPlayers();
   stopMusicForVideo();
@@ -1964,14 +2198,18 @@ async function mountSource(url, seekTime = 0, _proxyTried = false) {
     }
   }
   const v = $("#video");
-  if (seekTime > 1 && !P.isLive) {
+  const skipCfg = (!P.isLive && P.vodKey) ? getSkipCfg(P.vodKey) : null;
+  const introTarget = (skipCfg && skipCfg.enabled && skipCfg.intro > 0 && seekTime < skipCfg.intro) ? skipCfg.intro : 0;
+  const finalSeek = introTarget > seekTime ? introTarget : seekTime;
+  const isIntroSkip = introTarget > 0 && finalSeek === introTarget;
+  if (finalSeek > 1 && !P.isLive) {
     let seekDone = false;
     const applySeek = () => {
       if (seekDone) return;
-      if (v.duration && seekTime < v.duration) {
+      if (v.duration && finalSeek < (isIntroSkip ? Math.max(0, v.duration - 10) : v.duration)) {
         seekDone = true;
-        v.currentTime = seekTime;
-        toast("已续播至 " + fmt(seekTime));
+        v.currentTime = finalSeek;
+        toast(isIntroSkip ? "已自动跳过片头 (" + fmt(finalSeek) + ")" : ("已续播至 " + fmt(finalSeek)));
       }
     };
     v.addEventListener("loadedmetadata", applySeek, { once: true });
@@ -1983,6 +2221,8 @@ async function mountSource(url, seekTime = 0, _proxyTried = false) {
   $("#qualitySel").innerHTML = "<option>自动</option>";
   paintRange($("#seek"), 0, 0);
   tip("正在缓冲视频流…");
+  if (isHls) await ensureHlsReady();
+  if (mountToken !== P.mountToken) return;
   if (isHls && window.Hls && Hls.isSupported()) {
     P.hls = new Hls({ maxBufferLength: 30 });
     P.hls.loadSource(url); P.hls.attachMedia(v);
@@ -1994,7 +2234,7 @@ async function mountSource(url, seekTime = 0, _proxyTried = false) {
     P.hls.on(Hls.Events.ERROR, (_e, d) => {
       if (!d.fatal) return;
       // 直播或网络跨域错误自动切至平板 /api/live/m3u8 重写代理秒播
-      if (!_proxyTried && !url.includes("/api/live/m3u8") && (P.isLive || d.type === Hls.ErrorTypes.NETWORK_ERROR)) {
+      if (!_proxyTried && !url.includes("/api/live/m3u8") && (P.isLive || d.type === Hls.ErrorTypes.NETWORK_ERROR || d.type === Hls.ErrorTypes.MEDIA_ERROR)) {
         const base = window.__NH_API_BASE__ || (location.protocol.startsWith("http") && !location.hostname.endsWith("github.io") ? "" : "");
         if (base || !location.hostname.endsWith("github.io")) {
           tip("直连受限，正经由节点转发直播流…");
@@ -2002,11 +2242,18 @@ async function mountSource(url, seekTime = 0, _proxyTried = false) {
           return;
         }
       }
-      if (v.canPlayType("application/vnd.apple.mpegurl")) {
+      if (!P.isLive && v.canPlayType("application/vnd.apple.mpegurl")) {
         destroyPlayers();
         v.src = url;
         v.play().catch(() => {});
         tip("");
+      } else if (P.isLive) {
+        tip(
+          `<span>当前直播频道暂不可用 (${esc(d.details || d.type || "连接失败")})</span>` +
+          (P.eps && P.eps.length > 1 ? `<button id="nextLiveChBtn" class="btn primary" style="margin-top:10px;padding:6px 14px;font-size:13px">切下一个频道</button>` : ""),
+          true
+        );
+        $("#nextLiveChBtn")?.addEventListener("click", () => selectEpisodeIndex((P.idx + 1) % P.eps.length));
       } else {
         if(!P.managed)tip("视频流异常：" + d.type);
         else retryManagedPlayback(mountToken);
@@ -2026,6 +2273,23 @@ async function mountSource(url, seekTime = 0, _proxyTried = false) {
   }
   v.onerror = async () => {
     if(mountToken!==P.mountToken)return;
+    if(P.isLive && !_proxyTried && !url.includes("/api/live/m3u8")) {
+      const base = window.__NH_API_BASE__ || (location.protocol.startsWith("http") && !location.hostname.endsWith("github.io") ? "" : "");
+      if (base || !location.hostname.endsWith("github.io")) {
+        tip("正在尝试节点转发直播流…");
+        mountSource(`${base}/api/live/m3u8?url=${encodeURIComponent(url)}`, seekTime, true);
+        return;
+      }
+    }
+    if(P.isLive) {
+      tip(
+        `<span>当前直播频道暂不可用</span>` +
+        (P.eps && P.eps.length > 1 ? `<button id="nextLiveChBtn" class="btn primary" style="margin-top:10px;padding:6px 14px;font-size:13px">切下一个频道</button>` : ""),
+        true
+      );
+      $("#nextLiveChBtn")?.addEventListener("click", () => selectEpisodeIndex((P.idx + 1) % P.eps.length));
+      return;
+    }
     if(P.managed && await retryManagedPlayback(mountToken))return;
     const kw = (P.title || "").split(" · ")[0].trim();
     tip(
@@ -2065,6 +2329,61 @@ $("#qualitySel").addEventListener("change", (e) => {
 });
 let _fsUiTimer = null;
 let _lastBoxSwipeAt = 0;
+
+function showGestureToast(msg, autoHideMs = 0) {
+  const el = $("#playerGestureToast");
+  if (!el) return;
+  clearTimeout(showGestureToast._t);
+  if (!msg) {
+    el.classList.add("hidden");
+    el.textContent = "";
+    return;
+  }
+  el.textContent = msg;
+  el.classList.remove("hidden");
+  if (autoHideMs > 0) {
+    showGestureToast._t = setTimeout(() => el.classList.add("hidden"), autoHideMs);
+  }
+}
+
+function seekByDelta(deltaSec) {
+  const v = $("#video");
+  if (!v || P.isLive || !isFinite(v.duration) || v.duration <= 0) return;
+  const next = Math.max(0, Math.min(Math.max(0, v.duration - 0.5), (v.currentTime || 0) + deltaSec));
+  v.currentTime = next;
+  if (P.vodKey) saveProgress(P.vodKey, P.idx, next, false);
+  showFsControls(true);
+  showGestureToast(`${deltaSec >= 0 ? "快进" : "快退"} ${Math.abs(deltaSec) >= 60 ? `${Math.round(Math.abs(deltaSec) / 60)} 分钟` : `${Math.abs(deltaSec)} 秒`} (${fmt(next)})`, 1200);
+}
+
+function playNextEpisode() {
+  if (!P.eps || P.isLive) return;
+  if (P.idx + 1 >= P.eps.length) {
+    toast("已是最后一集");
+    return;
+  }
+  selectEpisodeIndex(P.idx + 1);
+  toast(`切换至：${P.eps[P.idx].name}`);
+}
+
+function openFsEpDrawer(open) {
+  const drawer = $("#fsEpDrawer");
+  const body = $("#fsEpBody");
+  if (!drawer || !body) return;
+  const show = open === undefined ? drawer.classList.contains("hidden") : !!open;
+  if (!show) {
+    drawer.classList.add("hidden");
+    showFsControls(true);
+    return;
+  }
+  if (!P.eps || P.eps.length <= 1) return toast("当前影片仅单集");
+  if (_fsUiTimer) { clearTimeout(_fsUiTimer); _fsUiTimer = null; }
+  renderPagedEpisodes(body, P.eps, P.idx, (i) => {
+    selectEpisodeIndex(i);
+    openFsEpDrawer(false);
+  }, P._epState || (P._epState = { page: null, reversed: false }), false);
+  drawer.classList.remove("hidden");
+}
 
 function syncFitButton() {
   const b = $("#btnFit");
@@ -2194,6 +2513,7 @@ async function setPlayerFullscreen(enter) {
     setTimeout(updateFsRotate, 120);
   } else {
     layer.classList.remove("is-fs", "fs-ui-hide", "fs-rotate", "fs-cover");
+    if (typeof openFsEpDrawer === "function") openFsEpDrawer(false);
     if (_fsUiTimer) { clearTimeout(_fsUiTimer); _fsUiTimer = null; }
     syncFitButton();
     if (window.NovaNative && typeof window.NovaNative.setFullscreen === "function") {
@@ -2226,6 +2546,18 @@ $("#btnFs").onclick = () => {
   const isFs = !!(layer && layer.classList.contains("is-fs")) || !!(document.fullscreenElement || document.webkitFullscreenElement);
   setPlayerFullscreen(!isFs);
 };
+$("#btnFwd30")?.addEventListener("click", () => seekByDelta(30));
+$("#btnFwd60")?.addEventListener("click", () => seekByDelta(60));
+$("#btnNextEp")?.addEventListener("click", playNextEpisode);
+$("#btnFsEp")?.addEventListener("click", () => openFsEpDrawer());
+$("#btnSkipCfg")?.addEventListener("click", openSkipCfgModal);
+$("#fsEpClose")?.addEventListener("click", () => openFsEpDrawer(false));
+$("#btnVodDownload")?.addEventListener("click", () => {
+  const ep = (P.eps && P.eps[P.idx]) || null;
+  if (!ep || !ep.url) return toast("当前无可用下载线路");
+  const title = (P.title || "视频").split(" · ")[0];
+  downloadVodEpisode(title, ep.name || "正片", ep.url);
+});
 ["pointerdown", "input", "change"].forEach((ev) => {
   $(".player-ctrl")?.addEventListener(ev, () => showFsControls(true));
   $(".player-head")?.addEventListener(ev, () => showFsControls(true));
@@ -2234,7 +2566,11 @@ $("#btnFs").onclick = () => {
   const v = $("#video");
   if (!v) return;
   v.addEventListener("play", () => { stopMusicForVideo(); syncVideoMediaSession(); showFsControls(true); });
-  v.addEventListener("pause", () => { syncVideoMediaSession(); showFsControls(false); });
+  v.addEventListener("pause", () => {
+    syncVideoMediaSession();
+    showFsControls(false);
+    if (P.vodKey && !P.isLive && v.currentTime > 1) saveProgress(P.vodKey, P.idx, v.currentTime, true);
+  });
   v.addEventListener("loadedmetadata", syncVideoMediaSession);
   v.addEventListener("seeked", syncVideoMediaSession);
 })();
@@ -2245,6 +2581,7 @@ $("#seek").addEventListener("input", (e) => {
   paintRange(e.target, e.target.value / 10, getBufferedPct(v));
 });
 let _lastPaused = null;
+let _lastCloudSyncTick = 0;
 setInterval(() => {
   const v = $("#video");
   if (!v) return;
@@ -2260,14 +2597,27 @@ setInterval(() => {
     paintRange(sk, pct, getBufferedPct(v));
   }
   $("#timeText").textContent = fmt(v.currentTime) + " / " + fmt(v.duration);
-  if (P.vodKey && Math.floor(v.currentTime) % 5 === 0) saveProgress(P.vodKey, P.idx, v.currentTime);
+  if (P.vodKey && Math.floor(v.currentTime) % 5 === 0) {
+    const nowMs = Date.now();
+    const shouldCloud = nowMs - _lastCloudSyncTick >= 10000;
+    if (shouldCloud) _lastCloudSyncTick = nowMs;
+    saveProgress(P.vodKey, P.idx, v.currentTime, shouldCloud);
+  }
+  if (!v.paused && P.vodKey && P.eps && P.idx + 1 < P.eps.length && P._outroSkippedIdx !== P.idx) {
+    const sc = getSkipCfg(P.vodKey);
+    if (sc && sc.enabled && sc.outro > 0 && v.duration > sc.outro + 30 && (v.duration - v.currentTime) <= sc.outro) {
+      P._outroSkippedIdx = P.idx;
+      toast("已自动跳过片尾，连播下一集");
+      selectEpisodeIndex(P.idx + 1);
+    }
+  }
 }, 500);
 function fmt(s) {
   s = isFinite(s) && s > 0 ? Math.floor(s) : 0;
   return String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
 }
 
-/* 播放器全屏及竖屏通用手势：左半屏上下调亮度，右半屏上下调声音，左右滑动快进/后退，轻点显隐控制栏 */
+/* 播放器全屏及竖屏通用手势：左半屏上下调亮度、右半屏上下调声音、左右滑调进度、双击暂停/播放、长按左快退/右3.0x快进 */
 (() => {
   const box = $(".player-box");
   const v = $("#video");
@@ -2277,6 +2627,8 @@ function fmt(s) {
   let _curBright = 1.0;
   let sx = 0, sy = 0, startTime = 0, startBright = 1.0, startVol = 1.0, targetTime = -1;
   let gestureMode = "", isLeftHalf = true;
+  let _lpTimer = null, _rewTimer = null, _prevRate = 1, _wasPausedBeforeLp = false;
+  let _clickTimer = null, _lastTapAt = 0, _ignoreNextDblClick = false;
 
   const showHud = (iconName, text, pct) => {
     if (!hud) return;
@@ -2288,13 +2640,51 @@ function fmt(s) {
     clearTimeout(_hudTimer);
     _hudTimer = setTimeout(() => hud?.classList.add("hidden"), 700);
   };
+  const clearLongPressTimers = () => {
+    if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
+    if (_rewTimer) { clearInterval(_rewTimer); _rewTimer = null; }
+  };
+  const togglePlayPause = () => {
+    if (!v) return;
+    if (v.paused) {
+      v.play().catch(() => {});
+      showGestureToast("继续播放", 900);
+    } else {
+      v.pause();
+      showGestureToast("已暂停", 900);
+    }
+    showFsControls(true);
+  };
 
+  box.addEventListener("contextmenu", (e) => e.preventDefault());
+  box.addEventListener("dblclick", (e) => {
+    if (e.target.closest("button, #fsEpDrawer")) return;
+    if (_ignoreNextDblClick) { _ignoreNextDblClick = false; return; }
+    if (_clickTimer) { clearTimeout(_clickTimer); _clickTimer = null; }
+    togglePlayPause();
+  });
   box.addEventListener("click", (e) => {
-    if (e.target.closest("button") || Date.now() - _lastBoxSwipeAt < 250) return;
-    if ($("#playerLayer")?.classList.contains("is-fs")) toggleFsControls();
+    if (e.target.closest("button, #fsEpDrawer")) return;
+    if (Date.now() - _lastBoxSwipeAt < 280) return;
+    const now = Date.now();
+    if (now - _lastTapAt <= 260) {
+      _lastTapAt = 0;
+      if (_clickTimer) { clearTimeout(_clickTimer); _clickTimer = null; }
+      _ignoreNextDblClick = true;
+      setTimeout(() => { _ignoreNextDblClick = false; }, 120);
+      togglePlayPause();
+      return;
+    }
+    _lastTapAt = now;
+    if (_clickTimer) clearTimeout(_clickTimer);
+    _clickTimer = setTimeout(() => {
+      _clickTimer = null;
+      if ($("#playerLayer")?.classList.contains("is-fs")) toggleFsControls();
+    }, 260);
   });
   box.addEventListener("touchstart", (e) => {
-    if (e.touches.length !== 1) return;
+    if (e.target.closest("button, #fsEpDrawer")) return;
+    if (e.touches.length !== 1) { clearLongPressTimers(); return; }
     const t = e.touches[0];
     sx = t.clientX;
     sy = t.clientY;
@@ -2320,9 +2710,38 @@ function fmt(s) {
     } else {
       startVol = v.volume ?? 1;
     }
+    clearLongPressTimers();
+    if (!P.isLive && v.duration && isFinite(v.duration)) {
+      _lpTimer = setTimeout(() => {
+        _lpTimer = null;
+        if (gestureMode) return;
+        if (!isLeftHalf) {
+          gestureMode = "longpress_fwd";
+          _prevRate = parseFloat($("#rateSel")?.value || v.playbackRate || "1") || 1;
+          _wasPausedBeforeLp = v.paused;
+          if (v.paused) v.play().catch(() => {});
+          v.playbackRate = 3.0;
+          showGestureToast("⏩ 3.0x 快进中");
+        } else {
+          gestureMode = "longpress_rew";
+          _wasPausedBeforeLp = v.paused;
+          const stepBack = () => {
+            if (!v || !v.duration) return;
+            v.currentTime = Math.max(0, (v.currentTime || 0) - 5);
+            showGestureToast(`⏪ 快退中 (${fmt(v.currentTime)})`);
+          };
+          stepBack();
+          _rewTimer = setInterval(stepBack, 260);
+        }
+      }, 450);
+    }
   }, { passive: true });
   box.addEventListener("touchmove", (e) => {
     if (e.touches.length !== 1) return;
+    if (gestureMode === "longpress_fwd" || gestureMode === "longpress_rew") {
+      e.preventDefault();
+      return;
+    }
     const rotated = $("#playerLayer")?.classList.contains("fs-rotate");
     const rawDx = e.touches[0].clientX - sx;
     const rawDy = e.touches[0].clientY - sy;
@@ -2331,6 +2750,7 @@ function fmt(s) {
 
     if (!gestureMode) {
       if (Math.abs(dx) < 14 && Math.abs(dy) < 14) return;
+      clearLongPressTimers();
       if (Math.abs(dx) > Math.abs(dy)) {
         if (P.isLive || !v.duration) return;
         gestureMode = "seek";
@@ -2368,17 +2788,30 @@ function fmt(s) {
       showHud("volume", `音量 ${Math.round(nextVol * 100)}%`, nextVol * 100);
     }
   }, { passive: false });
-  box.addEventListener("touchend", () => {
-    if (gestureMode === "seek") {
+  const endTouchGesture = () => {
+    clearLongPressTimers();
+    if (gestureMode === "longpress_fwd") {
+      v.playbackRate = _prevRate || 1;
+      if (_wasPausedBeforeLp) v.pause();
+      showGestureToast("");
+      if (P.vodKey && v.currentTime > 1) saveProgress(P.vodKey, P.idx, v.currentTime, false);
+      _lastBoxSwipeAt = Date.now();
+    } else if (gestureMode === "longpress_rew") {
+      showGestureToast("");
+      if (P.vodKey && v.currentTime > 1) saveProgress(P.vodKey, P.idx, v.currentTime, false);
+      _lastBoxSwipeAt = Date.now();
+    } else if (gestureMode === "seek") {
       if (targetTime >= 0 && v.duration) v.currentTime = targetTime;
       tip("");
-    }
-    if (gestureMode) {
+      _lastBoxSwipeAt = Date.now();
+    } else if (gestureMode) {
       _lastBoxSwipeAt = Date.now();
       hideHudSoon();
     }
     gestureMode = "";
-  });
+  };
+  box.addEventListener("touchend", endTouchGesture);
+  box.addEventListener("touchcancel", endTouchGesture);
 })();
 
 /* ============ 直播（高清 HTTPS 实测频道 + 分类 + 代理容灾） ============ */
@@ -2391,7 +2824,6 @@ const DEFAULT_CHANNELS = [
   { name: "发现中国 1080P", cat: "央视纪录", url: "https://fastlive.cctvplus.com/out/v1/8442c3bfd4c64a3984389328f6087879/index.m3u8" },
   { name: "行游中国 1080P", cat: "央视纪录", url: "https://fastlive.cctvplus.com/out/v1/ca6f9297b7314a63959435028af287fc/index.m3u8" },
   { name: "河北卫视 4K", cat: "地方卫视", url: "https://event.pull.hebtv.com/live/live101.m3u8" },
-  { name: "浙江国际 1080P", cat: "地方卫视", url: "https://ali-m-l.cztv.com/channels/lantian/channel10/1080p.m3u8" },
   { name: "广州综合", cat: "地方卫视", url: "https://tencentplaybusiness.gztv.com/live/zonghes.m3u8" },
   { name: "安徽卫视 1080P", cat: "地方卫视", url: "https://restream.pdtvhd.com/memfs/c1cd2ed0-3b2b-4c25-af98-a7fb0b1eb130.m3u8" },
   { name: "湖南经视", cat: "地方卫视", url: "https://p8.vzan.com/slowlive/415983998730568937/live.m3u8" },
@@ -2409,12 +2841,18 @@ const DEFAULT_CHANNELS = [
   { name: "BabyFirst 少儿", cat: "少儿自然", url: "https://cdn.fast.jwp.services/v1/channel/1_jB6940Ei_TvhvIHDL/manifest.m3u8" },
   { name: "大爱电视 HD", cat: "少儿自然", url: "https://pull.daaiplus.com/live-DAAIPLUS/live-DAAIPLUS_HD.m3u8" },
 ];
-const CH_VER = "20261126-v4";
+const CH_VER = "20261127-v5";
+const DEAD_LIVE_PATTERNS = ["live.example.com", "ivi.bupt.edu.cn", "ali-m-l.cztv.com/channels/lantian/channel10/1080p.m3u8"];
+function mergeLiveChannels(rawList) {
+  const customCh = (Array.isArray(rawList) ? rawList : []).filter(
+    (c) => c && c.url && !DEAD_LIVE_PATTERNS.some((bad) => String(c.url).includes(bad))
+  );
+  const seen = new Set(DEFAULT_CHANNELS.map((c) => c.url));
+  return DEFAULT_CHANNELS.concat(customCh.filter((c) => !seen.has(c.url)).map((c) => ({ ...c, cat: c.cat || "自定义" })));
+}
 let channels = get("channels", null);
 if (!channels || !channels.length || get("ch_ver", "") !== CH_VER) {
-  const customCh = (channels || []).filter((c) => !c.url.includes("live.example.com") && !c.url.includes("ivi.bupt.edu.cn"));
-  const seen = new Set(DEFAULT_CHANNELS.map((c) => c.url));
-  channels = DEFAULT_CHANNELS.concat(customCh.filter((c) => !seen.has(c.url)).map((c) => ({ ...c, cat: c.cat || "自定义" })));
+  channels = mergeLiveChannels(channels);
   set("channels", channels);
   set("ch_ver", CH_VER);
 }
@@ -2571,6 +3009,7 @@ function restore(obj) {
   try {
     _isRestoring=true;
     for(const k of SYNC_KEYS)if(d[k]!==undefined&&d[k]!==null&&!['history','progress','history_deleted','history_cleared_at'].includes(k))set(k,d[k]);
+    if (d.channels !== undefined && typeof mergeLiveChannels === 'function') set('channels', mergeLiveChannels(d.channels));
     applyHistoryState(merged);
     if(d.music_fav&&!d.music_favs)set('music_favs',d.music_fav);
     if(Array.isArray(d.source)){sources=d.source;set(K.SOURCE,sources);migrateLegacySources().catch(()=>{});}
@@ -2594,7 +3033,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${pro ? "" : "gray"}">${pro ? "PRO" : "标准版"}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.5</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.4.7</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -2663,7 +3102,9 @@ function renderMe() {
     $("#btnCloudPush").onclick = () => cloudSyncPush(false);
     $("#btnCloudPull").onclick = () => cloudSyncPull(false);
     $("#btnLogout").onclick = () => {
+      if (typeof sendPresenceLogout === "function") sendPresenceLogout();
       authSession.clear();
+      if (typeof refreshNotifications === "function") refreshNotifications(true);
       renderMe(); toast("已退出登录");
     };
   }
@@ -2858,7 +3299,7 @@ async function searchNovel(q) {
     renderTabbar();
   }
   setSearchLoading(true);
-  $("#view").innerHTML = `<div class="section-title">${ico("search")} 正在检索「${esc(q)}」…</div>${renderSkeletonHtml("list", 6)}`;
+  $("#view").innerHTML = `<div class="section-title">${ico("search")} 搜索：${esc(q)}</div>${renderSearchLoadingHtml(q, "正在检索书城书库…")}`;
   try {
     const r = await fetch(`/api/novel/search?q=${encodeURIComponent(q)}`);
     const d = await r.json();
@@ -2937,9 +3378,10 @@ async function openNovelDetail(book, _fromBack = false, autoResume = false) {
         </div>
       </div>
       <div class="hint" style="margin-top:11px;white-space:pre-line;max-height:110px;overflow-y:auto">${esc(book.abstract || "暂无作品简介")}</div>
-      <div style="display:flex;gap:8px;margin-top:13px">
+      <div style="display:flex;gap:8px;margin-top:13px;flex-wrap:wrap">
         <button class="btn primary" id="btnReadStart" style="flex:1">${ico("book")} ${prog ? `继续阅读 (第${prog.index}章)` : "立即在线阅读"}</button>
         <button class="btn ghost" id="btnShelfToggle">${ico(inShelf ? "bookmarkFill" : "bookmark")} ${inShelf ? "已在书架" : "加入书架"}</button>
+        ${NH.user ? `<button class="btn ghost ${inShelf ? "" : "hidden"}" id="btnNovelNotify">${ico("bell")} ${getWatchNotifyEnabled("novel", String(book.book_id)) ? "提醒开" : "提醒关"}</button>` : ""}
       </div>
     </div>
     <div class="section-title" style="justify-content:space-between">
@@ -2952,7 +3394,12 @@ async function openNovelDetail(book, _fromBack = false, autoResume = false) {
   $("#btnShelfToggle").onclick = () => {
     const nowOn = toggleNovelShelf(book);
     $("#btnShelfToggle").innerHTML = `${ico(nowOn ? "bookmarkFill" : "bookmark")} ${nowOn ? "已在书架" : "加入书架"}`;
+    $("#btnNovelNotify")?.classList.toggle("hidden", !nowOn);
   };
+  $("#btnNovelNotify")?.addEventListener("click", async () => {
+    const cur = getWatchNotifyEnabled("novel", String(book.book_id));
+    await toggleWatchNotify("novel", String(book.book_id), !cur, book.title, { book_id: String(book.book_id), title: book.title, author: book.author || "", cover: book.cover || "" }, $("#btnNovelNotify"));
+  });
 
   try {
     const chapters = await fetchBookChapters(book.book_id);
@@ -3429,6 +3876,11 @@ function syncModeFab() {
 async function nhApi(path, method = "GET", body = null) {
   const headers = { "Content-Type": "application/json" };
   if (NH.token) headers["Authorization"] = "Bearer " + NH.token;
+  if (typeof getDeviceId === "function") {
+    headers["X-Device-Id"] = getDeviceId();
+    headers["X-Client-Type"] = isAppClient() ? "app" : "web";
+    headers["X-Device-Info"] = getDeviceInfo();
+  }
   const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) {
@@ -3437,6 +3889,215 @@ async function nhApi(path, method = "GET", body = null) {
     throw err;
   }
   return d;
+}
+
+/* ============ 在线状态心跳与音乐/影视媒体下载 ============ */
+let _lastCloudPullAt = 0;
+async function sendPresenceHeartbeat() {
+  if (!NH.user || !NH.token) return;
+  try {
+    await nhApi("/api/auth/heartbeat", "POST", {
+      device_id: getDeviceId(),
+      client_type: isAppClient() ? "app" : "web",
+      device_info: getDeviceInfo(),
+    });
+  } catch {}
+}
+function sendPresenceLogout() {
+  if (!NH.token) return;
+  try {
+    fetch("/api/auth/logout", {
+      method: "POST",
+      keepalive: true,
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + NH.token,
+        "X-Device-Id": getDeviceId(),
+      },
+      body: JSON.stringify({ device_id: getDeviceId() }),
+    }).catch(() => {});
+  } catch {}
+}
+setInterval(() => {
+  if (typeof document !== "undefined" && document.visibilityState === "visible" && NH.user && NH.token) {
+    sendPresenceHeartbeat();
+  }
+}, 60000);
+
+function sanitizeDownloadName(name, fallback = "novahub-media") {
+  const cleaned = String(name || "").replace(/[\\/:*?"<>|\r\n\x00-\x1f]+/g, "_").trim();
+  return cleaned || fallback;
+}
+function triggerBrowserFileDownload(url, filename) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.rel = "noopener noreferrer";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+async function downloadViaGatewayOrNative(rawUrl, filename) {
+  const safeName = sanitizeDownloadName(filename);
+  const res = await nhApi("/api/media/ticket");
+  const base = window.__NH_API_BASE__ || "";
+  const dlUrl = `${base}/api/media/download?url=${encodeURIComponent(rawUrl)}&name=${encodeURIComponent(safeName)}&ticket=${encodeURIComponent(res.ticket)}`;
+  if (window.NovaNative && typeof window.NovaNative.downloadMedia === "function") {
+    const ok = window.NovaNative.downloadMedia(dlUrl, safeName);
+    if (ok) { toast(`已加入系统下载：${safeName}`); return; }
+  }
+  triggerBrowserFileDownload(dlUrl, safeName);
+  toast(`已开始下载：${safeName}`);
+}
+async function downloadMusicTrack(song) {
+  if (!NH.user) {
+    toast("请先登录账号后再下载");
+    if (typeof openAuthModal === "function") openAuthModal("login");
+    return;
+  }
+  if (!song) return;
+  toast("正在解析音频下载链接…");
+  try {
+    const playUrl = ensureHttpsAudio(await resolveSongUrl(song));
+    if (!playUrl) return toast("暂无可下载的音频直链");
+    const extMatch = playUrl.match(/\.(flac|mp3|m4a|aac|ogg|wav)(\?|$)/i);
+    const ext = extMatch ? extMatch[1].toLowerCase() : (mBr === "999" ? "flac" : "mp3");
+    const fname = `${song.name || "歌曲"} - ${song.artist || "未知歌手"}.${ext}`;
+    await downloadViaGatewayOrNative(playUrl, fname);
+  } catch (e) {
+    toast("音频下载失败：" + (e.message || "未知错误"), 2400);
+  }
+}
+async function downloadVodEpisode(title, epName, rawUrl) {
+  if (!NH.user) {
+    toast("请先登录账号后再下载");
+    if (typeof openAuthModal === "function") openAuthModal("login");
+    return;
+  }
+  if (!rawUrl) return toast("暂无可用下载链接");
+  const baseName = `${title || "视频"} - ${epName || "正片"}`;
+  const isHls = /\.m3u8(\?|$)/i.test(rawUrl) || rawUrl.includes("/api/live/m3u8");
+  if (!isHls) {
+    const extMatch = rawUrl.match(/\.(mp4|mkv|webm|flv|ts|m4v)(\?|$)/i);
+    const ext = extMatch ? extMatch[1].toLowerCase() : "mp4";
+    try {
+      await downloadViaGatewayOrNative(rawUrl, `${baseName}.${ext}`);
+    } catch (e) {
+      toast("视频下载失败：" + (e.message || "未知错误"), 2400);
+    }
+    return;
+  }
+
+  let aborted = false;
+  let ticket = "";
+  try {
+    const tRes = await nhApi("/api/media/ticket");
+    ticket = tRes.ticket;
+  } catch (e) {
+    return toast("获取下载授权失败：" + (e.message || "请重试"), 2400);
+  }
+  const base = window.__NH_API_BASE__ || "";
+  const buildProxy = (u, isM3u = false) => `${base}${isM3u ? "/api/live/m3u8" : "/api/live/seg"}?url=${encodeURIComponent(u)}&ticket=${encodeURIComponent(ticket)}`;
+  const resolveM3uSegments = async (m3uProxyUrl, depth = 0) => {
+    if (depth > 3) throw new Error("M3U8 嵌套层数过深");
+    const r = await fetch(m3uProxyUrl);
+    if (!r.ok) throw new Error("获取分片清单失败 HTTP " + r.status);
+    const txt = await r.text();
+    const lines = txt.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const segs = [];
+    let firstSub = "";
+    let prevInf = false;
+    for (const ln of lines) {
+      if (ln.startsWith("#EXT-X-STREAM-INF")) { prevInf = true; continue; }
+      if (ln.startsWith("#")) { prevInf = false; continue; }
+      const absUrl = new URL(ln, new URL(m3uProxyUrl, location.href)).href;
+      if (prevInf || /\.m3u8(\?|$)/i.test(ln)) {
+        if (!firstSub) firstSub = absUrl;
+      } else {
+        segs.push(absUrl);
+      }
+      prevInf = false;
+    }
+    if (!segs.length && firstSub) return resolveM3uSegments(firstSub, depth + 1);
+    return segs;
+  };
+
+  $("#modalTitle").textContent = "下载影片：" + baseName;
+  $("#modalBody").innerHTML = `
+    <div style="font-size:13px;line-height:1.6">
+      <div id="vodDlStatus" style="color:var(--text)">正在解析 HLS 视频分片列表…</div>
+      <div style="margin:10px 0;height:8px;border-radius:99px;background:rgba(255,255,255,.1);overflow:hidden">
+        <div id="vodDlBar" style="width:0%;height:100%;background:var(--accent);transition:width .15s"></div>
+      </div>
+      <div id="vodDlSub" class="hint">若分片过多（&gt; 150MB），建议使用外部下载器直接抓取 M3U8 链接</div>
+      <button id="vodDlCopyM3u" class="btn ghost" type="button" style="margin-top:8px;width:100%">复制直链 M3U8 地址</button>
+    </div>`;
+  $("#modalOk").textContent = "隐藏";
+  $("#modalCancel").textContent = "取消下载";
+  $("#modal").classList.remove("hidden");
+  $("#vodDlCopyM3u")?.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(rawUrl); toast("已复制 M3U8 链接"); } catch { toast("复制失败，请手动复制"); }
+  });
+  const cleanupModal = () => {
+    $("#modal").classList.add("hidden");
+    $("#modalOk").textContent = "确定";
+    $("#modalCancel").textContent = "取消";
+    $("#modalOk").onclick = $("#modalCancel").onclick = null;
+  };
+  $("#modalOk").onclick = cleanupModal;
+  $("#modalCancel").onclick = () => { aborted = true; cleanupModal(); toast("已取消下载"); };
+
+  try {
+    const segUrls = await resolveM3uSegments(buildProxy(rawUrl, true));
+    if (aborted) return;
+    if (!segUrls.length) throw new Error("未解析到可下载的视频分片");
+    const total = segUrls.length;
+    const chunks = new Array(total);
+    let done = 0;
+    let totalBytes = 0;
+    let nextIdx = 0;
+    const workers = Array.from({ length: Math.min(3, total) }, async () => {
+      while (!aborted) {
+        const cur = nextIdx++;
+        if (cur >= total) return;
+        let buf = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const resp = await fetch(segUrls[cur]);
+            if (!resp.ok) throw new Error("HTTP " + resp.status);
+            buf = await resp.arrayBuffer();
+            break;
+          } catch (err) {
+            if (attempt === 1) throw err;
+          }
+        }
+        chunks[cur] = buf;
+        totalBytes += buf.byteLength;
+        done++;
+        const stEl = $("#vodDlStatus"), barEl = $("#vodDlBar");
+        if (stEl) stEl.textContent = `正在下载分片 ${done} / ${total}（已缓存 ${(totalBytes / 1048576).toFixed(1)} MB）`;
+        if (barEl) barEl.style.width = `${Math.round((done / total) * 100)}%`;
+        if (totalBytes > 240 * 1048576) {
+          aborted = true;
+          throw new Error("单集体积超过浏览器合并上限 (240MB)，请复制 M3U8 链接使用专业下载器");
+        }
+      }
+    });
+    await Promise.all(workers);
+    if (aborted) return;
+    const blob = new Blob(chunks, { type: "video/mp2t" });
+    const blobUrl = URL.createObjectURL(blob);
+    triggerBrowserFileDownload(blobUrl, sanitizeDownloadName(baseName + ".ts"));
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    cleanupModal();
+    toast("下载完成：" + sanitizeDownloadName(baseName + ".ts"));
+  } catch (e) {
+    if (!aborted) {
+      const stEl = $("#vodDlStatus");
+      if (stEl) stEl.textContent = "下载失败：" + (e.message || "网络异常");
+      toast("下载失败：" + (e.message || "网络异常"), 2600);
+    }
+  }
 }
 
 async function loadSiteConfig() {
@@ -3453,6 +4114,8 @@ async function refreshAuthUser() {
   if (!NH.token) return;
   const result = await authSession.refresh();
   if (result === 'valid') {
+    if (typeof sendPresenceHeartbeat === 'function') sendPresenceHeartbeat();
+    if (typeof refreshNotifications === 'function') refreshNotifications(true);
     await cloudSyncPull(true);
     if (!viewStack.length && ["me","home","n_store","m_fav","n_shelf"].includes(currentRoute)) routes[currentRoute]();
   } else if (result === 'invalid') {
@@ -3506,6 +4169,7 @@ async function openAuthModal() {
     authSession.apply(d.token, d.user);
     if (isReg) await cloudSyncPush(true);
     else await cloudSyncPull(true);
+    if (typeof refreshNotifications === "function") refreshNotifications(true);
     toast(isReg ? "注册并登录成功" : "登录成功");
     if (routes[currentRoute]) routes[currentRoute](); else renderMe();
   } catch (e) {
@@ -3572,15 +4236,28 @@ async function cloudSyncPull(silent = false) {
           const val = get(k, null);
           return Array.isArray(val) && val.length > 0;
         });
-        if (hasLocal) await cloudSyncPush(true);
+        if (hasLocal && typeof cloudSyncPush === "function") await cloudSyncPush(true);
       } else {
         toast("云端暂无历史备份");
       }
       return;
     }
+    if (typeof _lastCloudPullAt !== "undefined") _lastCloudPullAt = Date.now();
+    const localProgBefore = typeof get === "function" ? (get("progress", {}) || {}) : {};
+    const remoteProg = (d.sync.data && d.sync.data.progress) || {};
     restore(d.sync.data);
+    // 若 App 端本地进度优先于服务端（如网页端旧进度或不一致），主动将 App 端进度同步回写服务端
+    if (typeof isAppClient === "function" && isAppClient() && typeof cloudSyncPush === "function") {
+      const mergedProg = get("progress", {}) || {};
+      const appOverridesRemote = Object.keys(localProgBefore).some((k) => {
+        const m = mergedProg[k], r = remoteProg[k];
+        return m && m.src === "app" && (!r || r.src !== "app" || Number(m.time) !== Number(r.time) || Number(m.idx) !== Number(r.idx));
+      });
+      if (appOverridesRemote) cloudSyncPush(true).catch(() => {});
+    }
 
-    channels = get("channels", DEFAULT_CHANNELS);
+    channels = typeof mergeLiveChannels === "function" ? mergeLiveChannels(get("channels", DEFAULT_CHANNELS)) : get("channels", DEFAULT_CHANNELS);
+    if (typeof set === "function") set("channels", channels);
     mBr = get("m_br", "192");
     if (!isProUser() && !["128", "192"].includes(mBr)) mBr = "192";
     if (!silent) {
@@ -3594,6 +4271,11 @@ async function cloudSyncPull(silent = false) {
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden" && _syncDirty && NH.user) cloudSyncPush(true, true);
+  if (document.visibilityState === "visible" && NH.user) {
+    sendPresenceHeartbeat();
+    refreshNotifications(true);
+    if (Date.now() - _lastCloudPullAt > 15000) cloudSyncPull(true);
+  }
 });
 window.addEventListener("pagehide", () => {
   if (_syncDirty && NH.user) cloudSyncPush(true, true);
@@ -3890,9 +4572,154 @@ async function dismissSplash(bootAt) {
   el.remove();
 }
 
+/* ============ 站内更新消息中心 & 单作品提醒开关 ============ */
+const _watchPrefs = new Map();
+let _notifData = { unread_count: 0, items: [] };
+function getWatchNotifyEnabled(itemType, itemKey) {
+  const k = `${itemType}:${itemKey}`;
+  return _watchPrefs.has(k) ? _watchPrefs.get(k) : true;
+}
+async function toggleWatchNotify(itemType, itemKey, nextEnabled, title = "", meta = null, btnEl = null) {
+  if (!NH.user) return toast("请先登录账号");
+  try {
+    const res = await nhApi("/api/notifications/prefs", "POST", {
+      item_type: itemType,
+      item_key: String(itemKey),
+      enabled: !!nextEnabled,
+      title,
+      meta,
+    });
+    const enabled = !!(res.pref ? res.pref.notify_enabled : nextEnabled);
+    _watchPrefs.set(`${itemType}:${itemKey}`, enabled);
+    if (btnEl) btnEl.innerHTML = `${ico("bell")} ${enabled ? "提醒开" : "提醒关"}`;
+    toast(enabled ? "已开启更新提醒" : "已关闭该作品更新提醒");
+  } catch (e) {
+    toast("设置失败：" + (e.message || "网络异常"));
+  }
+}
+function updateNotifBadge(unreadCount) {
+  const btn = $("#btnNotif"), badge = $("#notifBadge");
+  if (!btn) return;
+  btn.classList.toggle("hidden", !NH.user);
+  if (!badge) return;
+  const n = Math.max(0, Number(unreadCount) || 0);
+  badge.textContent = n > 99 ? "99+" : String(n);
+  badge.classList.toggle("hidden", !NH.user || n <= 0);
+}
+async function refreshNotifications(silent = true) {
+  updateNotifBadge(_notifData.unread_count);
+  if (!NH.user || !NH.token) {
+    _notifData = { unread_count: 0, items: [] };
+    updateNotifBadge(0);
+    return _notifData;
+  }
+  try {
+    const [notifRes, prefsRes] = await Promise.all([
+      nhApi("/api/notifications?limit=40"),
+      nhApi("/api/notifications/prefs").catch(() => null),
+    ]);
+    _notifData = {
+      unread_count: Number(notifRes?.unread_count) || 0,
+      items: Array.isArray(notifRes?.items) ? notifRes.items : [],
+    };
+    if (prefsRes && Array.isArray(prefsRes.items)) {
+      _watchPrefs.clear();
+      prefsRes.items.forEach((x) => _watchPrefs.set(`${x.item_type}:${x.item_key}`, !!x.notify_enabled));
+    }
+    updateNotifBadge(_notifData.unread_count);
+  } catch (e) {
+    if (!silent) toast("获取通知失败：" + (e.message || "网络异常"));
+  }
+  return _notifData;
+}
+async function openNotificationCenter() {
+  if (!NH.user) {
+    toast("请先登录账号查看更新提醒");
+    if (typeof openAuthModal === "function") openAuthModal("login");
+    return;
+  }
+  await refreshNotifications(true);
+  const renderModalHtml = () => {
+    const items = _notifData.items || [];
+    const listHtml = items.length
+      ? items.map((n, idx) => `
+          <button type="button" class="notif-item ${n.read ? "" : "unread"}" data-nidx="${idx}">
+            <div class="notif-item-head">
+              <span>${esc(n.title || "收藏作品")}</span>
+              <span class="badge ${n.item_type === "vod" ? "" : "gray"}">${n.item_type === "vod" ? "影视" : "小说"}</span>
+            </div>
+            <div class="notif-item-msg">${esc(n.message || "有新内容更新")}</div>
+            <div class="notif-item-sub">${n.created_at ? new Date(n.created_at * 1000).toLocaleString() : ""}${n.read ? " · 已读" : " · 未读"}</div>
+          </button>`).join("")
+      : `<div class="empty" style="padding:26px 10px">暂无更新提醒<br>收藏的剧集或书架小说有新更新时将在此显示</div>`;
+    return `
+      <div style="display:flex;gap:8px;justify-content:space-between;margin-bottom:6px">
+        <button id="notifCheckNowBtn" class="btn primary" type="button" style="flex:1;padding:7px 10px;font-size:12.5px">立即检查更新</button>
+        <button id="notifReadAllBtn" class="btn ghost" type="button" style="padding:7px 10px;font-size:12.5px">全部已读</button>
+      </div>
+      <div id="notifModalList" class="notif-list">${listHtml}</div>`;
+  };
+
+  const p = modal("更新提醒中心", renderModalHtml());
+  const bindEvents = () => {
+    $("#notifReadAllBtn")?.addEventListener("click", async () => {
+      try {
+        const res = await nhApi("/api/notifications/read", "POST", { id: 0 });
+        _notifData.unread_count = Number(res.unread_count) || 0;
+        _notifData.items = (_notifData.items || []).map((x) => ({ ...x, read: true }));
+        updateNotifBadge(_notifData.unread_count);
+        $("#modalBody").innerHTML = renderModalHtml();
+        bindEvents();
+        toast("已全部标记为已读");
+      } catch (e) { toast(e.message || "操作失败"); }
+    });
+    $("#notifCheckNowBtn")?.addEventListener("click", async () => {
+      const btn = $("#notifCheckNowBtn");
+      if (btn) { btn.disabled = true; btn.textContent = "检查中…"; }
+      try {
+        const res = await nhApi("/api/notifications/check", "POST", {});
+        _notifData = { unread_count: Number(res.unread_count) || 0, items: Array.isArray(res.items) ? res.items : [] };
+        updateNotifBadge(_notifData.unread_count);
+        $("#modalBody").innerHTML = renderModalHtml();
+        bindEvents();
+        toast(`已检查 ${res.checked || 0} 部作品，发现 ${res.updated || 0} 项更新`);
+      } catch (e) {
+        toast(e.message || "检查失败");
+        if (btn) { btn.disabled = false; btn.textContent = "立即检查更新"; }
+      }
+    });
+    $("#notifModalList")?.querySelectorAll("[data-nidx]").forEach((el) => {
+      el.onclick = () => {
+        const item = _notifData.items[+el.dataset.nidx];
+        if (!item) return;
+        if (!item.read) {
+          nhApi("/api/notifications/read", "POST", { id: item.id }).then((r) => {
+            item.read = true;
+            updateNotifBadge(r.unread_count);
+          }).catch(() => {});
+        }
+        $("#modalOk")?.click();
+        const meta = item.meta || {};
+        if (item.item_type === "vod" && meta.srcId && meta.id) {
+          if (appMode !== "vod") switchMode("vod", "home");
+          openDetail({ srcId: meta.srcId, id: meta.id, name: meta.name || item.title, pic: meta.pic || "" });
+        } else if (item.item_type === "novel" && (meta.book_id || item.item_key)) {
+          if (appMode !== "novel") switchMode("novel", "n_shelf");
+          openNovelDetail({ book_id: String(meta.book_id || item.item_key), title: meta.title || item.title, author: meta.author || "", cover: meta.cover || "" });
+        }
+      };
+    });
+  };
+  setTimeout(bindEvents, 0);
+  await p;
+}
+window.__nhOpenNotifications = openNotificationCenter;
+
 /* ============ 初始化固定控件矢量图标与启动 ============ */
 const _bootAt = performance.now();
 $("#topSearchIco").innerHTML = ico("search");
+if ($("#notifIco")) $("#notifIco").innerHTML = ico("bell");
+$("#btnNotif")?.addEventListener("click", openNotificationCenter);
 $("#playerBack").innerHTML = ico("back");
 $("#playerFav").innerHTML = `${ico("heart")} 记录`;
 $("#btnPlay").innerHTML = ico("play");

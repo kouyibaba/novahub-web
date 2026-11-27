@@ -2,7 +2,7 @@
 import time
 
 KEYS = frozenset(('like', 'history', 'channels', 'music_favs', 'music_fav_groups', 'music_hist', 'm_br',
-                  'progress', 'novel_shelf', 'novel_hist', 'novel_prog', 'novel_cfg',
+                  'progress', 'skip_cfg', 'novel_shelf', 'novel_hist', 'novel_prog', 'novel_cfg',
                   'nh_shist_vod', 'nh_shist_music', 'nh_shist_novel', 'history_deleted', 'history_cleared_at'))
 
 
@@ -23,6 +23,14 @@ def merge(old, new):
     if len(deleted) > 10000: raise ValueError('历史删除记录过多，请联系管理员归档')
     def allowed(key, value):
         return (not cleared or stamp(value.get('cleared_at')) >= cleared) and (not deleted.get(key) or stamp(value.get('deleted_at')) >= deleted[key])
+    def prefer_progress(prev, nxt):
+        if not prev:
+            return nxt
+        prev_app = prev.get('src') == 'app'
+        nxt_app = nxt.get('src') == 'app'
+        if prev_app != nxt_app:
+            return nxt if nxt_app else prev
+        return nxt if stamp(nxt.get('at')) >= stamp(prev.get('at')) else prev
     rows = {}; progress = {}
     for data in (old, new):
         history = data.get('history')
@@ -34,7 +42,8 @@ def merge(old, new):
         values = data.get('progress')
         if isinstance(values, dict):
             for key, value in list(values.items())[:2000]:
-                if isinstance(value, dict) and allowed(key, value) and stamp(value.get('at')) >= stamp(progress.get(key, {}).get('at')): progress[key] = value
+                if isinstance(value, dict) and allowed(key, value):
+                    progress[key] = prefer_progress(progress.get(key), value)
     out.update(history=sorted(rows.values(), key=lambda x: stamp(x.get('at')), reverse=True)[:100], progress=progress,
                history_deleted=deleted, history_cleared_at=cleared)
     return out

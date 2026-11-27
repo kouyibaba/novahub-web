@@ -350,7 +350,10 @@ class Catalog:
 
     def _eligible(self, owner):
         items = self.sources()
-        return sorted((s for s in items if s['enabled']), key=lambda s: (-(s['quality']*.8+min(s['completeness'],100)*.1+s['media_ok']*10), s['latency']))[:8]
+        active = [s for s in items if s['enabled']]
+        # 若所有非手动禁用源都被健康检查标成暂缓，则回退使用非禁用源兜底，避免首页/搜索完全空白
+        pool = active if active else [s for s in items if not s['disabled']]
+        return sorted(pool, key=lambda s: (-(s['quality']*.8+min(s['completeness'],100)*.1+s['media_ok']*10), s['latency']))[:8]
 
     def search(self, query, owner=0):
         query = str(query or '').strip()[:80]
@@ -403,9 +406,11 @@ class Catalog:
             items.sort(key=lambda x: rank.get(x['srcId'], 99))
             result = {'items': merge_items(items), 'partial': bool(inflight or errors), 'managed': True}
             encoded = json.dumps(result, ensure_ascii=False)
-            with self.lock:
-                if len(self.cache) >= 128: self.cache.pop(next(iter(self.cache)))
-                self.cache[key] = (time.monotonic()+120, encoded)
+            # 仅缓存非空结果，避免上游短暂抖动返回空数组后锁死 120 秒空首页
+            if result['items']:
+                with self.lock:
+                    if len(self.cache) >= 128: self.cache.pop(next(iter(self.cache)))
+                    self.cache[key] = (time.monotonic()+120, encoded)
             pending.set_result(encoded)
             return json.loads(encoded)
         except Exception as exc:

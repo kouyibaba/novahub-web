@@ -73,6 +73,42 @@ def init_db():
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS user_presence (
+                user_id INTEGER NOT NULL,
+                device_id TEXT NOT NULL,
+                client_type TEXT NOT NULL DEFAULT 'web',
+                device_info TEXT NOT NULL DEFAULT '',
+                ip TEXT NOT NULL DEFAULT '',
+                logged_in INTEGER NOT NULL DEFAULT 1,
+                last_seen_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, device_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_presence_seen ON user_presence(last_seen_at);
+            CREATE TABLE IF NOT EXISTS user_watch_items (
+                user_id INTEGER NOT NULL,
+                item_type TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                meta_json TEXT NOT NULL DEFAULT '{}',
+                last_count INTEGER NOT NULL DEFAULT 0,
+                last_marker TEXT NOT NULL DEFAULT '',
+                notify_enabled INTEGER NOT NULL DEFAULT 1,
+                last_checked_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, item_type, item_key)
+            );
+            CREATE TABLE IF NOT EXISTS user_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                item_type TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL DEFAULT '',
+                delta_count INTEGER NOT NULL DEFAULT 1,
+                read_at INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_notif_user ON user_notifications(user_id, read_at, created_at);
             """
         )
         # 初始化持久化签名密钥与默认管理员密码（NovaAdmin888，支持环境变量或后台随时修改）
@@ -313,7 +349,269 @@ def save_user_sync(user_id, payload_obj):
             "ON CONFLICT(user_id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
             (int(user_id), raw, now),
         )
+    sync_watch_items_from_payload(user_id, merged)
     return now
+
+
+def sync_watch_items_from_payload(user_id, payload):
+    """根据用户同步快照中的影视收藏与书架，增量维护更新提醒订阅表。"""
+    if not isinstance(payload, dict):
+        return
+    uid = int(user_id)
+    now = int(time.time())
+    buckets = []
+    if isinstance(payload.get("like"), list):
+        vod_items = {}
+        for x in payload["like"][:200]:
+            if not isinstance(x, dict):
+                continue
+            sid = str(x.get("srcId") or "").strip()
+            vid = str(x.get("id") or "").strip()
+            if not sid or not vid:
+                continue
+            key = f"{sid}:{vid}"[:220]
+            vod_items[key] = (
+                str(x.get("name") or "收藏影片")[:120],
+                json.dumps({"srcId": sid, "id": vid, "name": x.get("name") or "", "pic": x.get("pic") or "", "remark": x.get("remark") or ""}, ensure_ascii=False)[:2048],
+            )
+        buckets.append(("vod", vod_items))
+    if isinstance(payload.get("novel_shelf"), list):
+        novel_items = {}
+        for b in payload["novel_shelf"][:200]:
+            if not isinstance(b, dict):
+                continue
+            bid = str(b.get("book_id") or "").strip()
+            if not bid:
+                continue
+            novel_items[bid[:80]] = (
+                str(b.get("title") or "书架小说")[:120],
+                json.dumps({"book_id": bid, "title": b.get("title") or "", "author": b.get("author") or "", "cover": b.get("cover") or ""}, ensure_ascii=False)[:2048],
+            )
+        buckets.append(("novel", novel_items))
+    if not buckets:
+        return
+    with _DB_LOCK, _conn() as c:
+        for item_type, item_map in buckets:
+            for item_key, (title, meta_json) in item_map.items():
+                c.execute(
+                    """
+                    INSERT INTO user_watch_items(user_id, item_type, item_key, title, meta_json, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, item_type, item_key) DO UPDATE SET
+                        title=excluded.title,
+                        meta_json=excluded.meta_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (uid, item_type, item_key, title, meta_json, now),
+                )
+            existing = [
+                r["item_key"]
+                for r in c.execute("SELECT item_key FROM user_watch_items WHERE user_id=? AND item_type=?", (uid, item_type)).fetchall()
+            ]
+            for old_key in existing:
+                if old_key not in item_map:
+                    c.execute("DELETE FROM user_watch_items WHERE user_id=? AND item_type=? AND item_key=?", (uid, item_type, old_key))
+
+
+def set_watch_notify(user_id, item_type, item_key, enabled, title="", meta=None):
+    """设置单部影视剧或单本小说的更新提醒开关。"""
+    if item_type not in ("vod", "novel"):
+        raise ValueError("不支持的关注类型")
+    key = str(item_key or "").strip()[:220]
+    if not key:
+        raise ValueError("缺少作品标识")
+    uid = int(user_id)
+    now = int(time.time())
+    meta_json = json.dumps(meta, ensure_ascii=False)[:2048] if isinstance(meta, dict) else "{}"
+    safe_title = str(title or "")[:120]
+    with _DB_LOCK, _conn() as c:
+        c.execute(
+            """
+            INSERT INTO user_watch_items(user_id, item_type, item_key, title, meta_json, notify_enabled, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, item_type, item_key) DO UPDATE SET
+                notify_enabled=excluded.notify_enabled,
+                title=CASE WHEN excluded.title != '' THEN excluded.title ELSE user_watch_items.title END,
+                updated_at=excluded.updated_at
+            """,
+            (uid, item_type, key, safe_title, meta_json, 1 if enabled else 0, now),
+        )
+    return {"item_type": item_type, "item_key": key, "notify_enabled": bool(enabled)}
+
+
+def list_watch_items(user_id):
+    """获取用户收藏/书架更新提醒偏好与检查水位线。"""
+    with _DB_LOCK, _conn() as c:
+        rows = c.execute(
+            "SELECT item_type, item_key, title, meta_json, last_count, last_marker, notify_enabled, last_checked_at "
+            "FROM user_watch_items WHERE user_id=? ORDER BY updated_at DESC",
+            (int(user_id),),
+        ).fetchall()
+    out = []
+    for r in rows:
+        try:
+            meta = json.loads(r["meta_json"] or "{}")
+        except Exception:
+            meta = {}
+        out.append({
+            "item_type": r["item_type"],
+            "item_key": r["item_key"],
+            "title": r["title"],
+            "meta": meta,
+            "last_count": r["last_count"],
+            "last_marker": r["last_marker"],
+            "notify_enabled": bool(r["notify_enabled"]),
+            "last_checked_at": r["last_checked_at"],
+        })
+    return out
+
+
+def list_due_watch_targets(limit=8, min_interval=7200, user_id=None):
+    """按作品去重返回到期需要检测更新的订阅目标。"""
+    now = int(time.time())
+    cutoff = now - max(0, int(min_interval))
+    lim = max(1, min(30, int(limit or 8)))
+    with _DB_LOCK, _conn() as c:
+        if user_id is not None:
+            rows = c.execute(
+                """
+                SELECT item_type, item_key, MAX(title) AS title, MIN(last_checked_at) AS oldest_check
+                FROM user_watch_items
+                WHERE user_id=? AND notify_enabled=1 AND last_checked_at <= ?
+                GROUP BY item_type, item_key
+                ORDER BY oldest_check ASC
+                LIMIT ?
+                """,
+                (int(user_id), cutoff, lim),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                """
+                SELECT item_type, item_key, MAX(title) AS title, MIN(last_checked_at) AS oldest_check
+                FROM user_watch_items
+                WHERE notify_enabled=1 AND last_checked_at <= ?
+                GROUP BY item_type, item_key
+                ORDER BY oldest_check ASC
+                LIMIT ?
+                """,
+                (cutoff, lim),
+            ).fetchall()
+    return [{"item_type": r["item_type"], "item_key": r["item_key"], "title": r["title"]} for r in rows]
+
+
+def record_watch_check(item_type, item_key, new_count, new_marker=""):
+    """记录作品最新集数/章数；若较基线有新增则合并生成站内更新通知。"""
+    cnt = max(0, int(new_count or 0))
+    marker = str(new_marker or "")[:120].strip()
+    now = int(time.time())
+    created = 0
+    unit = "集" if item_type == "vod" else "章"
+    with _DB_LOCK, _conn() as c:
+        rows = c.execute(
+            "SELECT user_id, title, last_count, notify_enabled FROM user_watch_items WHERE item_type=? AND item_key=?",
+            (item_type, item_key),
+        ).fetchall()
+        for r in rows:
+            uid = int(r["user_id"])
+            old_cnt = int(r["last_count"] or 0)
+            c.execute(
+                "UPDATE user_watch_items SET last_checked_at=? WHERE user_id=? AND item_type=? AND item_key=?",
+                (now, uid, item_type, item_key),
+            )
+            if cnt <= 0:
+                continue
+            if old_cnt == 0:
+                # 首次巡检仅记录基线水位，不触发误报
+                c.execute(
+                    "UPDATE user_watch_items SET last_count=?, last_marker=? WHERE user_id=? AND item_type=? AND item_key=?",
+                    (cnt, marker, uid, item_type, item_key),
+                )
+                continue
+            if cnt > old_cnt:
+                delta = cnt - old_cnt
+                c.execute(
+                    "UPDATE user_watch_items SET last_count=?, last_marker=? WHERE user_id=? AND item_type=? AND item_key=?",
+                    (cnt, marker, uid, item_type, item_key),
+                )
+                if not r["notify_enabled"]:
+                    continue
+                unread_row = c.execute(
+                    "SELECT id, delta_count FROM user_notifications WHERE user_id=? AND item_type=? AND item_key=? AND read_at=0 ORDER BY id DESC LIMIT 1",
+                    (uid, item_type, item_key),
+                ).fetchone()
+                total_delta = delta + (int(unread_row["delta_count"] or 0) if unread_row else 0)
+                tail = f" · 最新：{marker}" if marker else ""
+                msg = f"更新了 {total_delta} {unit}{tail}"
+                if unread_row:
+                    c.execute(
+                        "UPDATE user_notifications SET delta_count=?, message=?, title=?, created_at=? WHERE id=?",
+                        (total_delta, msg, r["title"], now, unread_row["id"]),
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO user_notifications(user_id, item_type, item_key, title, message, delta_count, read_at, created_at) "
+                        "VALUES(?, ?, ?, ?, ?, ?, 0, ?)",
+                        (uid, item_type, item_key, r["title"], msg, total_delta, now),
+                    )
+                created += 1
+    return created
+
+
+def list_notifications(user_id, unread_only=False, limit=50):
+    """查询用户站内更新通知列表与未读数量。"""
+    uid = int(user_id)
+    lim = max(1, min(100, int(limit or 50)))
+    with _DB_LOCK, _conn() as c:
+        unread_count = c.execute(
+            "SELECT COUNT(*) FROM user_notifications WHERE user_id=? AND read_at=0",
+            (uid,),
+        ).fetchone()[0]
+        where = "user_id=? AND read_at=0" if unread_only else "user_id=?"
+        rows = c.execute(
+            f"""
+            SELECT n.id, n.item_type, n.item_key, n.title, n.message, n.delta_count, n.read_at, n.created_at,
+                   w.meta_json
+            FROM user_notifications n
+            LEFT JOIN user_watch_items w ON w.user_id=n.user_id AND w.item_type=n.item_type AND w.item_key=n.item_key
+            WHERE n.{where}
+            ORDER BY n.read_at ASC, n.created_at DESC, n.id DESC
+            LIMIT ?
+            """,
+            (uid, lim),
+        ).fetchall()
+    items = []
+    for r in rows:
+        try:
+            meta = json.loads(r["meta_json"] or "{}")
+        except Exception:
+            meta = {}
+        items.append({
+            "id": r["id"],
+            "item_type": r["item_type"],
+            "item_key": r["item_key"],
+            "title": r["title"],
+            "message": r["message"],
+            "delta_count": r["delta_count"],
+            "read": bool(r["read_at"]),
+            "read_at": r["read_at"],
+            "created_at": r["created_at"],
+            "meta": meta,
+        })
+    return {"unread_count": unread_count, "items": items}
+
+
+def mark_notifications_read(user_id, notif_id=0):
+    """将单条或全部未读通知标记为已读。"""
+    uid = int(user_id)
+    nid = int(notif_id or 0)
+    now = int(time.time())
+    with _DB_LOCK, _conn() as c:
+        if nid > 0:
+            c.execute("UPDATE user_notifications SET read_at=? WHERE id=? AND user_id=? AND read_at=0", (now, nid, uid))
+        else:
+            c.execute("UPDATE user_notifications SET read_at=? WHERE user_id=? AND read_at=0", (now, uid))
+        unread_count = c.execute("SELECT COUNT(*) FROM user_notifications WHERE user_id=? AND read_at=0", (uid,)).fetchone()[0]
+    return unread_count
 
 
 def get_user_sync(user_id):
@@ -464,9 +762,99 @@ def verify_admin_token(token):
         return False
 
 
-def get_admin_dashboard(limit=200):
-    """汇总站长后台统计指标、卡密台账、近期注册用户与站点配置。"""
+def touch_user_presence(user_id, device_id="", client_type="web", device_info="", ip="", logged_in=True):
+    """记录或刷新用户设备在线心跳与最后活跃信息。"""
+    uid = int(user_id)
+    did = str(device_id or "default")[:64].strip() or "default"
+    ctype = str(client_type or "web")[:24].strip() or "web"
+    dinfo = str(device_info or "")[:120].strip()
+    cip = str(ip or "")[:64].strip()
     now = int(time.time())
+    with _DB_LOCK, _conn() as c:
+        c.execute(
+            """
+            INSERT INTO user_presence(user_id, device_id, client_type, device_info, ip, logged_in, last_seen_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, device_id) DO UPDATE SET
+                client_type=excluded.client_type,
+                device_info=CASE WHEN excluded.device_info != '' THEN excluded.device_info ELSE user_presence.device_info END,
+                ip=CASE WHEN excluded.ip != '' THEN excluded.ip ELSE user_presence.ip END,
+                logged_in=excluded.logged_in,
+                last_seen_at=excluded.last_seen_at
+            """,
+            (uid, did, ctype, dinfo, cip, 1 if logged_in else 0, now),
+        )
+    return now
+
+
+def mark_user_offline(user_id, device_id=""):
+    """标记用户指定设备（或全部设备）下线。"""
+    uid = int(user_id)
+    did = str(device_id or "")[:64].strip()
+    now = int(time.time())
+    with _DB_LOCK, _conn() as c:
+        if did:
+            c.execute(
+                "UPDATE user_presence SET logged_in=0, last_seen_at=? WHERE user_id=? AND device_id=?",
+                (now, uid, did),
+            )
+        else:
+            c.execute(
+                "UPDATE user_presence SET logged_in=0, last_seen_at=? WHERE user_id=?",
+                (now, uid),
+            )
+
+
+def list_online_presence(window_sec=180, limit=200):
+    """查询指定活跃窗口内在线的用户会话与去重在线人数。"""
+    win = max(30, min(3600, int(window_sec or 180)))
+    lim = max(1, min(500, int(limit or 200)))
+    now = int(time.time())
+    cutoff = now - win
+    with _DB_LOCK, _conn() as c:
+        online_users_cnt = c.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM user_presence WHERE logged_in=1 AND last_seen_at>=?",
+            (cutoff,),
+        ).fetchone()[0]
+        rows = c.execute(
+            """
+            SELECT p.user_id, u.username, u.vip_expire_at, p.device_id, p.client_type,
+                   p.device_info, p.ip, p.logged_in, p.last_seen_at
+            FROM user_presence p
+            JOIN users u ON u.id = p.user_id
+            WHERE p.logged_in = 1 AND p.last_seen_at >= ?
+            ORDER BY p.last_seen_at DESC
+            LIMIT ?
+            """,
+            (cutoff, lim),
+        ).fetchall()
+    items = []
+    for r in rows:
+        exp = int(r["vip_expire_at"] or 0)
+        items.append({
+            "user_id": r["user_id"],
+            "username": r["username"],
+            "is_pro": exp > now,
+            "device_id": r["device_id"],
+            "client_type": r["client_type"],
+            "device_info": r["device_info"] or r["client_type"],
+            "ip": r["ip"] or "-",
+            "logged_in": bool(r["logged_in"]),
+            "online": True,
+            "last_seen_at": r["last_seen_at"],
+        })
+    return {
+        "window_sec": win,
+        "online_users": online_users_cnt,
+        "online_sessions": len(items),
+        "items": items,
+    }
+
+
+def get_admin_dashboard(limit=200):
+    """汇总站长后台统计指标、卡密台账、近期注册用户、在线用户与站点配置。"""
+    now = int(time.time())
+    presence = list_online_presence(window_sec=180, limit=50)
     with _DB_LOCK, _conn() as c:
         total_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         pro_users = c.execute("SELECT COUNT(*) FROM users WHERE vip_expire_at > ?", (now,)).fetchone()[0]
@@ -519,16 +907,21 @@ def get_admin_dashboard(limit=200):
             "used_codes": used_codes,
             "synced_users": synced_users,
             "db_size_bytes": db_size_bytes,
+            "online_users": presence["online_users"],
+            "online_sessions": presence["online_sessions"],
         },
+        "online": presence,
         "recent_users": recent_users,
         "codes": codes,
         "config": get_public_config(),
     }
 
 
-def list_admin_users(query="", status="all", limit=200):
-    """分页检索平台注册用户列表及其 Pro 状态与云端同步时间。"""
+def list_admin_users(query="", status="all", limit=200, window_sec=180):
+    """分页检索平台注册用户列表及其 Pro 状态、云端同步与最近在线状态。"""
     now = int(time.time())
+    win = max(30, min(3600, int(window_sec or 180)))
+    cutoff = now - win
     q = (query or "").strip()
     where = []
     params = []
@@ -541,12 +934,23 @@ def list_admin_users(query="", status="all", limit=200):
     elif status == "free":
         where.append("u.vip_expire_at <= ?")
         params.append(now)
+    elif status == "online":
+        where.append("EXISTS (SELECT 1 FROM user_presence op WHERE op.user_id=u.id AND op.logged_in=1 AND op.last_seen_at>=?)")
+        params.append(cutoff)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     params.append(max(1, min(500, int(limit))))
     sql = f"""
-        SELECT u.id, u.username, u.vip_expire_at, u.created_at, us.updated_at AS last_sync_at
+        SELECT u.id, u.username, u.vip_expire_at, u.created_at, us.updated_at AS last_sync_at,
+               lp.last_seen_at, lp.ip AS last_ip, lp.device_info AS last_device,
+               lp.client_type, lp.logged_in
         FROM users u
         LEFT JOIN user_sync us ON u.id = us.user_id
+        LEFT JOIN user_presence lp ON lp.user_id = u.id AND lp.rowid = (
+            SELECT p2.rowid FROM user_presence p2
+            WHERE p2.user_id = u.id
+            ORDER BY p2.logged_in DESC, p2.last_seen_at DESC
+            LIMIT 1
+        )
         {where_sql}
         ORDER BY u.created_at DESC
         LIMIT ?
@@ -556,8 +960,16 @@ def list_admin_users(query="", status="all", limit=200):
     result = []
     for r in rows:
         item = _format_user(r)
+        last_seen = int(r["last_seen_at"] or 0)
+        logged_in = bool(r["logged_in"]) if r["logged_in"] is not None else False
         item["created_at"] = r["created_at"]
         item["last_sync_at"] = r["last_sync_at"] or 0
+        item["last_seen_at"] = last_seen
+        item["last_ip"] = r["last_ip"] or ""
+        item["last_device"] = r["last_device"] or r["client_type"] or ""
+        item["client_type"] = r["client_type"] or ""
+        item["logged_in"] = logged_in
+        item["is_online"] = logged_in and last_seen >= cutoff
         result.append(item)
     return result
 

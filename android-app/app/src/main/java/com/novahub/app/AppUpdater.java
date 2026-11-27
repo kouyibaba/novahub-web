@@ -44,6 +44,7 @@ import org.json.JSONObject;
  */
 public class AppUpdater {
     private static final String VERSION_URL = "https://kouyibaba.github.io/novahub-web/apk-version.json";
+    private static final String ADB_VERSION_URL = "http://127.0.0.1:18766/apk-version.json";
     private static final String PREF_NAME = "novahub_updater";
     private static volatile boolean checking = false;
 
@@ -89,17 +90,24 @@ public class AppUpdater {
         Handler ui = new Handler(Looper.getMainLooper());
         new Thread(() -> {
             try {
-                HttpURLConnection conn = openWithRedirects(VERSION_URL + "?t=" + System.currentTimeMillis(), 8000);
-                if (conn.getResponseCode() != 200) {
-                    if (manual) ui.post(() -> toast(act, "版本信息检查失败，请稍后重试"));
-                    return;
+                boolean viaAdb = false;
+                String jsonBody = fetchAdbManifest();
+                if (jsonBody != null) {
+                    viaAdb = true;
+                } else {
+                    HttpURLConnection conn = openWithRedirects(VERSION_URL + "?t=" + System.currentTimeMillis(), 8000);
+                    if (conn.getResponseCode() != 200) {
+                        if (manual) ui.post(() -> toast(act, "版本信息检查失败，请稍后重试"));
+                        return;
+                    }
+                    StringBuilder sb = new StringBuilder();
+                    try (BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
+                        String line;
+                        while ((line = br.readLine()) != null) sb.append(line);
+                    }
+                    jsonBody = sb.toString();
                 }
-                StringBuilder sb = new StringBuilder();
-                try (BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = br.readLine()) != null) sb.append(line);
-                }
-                JSONObject obj = new JSONObject(sb.toString());
+                JSONObject obj = new JSONObject(jsonBody);
                 int remoteCode = obj.optInt("versionCode", 0);
                 String remoteName = obj.optString("versionName", "");
                 String notes = obj.optString("notes", "性能优化与体验升级");
@@ -107,6 +115,12 @@ public class AppUpdater {
                 String sha256 = obj.optString("sha256", "");
                 String url = obj.optString("url", "");
                 String fallbackUrl = obj.optString("fallback_url", "");
+                if (viaAdb) {
+                    String netUrl = url;
+                    url = obj.optString("adb_url", "http://127.0.0.1:18766/novahub-latest.apk");
+                    if (fallbackUrl.isEmpty() && !netUrl.isEmpty()) fallbackUrl = netUrl;
+                    notes = "[ADB 本地高速通道] " + notes;
+                }
 
                 int localCode = getCurrentVersionCode(act);
                 if (remoteCode <= localCode || url.isEmpty()) {
@@ -121,13 +135,33 @@ public class AppUpdater {
                         return;
                     }
                 }
-                ui.post(() -> showUpdateDialog(act, remoteCode, remoteName, notes, force, sha256, url, fallbackUrl));
+                final String finalNotes = notes;
+                final String finalUrl = url;
+                final String finalFallback = fallbackUrl;
+                ui.post(() -> showUpdateDialog(act, remoteCode, remoteName, finalNotes, force, sha256, finalUrl, finalFallback));
             } catch (Exception e) {
                 if (manual) ui.post(() -> toast(act, "检查更新超时，请检查网络"));
             } finally {
                 checking = false;
             }
         }).start();
+    }
+
+    /** 优先探测 ADB reverse 通道（127.0.0.1:18766），不可达时快速返回 null 回退网络 */
+    private static String fetchAdbManifest() {
+        try {
+            HttpURLConnection conn = openWithRedirects(ADB_VERSION_URL + "?t=" + System.currentTimeMillis(), 1200);
+            if (conn.getResponseCode() != 200) return null;
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = br.readLine()) != null) sb.append(line);
+            }
+            String raw = sb.toString().trim();
+            return raw.startsWith("{") ? raw : null;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private static void showUpdateDialog(Activity act, int remoteCode, String remoteName, String notes,

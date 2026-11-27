@@ -439,6 +439,10 @@
 
       <div class="grid-4">
         <div class="stat-card">
+          <div class="stat-val" id="sOnline">0</div>
+          <div class="stat-lbl"><span>当前在线用户</span><span id="sOnlineSess" class="num">0 活跃会话</span></div>
+        </div>
+        <div class="stat-card">
           <div class="stat-val" id="sUsers">0</div>
           <div class="stat-lbl"><span>总注册用户</span><span id="sSynced" class="num">云同步 0</span></div>
         </div>
@@ -448,11 +452,32 @@
         </div>
         <div class="stat-card">
           <div class="stat-val" id="sUnused">0</div>
-          <div class="stat-lbl"><span>待核销卡密</span><span>库存可用</span></div>
+          <div class="stat-lbl"><span>待核销 / 已用</span><span id="sUsedPair" class="num">0 已核销</span></div>
         </div>
-        <div class="stat-card">
-          <div class="stat-val" id="sUsed">0</div>
-          <div class="stat-lbl"><span>已核销卡密</span><span>累计兑换</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-hd">
+          <h2>实时在线用户</h2>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="onlineRuleHint" style="font-size:12px;color:var(--muted)">判定标准：3 分钟内活跃</span>
+            <button type="button" id="btnRefreshOnline" class="btn ghost sm">刷新在线</button>
+          </div>
+        </div>
+        <div tabindex="0" role="region" aria-labelledby="onlineTblCap" class="table-wrap" style="max-block-size:280px">
+          <table class="data-tbl">
+            <caption id="onlineTblCap" style="display:none">实时在线用户</caption>
+            <thead>
+              <tr>
+                <th>账号</th>
+                <th>状态 / 身份</th>
+                <th>当前设备</th>
+                <th>IP 地址</th>
+                <th>最后活跃</th>
+              </tr>
+            </thead>
+            <tbody id="onlineTbody"></tbody>
+          </table>
         </div>
       </div>
 
@@ -503,6 +528,7 @@
           </div>
           <div class="chips" id="userStatusChips">
             <button type="button" class="chip active" data-ustatus="all">全部</button>
+            <button type="button" class="chip" data-ustatus="online">当前在线</button>
             <button type="button" class="chip" data-ustatus="pro">Pro 会员</button>
             <button type="button" class="chip" data-ustatus="free">普通用户</button>
           </div>
@@ -513,9 +539,9 @@
             <thead>
               <tr>
                 <th>账号</th>
+                <th>在线与设备</th>
                 <th>会员状态</th>
-                <th>注册时间</th>
-                <th>最近云同步</th>
+                <th>最后活跃 / 同步</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -835,6 +861,28 @@ $$("[data-jump]").forEach((btn) => {
   btn.addEventListener("click", () => switchPanel(btn.dataset.jump));
 });
 
+function renderOnlineList(online) {
+  const box = $("#onlineTbody");
+  if (!box) return;
+  const items = (online && online.items) || [];
+  if ($("#sOnline")) $("#sOnline").textContent = Number(online?.online_users || 0);
+  if ($("#sOnlineSess")) $("#sOnlineSess").textContent = `${Number(online?.online_sessions || items.length)} 活跃会话`;
+  if (!items.length) {
+    box.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:18px">当前暂无在线用户</td></tr>`;
+    return;
+  }
+  box.innerHTML = items.map((o) => `<tr>
+    <th>${esc(o.username)} <span style="font-weight:400;color:var(--muted);font-size:11.5px">#${o.user_id}</span></th>
+    <td data-label="状态">
+      <span class="tag ok">在线</span>
+      <span class="tag ${o.is_pro ? "gold" : "muted"}">${o.is_pro ? "Pro" : "标准"}</span>
+    </td>
+    <td data-label="当前设备">${esc(o.device_info || o.client_type || "-")} <span class="mini-sub">(${esc(o.client_type || "web")})</span></td>
+    <td data-label="IP 地址" class="mono">${esc(o.ip || "-")}</td>
+    <td data-label="最后活跃" class="num">${fmtTime(o.last_seen_at)}</td>
+  </tr>`).join("");
+}
+
 /* ============ 总览与健康检查 ============ */
 function renderOverview(d) {
   const st = d.stats || {};
@@ -847,7 +895,8 @@ function renderOverview(d) {
   $("#sProRate").textContent = `${rate}% 转化`;
   $("#sSynced").textContent = `云同步 ${st.synced_users || 0}`;
   $("#sUnused").textContent = st.unused_codes || 0;
-  $("#sUsed").textContent = st.used_codes || 0;
+  if ($("#sUsedPair")) $("#sUsedPair").textContent = `${st.used_codes || 0} 已核销`;
+  renderOnlineList(d.online || { online_users: st.online_users || 0, online_sessions: st.online_sessions || 0, items: [] });
 
   $("#hTunnel").textContent = d.tunnel_url || window.__NH_API_BASE__ || location.origin;
   $("#hDbSize").textContent = fmtBytes(st.db_size_bytes);
@@ -903,20 +952,32 @@ function renderUsers() {
     tb.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px">暂无匹配用户</td></tr>`;
     return;
   }
-  tb.innerHTML = allUsers.map((u) => `<tr>
+  tb.innerHTML = allUsers.map((u) => {
+    const onlineBadge = u.is_online
+      ? `<span class="tag ok">在线</span>`
+      : (u.logged_in ? `<span class="tag muted">离线</span>` : `<span class="tag muted">未登录</span>`);
+    const devLine = [u.last_device, u.last_ip].filter(Boolean).join(" · ");
+    return `<tr>
     <th>${esc(u.username)} <span style="font-weight:400;color:var(--muted);font-size:11.5px">#${u.id}</span></th>
+    <td data-label="在线与设备">
+      ${onlineBadge}
+      <div class="mini-sub">${esc(devLine || "暂无设备记录")}</div>
+    </td>
     <td data-label="会员状态">
       <span class="tag ${u.is_pro ? "gold" : "muted"}">${u.is_pro ? `Pro 剩 ${u.remain_days} 天` : "普通用户"}</span>
     </td>
-    <td data-label="注册时间" class="num">${fmtTime(u.created_at)}</td>
-    <td data-label="最近云同步" class="num">${u.last_sync_at ? fmtTime(u.last_sync_at) : "未同步"}</td>
+    <td data-label="最后活跃 / 同步" class="num">
+      <div>活跃：${u.last_seen_at ? fmtTime(u.last_seen_at) : "-"}</div>
+      <div class="mini-sub">同步：${u.last_sync_at ? fmtTime(u.last_sync_at) : "未同步"}</div>
+    </td>
     <td data-label="操作">
       <div class="tbl-actions">
         <button type="button" class="btn ghost sm" data-vip-uid="${u.id}">管理 Pro</button>
         <button type="button" class="btn ghost sm" data-pwd-uid="${u.id}">重置密码</button>
       </div>
     </td>
-  </tr>`).join("");
+  </tr>`;
+  }).join("");
 
   tb.querySelectorAll("[data-vip-uid]").forEach((btn) => {
     btn.onclick = () => openVipDialog(Number(btn.dataset.vipUid));
@@ -1135,6 +1196,17 @@ $("#admPwd").onkeydown = (e) => { if (e.key === "Enter") $("#btnLogin").click();
 $("#btnLogoutSide").onclick = logout;
 $("#btnLogoutMob").onclick = logout;
 $("#btnRefreshAll").onclick = () => loadDash(true);
+$("#btnRefreshOnline")?.addEventListener("click", async () => {
+  try {
+    renderOnlineList(await api("/api/admin/online?window=180"));
+    toast("在线列表已刷新");
+  } catch (e) { toast(e.message, true); }
+});
+setInterval(() => {
+  if (token && !$("#dashView").classList.contains("hidden") && !$("#panel-overview").hidden) {
+    api("/api/admin/online?window=180").then(renderOnlineList).catch(() => {});
+  }
+}, 30000);
 $("#btnCheckHealth").onclick = async () => {
   if (window.__NH_REFRESH_ENDPOINT__) await window.__NH_REFRESH_ENDPOINT__();
   await loadDash(false);

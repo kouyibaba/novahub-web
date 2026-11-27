@@ -67,9 +67,9 @@
 })();
 </script>
 <link rel="manifest" href="manifest.json">
-<link rel="stylesheet" href="style.css?v=20261126-v245-nav">
-<script async src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
-<script async src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+<link rel="stylesheet" href="style.css?v=20261127-v247">
+<script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
 <style>
 #nhSplash {
   position: fixed; inset: 0; z-index: 99999; background: #090a0e;
@@ -111,6 +111,10 @@
     <button id="searchClear" class="search-clear hidden" type="button" aria-label="清空搜索">×</button>
     <button id="searchBtn" class="search-submit" aria-label="搜索">搜索</button>
   </div>
+  <button id="btnNotif" class="notif-btn hidden" type="button" aria-label="更新提醒">
+    <span id="notifIco"></span>
+    <span id="notifBadge" class="notif-badge hidden">0</span>
+  </button>
 </header>
 <div id="topProgress" class="top-progress hidden" aria-hidden="true"></div>
 <div id="searchHistPop" class="search-hist-pop hidden"></div>
@@ -145,7 +149,15 @@
     <video id="video" playsinline webkit-playsinline x5-video-player-type="h5"></video>
     <div id="playerDimmer" class="player-dimmer" aria-hidden="true"></div>
     <div id="playerTip" class="player-tip"></div>
+    <div id="playerGestureToast" class="player-gesture-toast hidden" aria-hidden="true"></div>
     <div id="playerHud" class="player-hud hidden" aria-hidden="true"></div>
+    <div id="fsEpDrawer" class="fs-ep-drawer hidden" aria-hidden="true">
+      <div class="fs-ep-head">
+        <span>选集</span>
+        <button id="fsEpClose" type="button" aria-label="关闭选集">×</button>
+      </div>
+      <div id="fsEpBody" class="fs-ep-body"></div>
+    </div>
     <button id="btnBoxFs" class="player-box-fs" type="button" aria-label="全屏播放"></button>
   </div>
   <div class="player-ctrl">
@@ -165,6 +177,12 @@
           <option value="2">2.0x</option>
         </select>
         <select id="qualitySel"><option>自动</option></select>
+        <button id="btnFwd30" class="player-tool-btn" type="button" aria-label="快进30秒">+30s</button>
+        <button id="btnFwd60" class="player-tool-btn" type="button" aria-label="快进1分钟">+1m</button>
+        <button id="btnNextEp" class="player-tool-btn hidden" type="button" aria-label="下一集">下一集</button>
+        <button id="btnFsEp" class="player-tool-btn fs-ep-btn hidden" type="button" aria-label="全屏选集">选集</button>
+        <button id="btnSkipCfg" class="player-tool-btn" type="button" aria-label="片头片尾设置">片头尾</button>
+        <button id="btnVodDownload" class="player-tool-btn" type="button" aria-label="下载本集">下载</button>
         <button id="btnFit" class="player-fit-btn" type="button" aria-label="切换画面铺满">铺满</button>
       </div>
       <button id="btnFs" class="player-fs-btn" type="button" aria-label="全屏"></button>
@@ -247,9 +265,9 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<script src="history_state.js?v=20261126-v245"></script>
-<script src="vod_client.js?v=20261126-v245"></script>
-<script src="auth_session.js?v=20261126-v245"></script>
-<script src="app.js?v=20261126-v245"></script>
+<script src="history_state.js?v=20261127-v247"></script>
+<script src="vod_client.js?v=20261127-v247"></script>
+<script src="auth_session.js?v=20261127-v247"></script>
+<script src="app.js?v=20261127-v247"></script>
 </body>
 </html>

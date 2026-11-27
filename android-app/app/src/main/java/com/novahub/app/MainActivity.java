@@ -1,6 +1,7 @@
 package com.novahub.app;
 
 import android.app.Activity;
+import android.app.DownloadManager;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
@@ -9,6 +10,7 @@ import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
@@ -53,6 +55,7 @@ public class MainActivity extends Activity {
     private String sessionNonce = "";
     private int sessionSequence = -1;
     private boolean sessionInjected;
+    private boolean pendingOpenNotifications = false;
 
     /** 供 MediaNotifyService 回调网页端控制播放状态 */
     public static void dispatchMediaAction(final String act) {
@@ -116,6 +119,11 @@ public class MainActivity extends Activity {
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
 
         webView.addJavascriptInterface(new NovaBridge(), "NovaNative");
+        webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
+            if (isTrustedNovelPage() && enqueueSystemDownload(url, android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType))) {
+                Toast.makeText(MainActivity.this, "已加入系统下载队列", Toast.LENGTH_SHORT).show();
+            }
+        });
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
@@ -145,7 +153,10 @@ public class MainActivity extends Activity {
                 view.evaluateJavascript("(function(){var sequence=0;var nonce=" + JSONObject.quote(nonce)
                         + ";var saved=JSON.parse(" + JSONObject.quote(saved) + ");"
                         + "if(typeof window.__nhNativeSessionReady==='function')window.__nhNativeSessionReady(saved,"
-                        + "function(value){NovaNative.saveSession(nonce,++sequence,JSON.stringify(value));});})()", null);
+                        + "function(value){NovaNative.saveSession(nonce,++sequence,JSON.stringify(value));});"
+                        + (pendingOpenNotifications ? "setTimeout(function(){window.__nhOpenNotifications&&window.__nhOpenNotifications();},450);" : "")
+                        + "})()", null);
+                pendingOpenNotifications = false;
             }
 
             @Override
@@ -219,7 +230,9 @@ public class MainActivity extends Activity {
 
         loadEntryUrl();
 
+        pendingOpenNotifications = getIntent() != null && getIntent().getBooleanExtra("open_notifications", false);
         requestNotifyPermissionOnce();
+        UpdatePollService.schedule(this);
         AppUpdater.cleanupOldApks(this);
         mainHandler.postDelayed(() -> {
             if (!isFinishing()) AppUpdater.check(MainActivity.this, false);
@@ -410,6 +423,54 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void checkUpdate() {
             runOnUiThread(() -> AppUpdater.check(MainActivity.this, true));
+        }
+
+        @JavascriptInterface
+        public boolean downloadMedia(final String url, final String filename) {
+            if (!isTrustedNovelPage()) return false;
+            return enqueueSystemDownload(url, filename);
+        }
+    }
+
+    private boolean enqueueSystemDownload(String url, String rawFilename) {
+        if (url == null || (!url.startsWith("https://") && !url.startsWith("http://"))) {
+            return false;
+        }
+        try {
+            DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+            if (dm == null) return false;
+            String safeName = (rawFilename == null ? "novahub-media" : rawFilename)
+                    .replaceAll("[\\\\/:*?\"<>|\\r\\n]+", "_").trim();
+            if (safeName.isEmpty()) safeName = "novahub-media";
+            DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
+            req.setTitle(safeName);
+            req.setDescription("NovaHub 媒体下载");
+            req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            req.setAllowedOverMetered(true);
+            req.setAllowedOverRoaming(true);
+            try {
+                req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "NovaHub/" + safeName);
+            } catch (Throwable ignored) {
+                req.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, safeName);
+            }
+            dm.enqueue(req);
+            return true;
+        } catch (Throwable e) {
+            Log.w("NovaDownload", "Download enqueue failed", e);
+            return false;
+        }
+    }
+
+    @Override
+    protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent != null && intent.getBooleanExtra("open_notifications", false)) {
+            if (webView != null && isTrustedNovelPage()) {
+                webView.evaluateJavascript("window.__nhOpenNotifications && window.__nhOpenNotifications()", null);
+            } else {
+                pendingOpenNotifications = true;
+            }
         }
     }
 

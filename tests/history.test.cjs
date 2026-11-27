@@ -34,3 +34,14 @@ test('newer offline timestamps without observing deletion stay deleted',()=>{
   const next=H.merge(state,{history:[{srcId:'a',id:'1',at:999}],progress:{'a:1':{time:42,at:999}}});
   assert.equal(next.history.length,0);assert.equal(next.progress['a:1'],undefined);
 });
+test('app progress overrides newer web progress while app vs app keeps latest',()=>{
+  const H=moduleUnderTest();
+  const appState={progress:{'a:1':{idx:1,time:88,at:100,src:'app'}}};
+  const webState={progress:{'a:1':{idx:0,time:12,at:9999,src:'web'}}};
+  const merged=H.merge(appState,webState);
+  assert.equal(merged.progress['a:1'].src,'app');
+  assert.equal(merged.progress['a:1'].time,88);
+  const newerApp=H.merge(merged,{progress:{'a:1':{idx:2,time:150,at:200,src:'app'}}});
+  assert.equal(newerApp.progress['a:1'].time,150);
+  assert.equal(newerApp.progress['a:1'].idx,2);
+});

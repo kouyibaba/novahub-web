@@ -29,7 +29,7 @@ import catalog
 import backup_db
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("PORT", "8765"))
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 and str(sys.argv[1]).isdigit() else int(os.environ.get("PORT", "8765"))
 ENGINE_PORT = int(os.environ.get("NOVEL_ENGINE_PORT", "18423"))
 ENGINE_URL = f"http://127.0.0.1:{ENGINE_PORT}"
 NOVEL_DATA_DIR = os.path.join(ROOT, "novel_engine")
@@ -404,6 +404,32 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return xf.split(",")[0].strip()
         return self.client_address[0] if self.client_address else "127.0.0.1"
 
+    def _touch_presence(self, user_id, body=None, logged_in=True):
+        """提取客户端设备信息与 IP，更新用户在线活跃态。"""
+        if not user_id:
+            return
+        body = body if isinstance(body, dict) else {}
+        ua = self.headers.get("User-Agent") or ""
+        did = str(body.get("device_id") or self.headers.get("X-Device-Id") or "").strip()
+        if not did:
+            did = "ua_" + hashlib.sha256(f"{self._client_ip()}|{ua}".encode("utf-8", "ignore")).hexdigest()[:16]
+        ctype = str(body.get("client_type") or self.headers.get("X-Client-Type") or "").strip()
+        if not ctype:
+            ctype = "app" if ("NovaHub" in ua or "wv)" in ua or "; wv" in ua) else "web"
+        dinfo = str(body.get("device_info") or self.headers.get("X-Device-Info") or "").strip()
+        if not dinfo:
+            if "Android" in ua:
+                dinfo = "Android 设备"
+            elif "Windows" in ua:
+                dinfo = "Windows 浏览器"
+            elif "Macintosh" in ua or "Mac OS" in ua:
+                dinfo = "macOS 浏览器"
+            elif "iPhone" in ua or "iPad" in ua:
+                dinfo = "iOS / iPadOS"
+            else:
+                dinfo = ua[:60] or ctype
+        db.touch_user_presence(user_id, did, ctype, dinfo, self._client_ip(), logged_in=logged_in)
+
     def _current_user(self):
         auth = self.headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
@@ -449,7 +475,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Device-Id, X-Client-Type, X-Device-Info")
         self.end_headers()
 
     def _ops_auth(self, route, file_arg, body):
@@ -566,6 +592,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try:
             body = self._read_json_body(16384)
             user, token = db.login_user(body.get("username"), body.get("password"))
+            self._touch_presence(user["id"], body, logged_in=True)
             self.send_json({"user": user, "token": token})
         except ValueError as e:
             self.send_json({"error": str(e)}, 401)
@@ -579,7 +606,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             user, token = db.refresh_user_session(token)
         except ValueError:
             return self.send_json({"error": "登录已失效，请重新登录", "user": None}, 401)
+        self._touch_presence(user["id"], logged_in=True)
         self.send_json({"user": user, "token": token})
+
+    def handle_auth_heartbeat(self):
+        user = self._current_user()
+        if not user:
+            return self.send_json({"error": "请先登录账号"}, 401)
+        try:
+            body = self._read_json_body(4096)
+        except Exception:
+            body = {}
+        self._touch_presence(user["id"], body, logged_in=True)
+        self.send_json({"ok": True, "server_time": int(time.time())})
+
+    def handle_auth_logout(self):
+        user = self._current_user()
+        if not user:
+            return self.send_json({"ok": True})
+        try:
+            body = self._read_json_body(4096)
+        except Exception:
+            body = {}
+        did = str(body.get("device_id") or self.headers.get("X-Device-Id") or "").strip()
+        db.mark_user_offline(user["id"], did)
+        self.send_json({"ok": True})
 
     def handle_vip_redeem(self):
         if not _check_rate_limit(self._client_ip(), "redeem", 15, 60):
@@ -613,6 +664,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             data = body.get("data") or body
             catalog.current().migrate_private(user['id'], data.get('source'))
             ts = db.save_user_sync(user["id"], data)
+            self._touch_presence(user["id"], logged_in=True)
             self.send_json({"ok": True, "updated_at": ts, 'sync': db.get_user_sync(user['id'])})
         except ValueError as e:
             self.send_json({"error": str(e)}, 400)
@@ -702,6 +754,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except ValueError:
             limit = 200
         self.send_json({"users": db.list_admin_users(q, status, limit)})
+
+    def handle_admin_online(self, qs):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        try:
+            window_sec = int((qs.get("window") or ["180"])[0])
+        except ValueError:
+            window_sec = 180
+        self.send_json(db.list_online_presence(window_sec=window_sec, limit=200))
 
     def handle_admin_user_vip(self):
         if not self._is_admin():
@@ -876,7 +937,91 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_json({"error": str(e)}, 502)
 
-    # ---------- 直播流 HLS 跨域重写代理 ----------
+    # ---------- 直播流 HLS 跨域重写代理 & 媒体流式下载 ----------
+    def _live_headers(self, target_url):
+        p = urllib.parse.urlsplit(target_url)
+        origin = f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else ""
+        h = {"User-Agent": UA_MOBILE, "Accept": "*/*"}
+        if origin:
+            h["Referer"] = origin + "/"
+            h["Origin"] = origin
+        return h
+
+    def handle_media_download(self, qs):
+        if not self._media_user(qs):
+            return self.send_json({"error": "请先登录账号"}, 401)
+        target = (qs.get("url") or [""])[0].strip()
+        if not _is_safe_proxy_target(target):
+            return self.send_json({"error": "Invalid download url"}, 400)
+        raw_name = (qs.get("name") or ["novahub-media"])[0].strip()
+        safe_name = re.sub(r'[\\/:*?"<>|\r\n\x00-\x1f]+', "_", raw_name)[:120].strip(" .") or "novahub-media"
+        import http.client
+        cur = target
+        conn = None
+        try:
+            for _ in range(6):
+                parsed, port, addresses = safe_http.resolve_public(cur)
+                def connect_pinned(_dest, timeout=15, source_address=None):
+                    last_err = None
+                    for addr in addresses:
+                        try:
+                            return socket.create_connection((addr, port), 15, source_address)
+                        except OSError as exc:
+                            last_err = exc
+                    raise last_err or OSError("No target address")
+                conn = http.client.HTTPSConnection(parsed.hostname, port, timeout=15, context=CTX) if parsed.scheme == "https" else http.client.HTTPConnection(parsed.hostname, port, timeout=15)
+                conn._create_connection = connect_pinned
+                path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+                conn.request("GET", path, headers={"User-Agent": UA_MOBILE, "Accept": "*/*"})
+                resp = conn.getresponse()
+                if resp.status in (301, 302, 303, 307, 308):
+                    loc = resp.getheader("Location")
+                    conn.close(); conn = None
+                    if not loc:
+                        raise ValueError("Redirect without Location")
+                    nxt = urllib.parse.urljoin(cur, loc)
+                    if parsed.scheme == "https" and urllib.parse.urlsplit(nxt).scheme != "https":
+                        raise ValueError("HTTPS downgrade rejected")
+                    cur = nxt
+                    continue
+                if resp.status >= 400:
+                    conn.close(); conn = None
+                    return self.send_json({"error": f"上游返回 HTTP {resp.status}"}, 502)
+                max_dl = 200 * 1024 * 1024
+                cl = resp.getheader("Content-Length")
+                if cl and cl.isdigit() and int(cl) > max_dl:
+                    conn.close(); conn = None
+                    return self.send_json({"error": "文件体积超出单次下载上限 (200MB)"}, 413)
+                ctype = resp.getheader("Content-Type") or "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                if cl and cl.isdigit():
+                    self.send_header("Content-Length", cl)
+                encoded_fn = urllib.parse.quote(safe_name, safe="")
+                ascii_fallback = re.sub(r"[^A-Za-z0-9._-]+", "_", safe_name) or "download"
+                self.send_header("Content-Disposition", f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded_fn}')
+                self.end_headers()
+                sent = 0
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    sent += len(chunk)
+                    if sent > max_dl:
+                        break
+                    self.wfile.write(chunk)
+                conn.close(); conn = None
+                return
+            raise ValueError("Too many redirects")
+        except Exception as e:
+            if conn:
+                try: conn.close()
+                except Exception: pass
+            try:
+                self.send_json({"error": str(e)}, 502)
+            except Exception:
+                pass
+
     def handle_live_m3u8(self, qs):
         if not self._media_user(qs):
             return self.send_json({"error": "请先登录账号"}, 401)
@@ -885,7 +1030,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_json({"error": "Invalid live url"}, 400)
         try:
             status, data, ctype, final_url = _http_get_full(
-                target, headers={"User-Agent": UA_MOBILE}, timeout=8, max_bytes=2_097_152
+                target, headers=self._live_headers(target), timeout=8, max_bytes=2_097_152
             )
             txt = data.decode("utf-8", "ignore")
             if "#EXTM3U" not in txt:
@@ -941,7 +1086,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_json({"error": "Invalid seg url"}, 400)
         try:
             status, data, ctype, _ = _http_get_full(
-                target, headers={"User-Agent": UA_MOBILE}, timeout=10, max_bytes=12_582_912
+                target, headers=self._live_headers(target), timeout=10, max_bytes=12_582_912
             )
             self.send_response(status)
             self.send_header("Content-Type", ctype or "video/mp2t")
@@ -1082,6 +1227,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.handle_auth_register()
         if p == "/api/auth/login":
             return self.handle_auth_login()
+        if p == "/api/auth/heartbeat":
+            return self.handle_auth_heartbeat()
+        if p == "/api/auth/logout":
+            return self.handle_auth_logout()
+        if p == "/api/notifications/read":
+            return self.handle_notifications_read()
+        if p == "/api/notifications/prefs":
+            return self.handle_notifications_prefs_post()
+        if p == "/api/notifications/check":
+            return self.handle_notifications_check()
         if p == "/api/vip/redeem":
             return self.handle_vip_redeem()
         if p == "/api/sync":
@@ -1132,6 +1287,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.handle_admin_dashboard()
         if p == "/api/admin/users":
             return self.handle_admin_users(qs)
+        if p == "/api/admin/online":
+            return self.handle_admin_online(qs)
+        if p == "/api/notifications":
+            return self.handle_notifications_get(qs)
+        if p == "/api/notifications/prefs":
+            return self.handle_notifications_prefs_get()
+        if p == "/api/media/download":
+            return self.handle_media_download(qs)
         if p == "/api/ops/download":
             return self.handle_ops(p)
         if p == "/kw":
@@ -1207,6 +1370,108 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({"error": str(e)}, 502)
 
 
+    def handle_notifications_get(self, qs):
+        user = self._current_user()
+        if not user:
+            return self.send_json({"error": "请先登录账号"}, 401)
+        unread_only = (qs.get("unread") or ["0"])[0] == "1"
+        try:
+            limit = int((qs.get("limit") or ["50"])[0])
+        except ValueError:
+            limit = 50
+        self.send_json(db.list_notifications(user["id"], unread_only=unread_only, limit=limit))
+
+    def handle_notifications_read(self):
+        user = self._current_user()
+        if not user:
+            return self.send_json({"error": "请先登录账号"}, 401)
+        try:
+            body = self._read_json_body(4096)
+        except Exception:
+            body = {}
+        unread_count = db.mark_notifications_read(user["id"], body.get("id") or 0)
+        self.send_json({"ok": True, "unread_count": unread_count})
+
+    def handle_notifications_prefs_get(self):
+        user = self._current_user()
+        if not user:
+            return self.send_json({"error": "请先登录账号"}, 401)
+        self.send_json({"items": db.list_watch_items(user["id"])})
+
+    def handle_notifications_prefs_post(self):
+        user = self._current_user()
+        if not user:
+            return self.send_json({"error": "请先登录账号"}, 401)
+        try:
+            body = self._read_json_body(8192)
+            res = db.set_watch_notify(
+                user["id"],
+                body.get("item_type"),
+                body.get("item_key"),
+                bool(body.get("enabled", True)),
+                title=body.get("title") or "",
+                meta=body.get("meta"),
+            )
+            self.send_json({"ok": True, "pref": res})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    def handle_notifications_check(self):
+        user = self._current_user()
+        if not user:
+            return self.send_json({"error": "请先登录账号"}, 401)
+        if not _check_rate_limit(f"{self._client_ip()}:{user['id']}", "notif_check", 2, 180):
+            return self.send_json({"error": "检查过于频繁，请稍后再试"}, 429)
+        targets = db.list_due_watch_targets(limit=6, min_interval=0, user_id=user["id"])
+        checked, updated = _check_watch_targets(targets)
+        res = db.list_notifications(user["id"], limit=50)
+        self.send_json({"ok": True, "checked": checked, "updated": updated, **res})
+
+
+def _check_watch_targets(targets):
+    """低频巡检待查作品，比对集数/章节数变化并写入合并通知。"""
+    checked = 0
+    updated = 0
+    for t in targets or []:
+        itype = t.get("item_type")
+        ikey = t.get("item_key") or ""
+        try:
+            if itype == "novel" and re.fullmatch(r"\d{15,22}", ikey):
+                chapters = _fetch_book_directory(ikey)
+                if chapters:
+                    updated += db.record_watch_check("novel", ikey, len(chapters), chapters[-1].get("title") or "")
+                checked += 1
+            elif itype == "vod" and ":" in ikey:
+                src_id, vod_id = ikey.rsplit(":", 1)
+                detail = catalog.current().detail(src_id, vod_id, 0)
+                eps = detail.get("episodes") or []
+                if eps:
+                    updated += db.record_watch_check("vod", ikey, len(eps), eps[-1].get("n") or "")
+                checked += 1
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return checked, updated
+
+
+def _start_watch_update_checker():
+    """后台守护线程：每 30 分钟巡检最多 8 个到期收藏/书架作品更新。"""
+    def _loop():
+        time.sleep(45)
+        while True:
+            try:
+                targets = db.list_due_watch_targets(limit=8, min_interval=7200)
+                if targets:
+                    _check_watch_targets(targets)
+            except Exception:
+                pass
+            time.sleep(1800)
+
+    threading.Thread(target=_loop, name="watch-update-checker", daemon=True).start()
+
+
 class ThreadedHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -1217,6 +1482,7 @@ if __name__ == "__main__":
     catalog.current().start()
     backup_db.start_scheduler(db.DB_PATH, os.environ.get("NOVAHUB_BACKUP_DIR", os.path.join(os.path.dirname(db.DB_PATH), "backups")))
     _start_cold_cache_cleaner(ttl_days=30)
+    _start_watch_update_checker()
     threading.Thread(target=ensure_novel_engine, daemon=True).start()
     print(f"NovaHub Gateway listening on http://0.0.0.0:{PORT}")
     ThreadedHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

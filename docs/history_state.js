@@ -21,9 +21,16 @@
       const k = key(item);
       if (allowed(k,item) && (!rows.has(k) || stamp(item.at) >= stamp(rows.get(k).at))) rows.set(k,item);
     }
+    const preferProgress = (prev, next) => {
+      if (!prev) return next;
+      const prevApp = prev.src === 'app';
+      const nextApp = next.src === 'app';
+      if (prevApp !== nextApp) return nextApp ? next : prev;
+      return stamp(next.at) >= stamp(prev.at) ? next : prev;
+    };
     const progress = Object.create(null);
     for (const obj of [a.progress, b.progress]) if (obj && typeof obj === 'object' && !Array.isArray(obj)) for (const [k,v] of Object.entries(obj)) {
-      if (v && typeof v === 'object' && allowed(k,v) && (!progress[k] || stamp(v.at) >= stamp(progress[k].at))) progress[k] = v;
+      if (v && typeof v === 'object' && allowed(k,v)) progress[k] = preferProgress(progress[k], v);
     }
     return {...out, history:[...rows.values()].sort((x,y)=>stamp(y.at)-stamp(x.at)).slice(0,100), progress, history_deleted:deleted, history_cleared_at:cleared};
   }
