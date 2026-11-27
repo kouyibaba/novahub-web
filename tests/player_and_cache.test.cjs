@@ -75,6 +75,19 @@ test('player UI includes +30s, +1m, next episode, fullscreen episode drawer, ski
   const toastZ = Number((cssSource.match(/\.toast\s*\{[^}]*z-index:\s*(\d+)/) || [])[1] || 0);
   const gateZ = Number((cssSource.match(/\.access-gate-layer\s*\{[^}]*z-index:\s*(\d+)/) || [])[1] || 0);
   assert.ok(toastZ > gateZ, '.toast z-index must exceed .access-gate-layer');
+  const devCtx = {
+    window: {},
+    navigator: { userAgent: 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36' },
+    localStorage: { getItem: () => null, setItem() {} },
+    get: (_k, d) => d,
+  };
+  vm.createContext(devCtx);
+  const devStart = appSource.indexOf('const isAppClient =');
+  const devEnd = appSource.indexOf('// Media API requests', devStart);
+  vm.runInContext(appSource.slice(devStart, devEnd), devCtx);
+  const info = vm.runInContext('getDeviceInfo()', devCtx);
+  assert.equal(/^[\x00-\xff]+$/.test(info), true, 'getDeviceInfo header must stay ISO-8859-1 safe');
+  assert.ok(appSource.includes('headers["X-Device-Info"] = encodeURIComponent('));
 });
 
 test('tv.html big-screen cast receiver parses cleanly', () => {

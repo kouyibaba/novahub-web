@@ -453,13 +453,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         body = body if isinstance(body, dict) else {}
         ua = self.headers.get("User-Agent") or ""
-        did = str(body.get("device_id") or self.headers.get("X-Device-Id") or "").strip()
+        did = urllib.parse.unquote(str(body.get("device_id") or self.headers.get("X-Device-Id") or "")).strip()
         if not did:
             did = "ua_" + hashlib.sha256(f"{self._client_ip()}|{ua}".encode("utf-8", "ignore")).hexdigest()[:16]
         ctype = str(body.get("client_type") or self.headers.get("X-Client-Type") or "").strip()
         if not ctype:
             ctype = "app" if ("NovaHub" in ua or "wv)" in ua or "; wv" in ua) else "web"
-        dinfo = str(body.get("device_info") or self.headers.get("X-Device-Info") or "").strip()
+        dinfo = urllib.parse.unquote(str(body.get("device_info") or self.headers.get("X-Device-Info") or "")).strip()
         if not dinfo:
             if "Android" in ua:
                 dinfo = "Android 设备"

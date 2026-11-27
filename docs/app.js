@@ -39,11 +39,11 @@ const getDeviceInfo = () => {
     try { return "Android App " + (window.NovaNative.getAppVersion() || ""); } catch { return "Android App"; }
   }
   const ua = navigator.userAgent || "";
-  if (/Android/i.test(ua)) return "Android 浏览器";
-  if (/iPhone|iPad/i.test(ua)) return "iOS 浏览器";
-  if (/Windows/i.test(ua)) return "Windows 浏览器";
-  if (/Mac/i.test(ua)) return "macOS 浏览器";
-  return "Web 浏览器";
+  if (/Android/i.test(ua)) return "Android Browser";
+  if (/iPhone|iPad/i.test(ua)) return "iOS Browser";
+  if (/Windows/i.test(ua)) return "Windows Browser";
+  if (/Mac/i.test(ua)) return "macOS Browser";
+  return "Web Browser";
 };
 // Media API requests need the same account token as nhApi, including Pages routing.
 const _mediaFetch = window.fetch.bind(window);
@@ -3516,7 +3516,7 @@ function renderMe() {
           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px;flex-wrap:wrap">
             <span>${u ? esc(u.username) : "未登录游客"}</span>
             <span class="badge ${badgeCls}">${badgeText}</span>
-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.5.1</span>
+            <span class="badge gray" style="font-size:10px;opacity:.85">v2.5.2</span>
           </div>
           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
         </div>
@@ -4369,9 +4369,9 @@ async function nhApi(path, method = "GET", body = null) {
   const headers = { "Content-Type": "application/json" };
   if (NH.token) headers["Authorization"] = "Bearer " + NH.token;
   if (typeof getDeviceId === "function") {
-    headers["X-Device-Id"] = getDeviceId();
+    headers["X-Device-Id"] = encodeURIComponent(String(getDeviceId() || ""));
     headers["X-Client-Type"] = isAppClient() ? "app" : "web";
-    headers["X-Device-Info"] = getDeviceInfo();
+    headers["X-Device-Info"] = encodeURIComponent(String(getDeviceInfo() || ""));
   }
   const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const d = await r.json().catch(() => ({}));
