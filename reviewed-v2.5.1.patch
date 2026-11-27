@@ -1,0 +1,666 @@
+diff --git a/android-app/RELEASE_NOTES.txt b/android-app/RELEASE_NOTES.txt
+index 00f56c2..bcd32ef 100644
+--- a/android-app/RELEASE_NOTES.txt
++++ b/android-app/RELEASE_NOTES.txt
+@@ -1,3 +1,5 @@
++修复登录/注册门禁页提示被遮挡及异步刷新重置表单的问题，新增内联错误提示框
++优化视频源健康探测（IPv4 优先连接与暂停源自动自愈）并按高清画质（4K/1080P/蓝光/m3u8）优先选线
+ 新增新用户 3 天全功能免费体验与到期强门禁卡密解锁体系：未解锁前强锁定内容浏览与播放，输入卡密立即解封并叠加剩余体验时长，Android 原生接入防重装设备指纹防刷
+ 新增多方式可选投屏功能：支持 Android 原生零依赖 DLNA 扫描与遥控推流、4 位投屏码跨网大屏网页接收器（tv.html）、以及系统无线投屏/外部播放器/AirPlay/链接复制兜底
+ 修复后退或切页时搜索无法中止及顶部进度条卡死的问题，新增搜索中随时点击「取消」与「取消搜索」按钮
+diff --git a/android-app/app/build.gradle b/android-app/app/build.gradle
+index 53a9f72..ea2a204 100644
+--- a/android-app/app/build.gradle
++++ b/android-app/app/build.gradle
+@@ -10,8 +10,8 @@ android {
+         applicationId "com.novahub.app"
+         minSdk 24
+         targetSdk 34
+-        versionCode 13
+-        versionName "2.5.0"
++        versionCode 14
++        versionName "2.5.1"
+     }
+ 
+     signingConfigs {
+diff --git a/app.js b/app.js
+index 168688e..a7f26bc 100644
+--- a/app.js
++++ b/app.js
+@@ -3516,7 +3516,7 @@ function renderMe() {
+           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px;flex-wrap:wrap">
+             <span>${u ? esc(u.username) : "未登录游客"}</span>
+             <span class="badge ${badgeCls}">${badgeText}</span>
+-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.5.0</span>
++            <span class="badge gray" style="font-size:10px;opacity:.85">v2.5.1</span>
+           </div>
+           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
+         </div>
+@@ -4679,12 +4679,26 @@ function handleExpiredAccessAction() {
+ }
+ 
+ let _gateTab = "login";
+-function syncAccessGate() {
++let _gateRenderedMode = "";
++function setGateMsg(msg, isOk = false) {
++  const box = $("#gateMsg");
++  if (!box) return;
++  if (!msg) {
++    box.classList.add("hidden");
++    box.textContent = "";
++    return;
++  }
++  box.textContent = msg;
++  box.classList.toggle("ok", !!isOk);
++  box.classList.remove("hidden");
++}
++function syncAccessGate(forceRedraw = false) {
+   const layer = $("#accessGateLayer");
+   if (!layer) return;
+   const gateOn = isAccessGateEnabled();
+   const needLock = gateOn && (!NH.user ? true : (typeof NH.user.has_access === "boolean" ? !NH.user.has_access : (_authVerifiedOnce && !hasActiveAccess())));
+   if (!needLock) {
++    _gateRenderedMode = "";
+     layer.classList.add("hidden");
+     layer.innerHTML = "";
+     document.body.classList.remove("gate-locked");
+@@ -4698,12 +4712,19 @@ function syncAccessGate() {
+   } catch {}
+   document.body.classList.add("gate-locked");
+   layer.classList.remove("hidden");
++  const nextMode = NH.user ? `expired:${NH.user.username || ""}` : "guest";
++  if (!forceRedraw && _gateRenderedMode === nextMode && layer.firstElementChild) {
++    return;
++  }
++  _gateRenderedMode = nextMode;
+   renderAccessGate(layer);
+ }
+ 
+ function renderAccessGate(layer) {
+   const trialDays = Number(NH.cfg?.trial_days ?? 3);
+   if (!NH.user) {
++    const prevUser = $("#gateAuthUser")?.value || "";
++    const prevPwd = $("#gateAuthPwd")?.value || "";
+     const isReg = _gateTab === "register";
+     layer.innerHTML = `
+       <div class="gate-card">
+@@ -4725,9 +4746,10 @@ function renderAccessGate(layer) {
+         </div>
+         <div class="form" style="margin:0;border:none;padding:0">
+           <label>账号（3~24 位字符）</label>
+-          <input id="gateAuthUser" placeholder="请输入账号" autocomplete="username">
++          <input id="gateAuthUser" placeholder="请输入账号" autocomplete="username" value="${esc(prevUser)}">
+           <label>密码（6 位以上）</label>
+-          <input id="gateAuthPwd" type="password" placeholder="请输入密码" autocomplete="${isReg ? "new-password" : "current-password"}">
++          <input id="gateAuthPwd" type="password" placeholder="请输入密码" autocomplete="${isReg ? "new-password" : "current-password"}" value="${esc(prevPwd)}">
++          <div id="gateMsg" class="gate-msg hidden" role="alert"></div>
+           <button type="button" id="gateAuthSubmit" class="btn primary" style="width:100%;margin-top:14px">${isReg ? (trialDays > 0 ? `立即注册并开启 ${trialDays} 天体验` : "注册账号") : "立即登录"}</button>
+         </div>
+         <div class="gate-guide-box" style="margin-top:14px">
+@@ -4740,7 +4762,22 @@ function renderAccessGate(layer) {
+     const doSubmit = async () => {
+       const username = $("#gateAuthUser")?.value.trim();
+       const password = $("#gateAuthPwd")?.value.trim();
+-      if (!username || !password) return toast("请填写完整账号与密码");
++      setGateMsg("");
++      if (!username || !password) {
++        setGateMsg("请填写完整账号与密码");
++        toast("请填写完整账号与密码");
++        return;
++      }
++      if (isReg && (username.length < 3 || username.length > 24)) {
++        setGateMsg("账号长度需为 3~24 位字符");
++        toast("账号长度需为 3~24 位字符");
++        return;
++      }
++      if (isReg && password.length < 6) {
++        setGateMsg("密码长度至少需要 6 位");
++        toast("密码长度至少需要 6 位");
++        return;
++      }
+       const btn = $("#gateAuthSubmit");
+       if (btn) { btn.disabled = true; btn.textContent = isReg ? "注册中…" : "登录中…"; }
+       try {
+@@ -4756,7 +4793,7 @@ function renderAccessGate(layer) {
+         if (isReg) await cloudSyncPush(true).catch(() => {});
+         else await cloudSyncPull(true).catch(() => {});
+         if (typeof refreshNotifications === "function") refreshNotifications(true);
+-        syncAccessGate();
++        syncAccessGate(true);
+         if (isReg && d.user?.trial_notice) toast(d.user.trial_notice, 2800);
+         else toast(isReg ? "注册并登录成功" : "登录成功");
+         if (hasActiveAccess()) {
+@@ -4764,7 +4801,9 @@ function renderAccessGate(layer) {
+           else renderHome();
+         }
+       } catch (e) {
+-        toast(e.message || "操作失败", 2400);
++        const errMsg = e?.message || "网络连接失败，请确认节点在线后重试";
++        setGateMsg(errMsg);
++        toast(errMsg, 2600);
+         if (btn) { btn.disabled = false; btn.textContent = isReg ? (trialDays > 0 ? `立即注册并开启 ${trialDays} 天体验` : "注册账号") : "立即登录"; }
+       }
+     };
+@@ -4800,6 +4839,7 @@ function renderAccessGate(layer) {
+       <div class="form" style="margin:0;border:none;padding:0">
+         <label>兑换卡密</label>
+         <input id="gateRedeemIn" placeholder="例如：NH-XXXX-XXXX-XXXX" style="text-transform:uppercase;letter-spacing:.08em">
++        <div id="gateMsg" class="gate-msg hidden" role="alert"></div>
+         <button type="button" id="gateRedeemBtn" class="btn primary" style="width:100%;margin-top:12px">立即兑换并解锁</button>
+       </div>
+       <div class="gate-guide-box">
+@@ -4815,19 +4855,25 @@ function renderAccessGate(layer) {
+ 
+   $("#gateRedeemBtn").onclick = async () => {
+     const code = $("#gateRedeemIn")?.value.trim();
+-    if (!code) return toast("请输入有效卡密");
++    setGateMsg("");
++    if (!code) {
++      setGateMsg("请输入有效卡密");
++      return toast("请输入有效卡密");
++    }
+     const btn = $("#gateRedeemBtn");
+     if (btn) { btn.disabled = true; btn.textContent = "核销解锁中…"; }
+     try {
+       const d = await nhApi("/api/vip/redeem", "POST", { code });
+       NH.user = d.user;
+       set("nh_user", d.user);
+-      syncAccessGate();
++      syncAccessGate(true);
+       toast(`解锁成功！已激活 ${d.days} 天畅享权益`, 2600);
+       if (typeof routes[currentRoute] === "function") routes[currentRoute]();
+       else renderHome();
+     } catch (e) {
+-      toast(e.message || "卡密无效", 2500);
++      const errMsg = e?.message || "卡密无效或网络异常";
++      setGateMsg(errMsg);
++      toast(errMsg, 2500);
+       if (btn) { btn.disabled = false; btn.textContent = "立即兑换并解锁"; }
+     }
+   };
+diff --git a/catalog.py b/catalog.py
+index 51852a7..08e6e34 100644
+--- a/catalog.py
++++ b/catalog.py
+@@ -307,13 +307,13 @@ class Catalog:
+             c.execute('UPDATE catalog_sources SET completeness=?,media_ok=1 WHERE id=?', (len(episodes),source['id']))
+         return True, (time.monotonic() - start) * 1000
+ 
+-    def check_sources(self, now=None):
++    def check_sources(self, now=None, force=False):
+         now = int(time.time() if now is None else now)
+         saved_previous = False
+         before = [{'id': s['id'], 'state': s['state']} for s in self.sources()]
+         for source in self.sources():
+             if source['disabled']: continue
+-            if source['state'] == 'paused' and now - source['checked_at'] < 21600: continue
++            if not force and source['state'] == 'paused' and now - source['checked_at'] < 1800: continue
+             try: ok, latency = self._probe(source); error = ''
+             except BusyError: return
+             except Exception as exc: ok = False; latency = 4000; error = type(exc).__name__
+@@ -324,7 +324,8 @@ class Catalog:
+                     failures = 0
+                     if not first: first = now; success = 1
+                     elif now - first >= 1800: success = max(2, success + 1)
+-                    if state != 'active' and success >= 2:
++                    # 曾经活跃过的 paused 源探活一次恢复即切回 active；新 candidate 仍需间隔 30 分钟双轮校验
++                    if state == 'paused' or (state != 'active' and success >= 2):
+                         if not saved_previous:
+                             c.execute("INSERT INTO catalog_meta VALUES('previous',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(before),))
+                             saved_previous = True
+@@ -434,8 +435,9 @@ class Catalog:
+     @staticmethod
+     def _episodes(row):
+         groups = str(row.get('vod_play_url') or '').split('$$$')
++        from_names = str(row.get('vod_play_from') or '').split('$$$')
+         parsed = []
+-        for group in groups[:12]:
++        for idx, group in enumerate(groups[:12]):
+             episodes = []
+             for value in group.split('#')[:1000]:
+                 title, sep, url = value.partition('$')
+@@ -444,8 +446,18 @@ class Catalog:
+                 try: url = normalize_url(url)
+                 except ValueError: continue
+                 episodes.append({'n': title[:80], 'url': url})
+-            if episodes: parsed.append(episodes)
+-        return max(parsed, key=len, default=[])
++            if not episodes: continue
++            label = (from_names[idx] if idx < len(from_names) else '').lower()
++            sample_u = episodes[0]['url'].lower()
++            hint = f"{label} {sample_u}"
++            hd_score = 0
++            if any(k in hint for k in ('4k', '2160', 'uhd')): hd_score += 5
++            elif any(k in hint for k in ('1080', '蓝光', 'bluray', 'fhd')): hd_score += 4
++            elif any(k in hint for k in ('超清', '720', 'hd')): hd_score += 2
++            if '.m3u8' in sample_u: hd_score += 1
++            parsed.append((len(episodes), hd_score, episodes))
++        if not parsed: return []
++        return max(parsed, key=lambda x: (x[0], x[1]))[2]
+ 
+     def detail(self, sid, vod_id, owner=0):
+         source = self.resolve(sid, owner)
+@@ -488,7 +500,7 @@ class Catalog:
+         def work():
+             try:
+                 if action == 'refresh': self.refresh_subscriptions(force=True)
+-                self.check_sources()
++                self.check_sources(force=True)
+                 self.last_job['error'] = ''
+             except Exception as exc: self.last_job['error'] = type(exc).__name__
+             finally:
+diff --git a/docs/app.js b/docs/app.js
+index 168688e..a7f26bc 100644
+--- a/docs/app.js
++++ b/docs/app.js
+@@ -3516,7 +3516,7 @@ function renderMe() {
+           <div style="font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:7px;flex-wrap:wrap">
+             <span>${u ? esc(u.username) : "未登录游客"}</span>
+             <span class="badge ${badgeCls}">${badgeText}</span>
+-            <span class="badge gray" style="font-size:10px;opacity:.85">v2.5.0</span>
++            <span class="badge gray" style="font-size:10px;opacity:.85">v2.5.1</span>
+           </div>
+           <div class="hint" style="margin-top:3px">${esc(expText)}</div>
+         </div>
+@@ -4679,12 +4679,26 @@ function handleExpiredAccessAction() {
+ }
+ 
+ let _gateTab = "login";
+-function syncAccessGate() {
++let _gateRenderedMode = "";
++function setGateMsg(msg, isOk = false) {
++  const box = $("#gateMsg");
++  if (!box) return;
++  if (!msg) {
++    box.classList.add("hidden");
++    box.textContent = "";
++    return;
++  }
++  box.textContent = msg;
++  box.classList.toggle("ok", !!isOk);
++  box.classList.remove("hidden");
++}
++function syncAccessGate(forceRedraw = false) {
+   const layer = $("#accessGateLayer");
+   if (!layer) return;
+   const gateOn = isAccessGateEnabled();
+   const needLock = gateOn && (!NH.user ? true : (typeof NH.user.has_access === "boolean" ? !NH.user.has_access : (_authVerifiedOnce && !hasActiveAccess())));
+   if (!needLock) {
++    _gateRenderedMode = "";
+     layer.classList.add("hidden");
+     layer.innerHTML = "";
+     document.body.classList.remove("gate-locked");
+@@ -4698,12 +4712,19 @@ function syncAccessGate() {
+   } catch {}
+   document.body.classList.add("gate-locked");
+   layer.classList.remove("hidden");
++  const nextMode = NH.user ? `expired:${NH.user.username || ""}` : "guest";
++  if (!forceRedraw && _gateRenderedMode === nextMode && layer.firstElementChild) {
++    return;
++  }
++  _gateRenderedMode = nextMode;
+   renderAccessGate(layer);
+ }
+ 
+ function renderAccessGate(layer) {
+   const trialDays = Number(NH.cfg?.trial_days ?? 3);
+   if (!NH.user) {
++    const prevUser = $("#gateAuthUser")?.value || "";
++    const prevPwd = $("#gateAuthPwd")?.value || "";
+     const isReg = _gateTab === "register";
+     layer.innerHTML = `
+       <div class="gate-card">
+@@ -4725,9 +4746,10 @@ function renderAccessGate(layer) {
+         </div>
+         <div class="form" style="margin:0;border:none;padding:0">
+           <label>账号（3~24 位字符）</label>
+-          <input id="gateAuthUser" placeholder="请输入账号" autocomplete="username">
++          <input id="gateAuthUser" placeholder="请输入账号" autocomplete="username" value="${esc(prevUser)}">
+           <label>密码（6 位以上）</label>
+-          <input id="gateAuthPwd" type="password" placeholder="请输入密码" autocomplete="${isReg ? "new-password" : "current-password"}">
++          <input id="gateAuthPwd" type="password" placeholder="请输入密码" autocomplete="${isReg ? "new-password" : "current-password"}" value="${esc(prevPwd)}">
++          <div id="gateMsg" class="gate-msg hidden" role="alert"></div>
+           <button type="button" id="gateAuthSubmit" class="btn primary" style="width:100%;margin-top:14px">${isReg ? (trialDays > 0 ? `立即注册并开启 ${trialDays} 天体验` : "注册账号") : "立即登录"}</button>
+         </div>
+         <div class="gate-guide-box" style="margin-top:14px">
+@@ -4740,7 +4762,22 @@ function renderAccessGate(layer) {
+     const doSubmit = async () => {
+       const username = $("#gateAuthUser")?.value.trim();
+       const password = $("#gateAuthPwd")?.value.trim();
+-      if (!username || !password) return toast("请填写完整账号与密码");
++      setGateMsg("");
++      if (!username || !password) {
++        setGateMsg("请填写完整账号与密码");
++        toast("请填写完整账号与密码");
++        return;
++      }
++      if (isReg && (username.length < 3 || username.length > 24)) {
++        setGateMsg("账号长度需为 3~24 位字符");
++        toast("账号长度需为 3~24 位字符");
++        return;
++      }
++      if (isReg && password.length < 6) {
++        setGateMsg("密码长度至少需要 6 位");
++        toast("密码长度至少需要 6 位");
++        return;
++      }
+       const btn = $("#gateAuthSubmit");
+       if (btn) { btn.disabled = true; btn.textContent = isReg ? "注册中…" : "登录中…"; }
+       try {
+@@ -4756,7 +4793,7 @@ function renderAccessGate(layer) {
+         if (isReg) await cloudSyncPush(true).catch(() => {});
+         else await cloudSyncPull(true).catch(() => {});
+         if (typeof refreshNotifications === "function") refreshNotifications(true);
+-        syncAccessGate();
++        syncAccessGate(true);
+         if (isReg && d.user?.trial_notice) toast(d.user.trial_notice, 2800);
+         else toast(isReg ? "注册并登录成功" : "登录成功");
+         if (hasActiveAccess()) {
+@@ -4764,7 +4801,9 @@ function renderAccessGate(layer) {
+           else renderHome();
+         }
+       } catch (e) {
+-        toast(e.message || "操作失败", 2400);
++        const errMsg = e?.message || "网络连接失败，请确认节点在线后重试";
++        setGateMsg(errMsg);
++        toast(errMsg, 2600);
+         if (btn) { btn.disabled = false; btn.textContent = isReg ? (trialDays > 0 ? `立即注册并开启 ${trialDays} 天体验` : "注册账号") : "立即登录"; }
+       }
+     };
+@@ -4800,6 +4839,7 @@ function renderAccessGate(layer) {
+       <div class="form" style="margin:0;border:none;padding:0">
+         <label>兑换卡密</label>
+         <input id="gateRedeemIn" placeholder="例如：NH-XXXX-XXXX-XXXX" style="text-transform:uppercase;letter-spacing:.08em">
++        <div id="gateMsg" class="gate-msg hidden" role="alert"></div>
+         <button type="button" id="gateRedeemBtn" class="btn primary" style="width:100%;margin-top:12px">立即兑换并解锁</button>
+       </div>
+       <div class="gate-guide-box">
+@@ -4815,19 +4855,25 @@ function renderAccessGate(layer) {
+ 
+   $("#gateRedeemBtn").onclick = async () => {
+     const code = $("#gateRedeemIn")?.value.trim();
+-    if (!code) return toast("请输入有效卡密");
++    setGateMsg("");
++    if (!code) {
++      setGateMsg("请输入有效卡密");
++      return toast("请输入有效卡密");
++    }
+     const btn = $("#gateRedeemBtn");
+     if (btn) { btn.disabled = true; btn.textContent = "核销解锁中…"; }
+     try {
+       const d = await nhApi("/api/vip/redeem", "POST", { code });
+       NH.user = d.user;
+       set("nh_user", d.user);
+-      syncAccessGate();
++      syncAccessGate(true);
+       toast(`解锁成功！已激活 ${d.days} 天畅享权益`, 2600);
+       if (typeof routes[currentRoute] === "function") routes[currentRoute]();
+       else renderHome();
+     } catch (e) {
+-      toast(e.message || "卡密无效", 2500);
++      const errMsg = e?.message || "卡密无效或网络异常";
++      setGateMsg(errMsg);
++      toast(errMsg, 2500);
+       if (btn) { btn.disabled = false; btn.textContent = "立即兑换并解锁"; }
+     }
+   };
+diff --git a/docs/development/handoffs/2026-11-27-gemini-batch-upgrade.md b/docs/development/handoffs/2026-11-27-gemini-batch-upgrade.md
+index f2b99ea..717300f 100644
+--- a/docs/development/handoffs/2026-11-27-gemini-batch-upgrade.md
++++ b/docs/development/handoffs/2026-11-27-gemini-batch-upgrade.md
+@@ -94,3 +94,12 @@
+   - 新增全屏门禁层 `#accessGateLayer`，未登录直接展示登录/注册双标签页，到期直接锁屏并提供卡密输入激活、购卡外链与客服二维码展示；体验期展示剩余时间横幅与卡密解锁入口。
+ - **管理后台升级（`admin.html` 及 `docs/admin.html`）**：
+   - 总览新增体验/到期人数统计；用户筛选新增 `Pro 已解锁` / `体验中` / `已到期` / `永久豁免`；支持手工补发体验、切换豁免、清零锁定；发卡新增 `3天体验卡` 与 `7天周卡`；新增门禁与体验参数热配置卡片。
++
++## 7. v2.5.1 增量修复：门禁交互修复与视频源恢复/高清优选（2026-11-27 续）
++- **登录/注册门禁页无响应修复（`style.css`、`app.js`、`index.html` 及 `docs/`）**：
++  - `.modal` 提升至 `z-index: 9500`、`.toast` 提升至 `z-index: 10050`，解决原先被 `#accessGateLayer (9000)` 遮挡提示的问题；
++  - `syncAccessGate()` 仅在模式变化或强刷新时重绘，切 Tab 保留输入，新增 `#gateMsg` 内联错误提示框。
++- **视频源连通率恢复与高清线路优选（`safe_http.py`、`catalog.py`）**：
++  - `safe_http.resolve_public` 优先尝试 IPv4，多地址轮询分片超时（`2.2s`），防止平板 IPv6 不通拖垮连接；
++  - `catalog.check_sources` 缩短 `paused` 重检冷却（`1800s`），已存在过的 `paused` 源探活 1 次即可自愈恢复 `active`；`start_job` 触发强制全检；
++  - `catalog._episodes` 结合 `vod_play_from` 与 URL 画质关键词（`4K/蓝光/1080/超清/m3u8`）在完整集数基础上优先选中高清线路。
+diff --git a/docs/index.html b/docs/index.html
+index 226c268..f1df0ea 100644
+--- a/docs/index.html
++++ b/docs/index.html
+@@ -67,7 +67,7 @@
+ })();
+ </script>
+ <link rel="manifest" href="manifest.json">
+-<link rel="stylesheet" href="style.css?v=20261127-v250">
++<link rel="stylesheet" href="style.css?v=20261127-v251">
+ <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+ <script defer src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+ <style>
+@@ -270,9 +270,9 @@
+ 
+ <div id="toast" class="toast hidden"></div>
+ 
+-<script src="history_state.js?v=20261127-v250"></script>
+-<script src="vod_client.js?v=20261127-v250"></script>
+-<script src="auth_session.js?v=20261127-v250"></script>
+-<script src="app.js?v=20261127-v250"></script>
++<script src="history_state.js?v=20261127-v251"></script>
++<script src="vod_client.js?v=20261127-v251"></script>
++<script src="auth_session.js?v=20261127-v251"></script>
++<script src="app.js?v=20261127-v251"></script>
+ </body>
+ </html>
+diff --git a/docs/style.css b/docs/style.css
+index 2f6762f..80b8979 100644
+--- a/docs/style.css
++++ b/docs/style.css
+@@ -432,7 +432,7 @@ input[type="range"]:active::-webkit-slider-thumb {
+ 
+ /* 弹窗 */
+ .modal {
+-  position: fixed; inset: 0; z-index: 200; background: rgba(0, 0, 0, 0.72);
++  position: fixed; inset: 0; z-index: 9500; background: rgba(0, 0, 0, 0.72);
+   backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+   display: flex; align-items: center; justify-content: center; padding: 24px;
+ }
+@@ -453,7 +453,7 @@ input[type="range"]:active::-webkit-slider-thumb {
+ 
+ /* 轻提示 Toast */
+ .toast {
+-  position: fixed; left: 50%; top: 44%; transform: translateX(-50%); z-index: 300;
++  position: fixed; left: 50%; top: 44%; transform: translateX(-50%); z-index: 10050;
+   background: rgba(20, 22, 27, 0.92); backdrop-filter: blur(12px);
+   border: 1px solid var(--line-strong); color: var(--text);
+   padding: 10px 18px; border-radius: 10px;
+@@ -2132,3 +2132,19 @@ body.gate-locked .view {
+   cursor: pointer;
+   flex-shrink: 0;
+ }
++.gate-msg {
++  margin-top: 10px;
++  padding: 9px 11px;
++  border-radius: 10px;
++  font-size: 12.5px;
++  line-height: 1.5;
++  background: rgba(229, 88, 110, 0.14);
++  border: 1px solid rgba(229, 88, 110, 0.42);
++  color: #ff9faf;
++}
++.gate-msg.ok {
++  background: rgba(60, 203, 127, 0.14);
++  border-color: rgba(60, 203, 127, 0.4);
++  color: #8cebbd;
++}
++.gate-msg.hidden { display: none; }
+diff --git a/index.html b/index.html
+index 226c268..f1df0ea 100644
+--- a/index.html
++++ b/index.html
+@@ -67,7 +67,7 @@
+ })();
+ </script>
+ <link rel="manifest" href="manifest.json">
+-<link rel="stylesheet" href="style.css?v=20261127-v250">
++<link rel="stylesheet" href="style.css?v=20261127-v251">
+ <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+ <script defer src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+ <style>
+@@ -270,9 +270,9 @@
+ 
+ <div id="toast" class="toast hidden"></div>
+ 
+-<script src="history_state.js?v=20261127-v250"></script>
+-<script src="vod_client.js?v=20261127-v250"></script>
+-<script src="auth_session.js?v=20261127-v250"></script>
+-<script src="app.js?v=20261127-v250"></script>
++<script src="history_state.js?v=20261127-v251"></script>
++<script src="vod_client.js?v=20261127-v251"></script>
++<script src="auth_session.js?v=20261127-v251"></script>
++<script src="app.js?v=20261127-v251"></script>
+ </body>
+ </html>
+diff --git a/safe_http.py b/safe_http.py
+index 116860b..0ea8050 100644
+--- a/safe_http.py
++++ b/safe_http.py
+@@ -19,15 +19,18 @@ def resolve_public(url):
+             or "%" in parsed.hostname):
+         raise ValueError("Invalid target URL")
+     port = parsed.port or (443 if parsed.scheme == "https" else 80)
+-    addresses = []
++    addresses_v4 = []
++    addresses_v6 = []
+     for entry in socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM):
+         address = entry[4][0]
+         ip = ipaddress.ip_address(address)
+         mapped = getattr(ip, "ipv4_mapped", None)
+         if not ip.is_global or ip.is_multicast or (mapped and (not mapped.is_global or mapped.is_multicast)):
+             raise ValueError("Private or reserved target address")
+-        if address not in addresses:
+-            addresses.append(address)
++        bucket = addresses_v4 if ip.version == 4 else addresses_v6
++        if address not in bucket:
++            bucket.append(address)
++    addresses = addresses_v4 + addresses_v6
+     if not addresses:
+         raise ValueError("No public target address")
+     return parsed, port, addresses
+@@ -47,9 +50,12 @@ def request(url, headers=None, timeout=8, max_bytes=4_194_304, method="GET", bod
+ 
+         def connect_pinned(_destination, timeout=timeout, source_address=None):
+             last_error = None
+-            for address in addresses:
++            total = len(addresses)
++            for idx, address in enumerate(addresses):
+                 try:
+-                    return socket.create_connection((address, port), remaining(), source_address)
++                    left = remaining()
++                    step_to = min(left, 2.2) if (idx + 1 < total and left > 2.2) else left
++                    return socket.create_connection((address, port), step_to, source_address)
+                 except OSError as exc:
+                     last_error = exc
+             raise last_error or OSError("No target address")
+diff --git a/style.css b/style.css
+index 2f6762f..80b8979 100644
+--- a/style.css
++++ b/style.css
+@@ -432,7 +432,7 @@ input[type="range"]:active::-webkit-slider-thumb {
+ 
+ /* 弹窗 */
+ .modal {
+-  position: fixed; inset: 0; z-index: 200; background: rgba(0, 0, 0, 0.72);
++  position: fixed; inset: 0; z-index: 9500; background: rgba(0, 0, 0, 0.72);
+   backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+   display: flex; align-items: center; justify-content: center; padding: 24px;
+ }
+@@ -453,7 +453,7 @@ input[type="range"]:active::-webkit-slider-thumb {
+ 
+ /* 轻提示 Toast */
+ .toast {
+-  position: fixed; left: 50%; top: 44%; transform: translateX(-50%); z-index: 300;
++  position: fixed; left: 50%; top: 44%; transform: translateX(-50%); z-index: 10050;
+   background: rgba(20, 22, 27, 0.92); backdrop-filter: blur(12px);
+   border: 1px solid var(--line-strong); color: var(--text);
+   padding: 10px 18px; border-radius: 10px;
+@@ -2132,3 +2132,19 @@ body.gate-locked .view {
+   cursor: pointer;
+   flex-shrink: 0;
+ }
++.gate-msg {
++  margin-top: 10px;
++  padding: 9px 11px;
++  border-radius: 10px;
++  font-size: 12.5px;
++  line-height: 1.5;
++  background: rgba(229, 88, 110, 0.14);
++  border: 1px solid rgba(229, 88, 110, 0.42);
++  color: #ff9faf;
++}
++.gate-msg.ok {
++  background: rgba(60, 203, 127, 0.14);
++  border-color: rgba(60, 203, 127, 0.4);
++  color: #8cebbd;
++}
++.gate-msg.hidden { display: none; }
+diff --git a/tests/player_and_cache.test.cjs b/tests/player_and_cache.test.cjs
+index 10cce5c..19a2f05 100644
+--- a/tests/player_and_cache.test.cjs
++++ b/tests/player_and_cache.test.cjs
+@@ -70,6 +70,11 @@ test('player UI includes +30s, +1m, next episode, fullscreen episode drawer, ski
+   assert.ok(htmlSource.includes('id="accessGateLayer"'));
+   assert.ok(appSource.includes('function syncAccessGate('));
+   assert.ok(appSource.includes('getDeviceFingerprint'));
++  assert.ok(appSource.includes('setGateMsg('));
++  const cssSource = fs.readFileSync('style.css', 'utf8');
++  const toastZ = Number((cssSource.match(/\.toast\s*\{[^}]*z-index:\s*(\d+)/) || [])[1] || 0);
++  const gateZ = Number((cssSource.match(/\.access-gate-layer\s*\{[^}]*z-index:\s*(\d+)/) || [])[1] || 0);
++  assert.ok(toastZ > gateZ, '.toast z-index must exceed .access-gate-layer');
+ });
+ 
+ test('tv.html big-screen cast receiver parses cleanly', () => {
+diff --git a/tests/test_catalog.py b/tests/test_catalog.py
+index 1def3f9..2e2641c 100644
+--- a/tests/test_catalog.py
++++ b/tests/test_catalog.py
+@@ -118,6 +118,23 @@ class CatalogTests(unittest.TestCase):
+         with mock.patch.object(self.cat, '_api', return_value=[row]), mock.patch.object(self.cat, '_request', return_value=(200, b'<html>blocked</html>', '', 'https://cdn.example/x.m3u8')):
+             with self.assertRaises(ValueError): self.cat._probe(self.cat.sources()[0])
+ 
++    def test_episodes_prefers_high_definition_and_paused_source_recovers(self):
++        row = {
++            'vod_play_from': 'sdline$$$1080P蓝光',
++            'vod_play_url': '第1集$https://cdn.example/sd/1.mp4#第2集$https://cdn.example/sd/2.mp4$$$第1集$https://cdn.example/1080/1.m3u8#第2集$https://cdn.example/1080/2.m3u8',
++        }
++        eps = catalog.Catalog._episodes(row)
++        self.assertEqual(len(eps), 2)
++        self.assertIn('1080/1.m3u8', eps[0]['url'])
++
++        with self.cat.connection() as c:
++            c.execute("UPDATE catalog_sources SET state='paused', failures=3, checked_at=999999 WHERE id='a'")
++        with mock.patch.object(self.cat, '_probe', return_value=(True, 80)):
++            self.cat.check_sources(now=1000, force=True)
++        src_a = next(x for x in self.cat.sources() if x['id'] == 'a')
++        self.assertEqual(src_a['state'], 'active')
++        self.assertTrue(src_a['enabled'])
++
+     def test_multiple_promotions_rollback_to_previous_whole_batch(self):
+         self.cat.ingest([{'api': 'https://b.example/api.php'}, {'api': 'https://c.example/api.php'}])
+         with mock.patch.object(self.cat, '_probe', return_value=(True, 10)):
+diff --git a/tests/test_safe_http.py b/tests/test_safe_http.py
+index 17f64d8..a4600bd 100644
+--- a/tests/test_safe_http.py
++++ b/tests/test_safe_http.py
+@@ -61,6 +61,15 @@ class SafeHttpTests(unittest.TestCase):
+             with self.assertRaisesRegex(ValueError, "too large"):
+                 safe_http.request("http://public.example/", max_bytes=4)
+ 
++    def test_resolve_public_prefers_ipv4_before_ipv6(self):
++        fake = [
++            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:4700:3034::1", 443, 0, 0)),
++            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("104.21.41.102", 443)),
++        ]
++        with mock.patch.object(socket, "getaddrinfo", return_value=fake):
++            _, _, addrs = safe_http.resolve_public("https://public.example/api.php")
++        self.assertEqual(addrs, ["104.21.41.102", "2606:4700:3034::1"])
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
