@@ -113,18 +113,45 @@ test('admin.html inline script parses cleanly and exposes online presence UI', (
   assert.ok(adminSource.includes('id="btnSaveGate"'));
 });
 
-test('v2.5.4 fixes novel covers, adds home horizontal swipe mode switching, and makes landscape skip modal sticky', () => {
+test('v2.5.5 fixes novel covers, adds home horizontal swipe mode switching, landscape skip modal, and admin message push with images', () => {
   const cssSource = fs.readFileSync('style.css', 'utf8');
   const htmlIdx = fs.readFileSync('index.html', 'utf8');
-  assert.ok(appSource.includes('const WEB_VERSION = "v2.5.4"'));
-  assert.ok(htmlIdx.includes('?v=20261127-v254'));
+  assert.ok(appSource.includes('const WEB_VERSION = "v2.5.5"'));
+  assert.ok(htmlIdx.includes('?v=20261127-v255'));
   assert.ok(appSource.includes('function syncOverlayHost('));
   assert.ok(appSource.includes('function bindHomeSwipeNavigation('));
+  assert.ok(appSource.includes('function resolveApiMediaUrl('));
+  assert.ok(appSource.includes('function runAdminMessageAction('));
+  assert.ok(appSource.includes('function maybeShowAdminPopup('));
+  assert.ok(appSource.includes('function renderAdminBannerHtml('));
+  assert.ok(appSource.includes('if (okBtn) okBtn.textContent = "确定"'));
   assert.ok(appSource.includes('referrerpolicy="no-referrer"'));
   assert.ok(appSource.includes('window._novelCovErr'));
   assert.ok(cssSource.includes('#modalBody'));
+  assert.ok(cssSource.includes('.admin-banner'));
+  assert.ok(cssSource.includes('.admin-msg-img'));
   assert.ok(cssSource.includes('@media (max-height: 520px)'));
   assert.ok(cssSource.includes('.skip-cfg-grid'));
+
+  // admin.html script parses cleanly and exposes message push + image upload UI
+  const adminScripts = [...adminSource.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+  assert.ok(adminScripts.length >= 2);
+  for (const s of adminScripts) assert.doesNotThrow(() => new vm.Script(s[1]));
+  for (const id of ['panel-messages', 'msgAudience', 'msgImageFile', 'msgImageUrl', 'msgImagePreview', 'btnSendAdminMsg', 'adminMsgTbody']) {
+    assert.ok(adminSource.includes(id), `admin.html missing ${id}`);
+  }
+  assert.ok(adminSource.includes('function syncMsgFormUi('));
+
+  // vm test resolveApiMediaUrl
+  const mediaStart = appSource.indexOf('function resolveApiMediaUrl(');
+  const mediaEnd = appSource.indexOf('function syncOverlayHost(', mediaStart);
+  const mediaCtx = { URL, window: { __NH_API_BASE__: 'https://node.example' } };
+  vm.createContext(mediaCtx);
+  vm.runInContext(appSource.slice(mediaStart, mediaEnd), mediaCtx);
+  assert.equal(mediaCtx.resolveApiMediaUrl('/api/messages/image/abcdef1234567890'), 'https://node.example/api/messages/image/abcdef1234567890');
+  assert.equal(mediaCtx.resolveApiMediaUrl('https://cdn.example/banner.png'), 'https://cdn.example/banner.png');
+  assert.equal(mediaCtx.resolveApiMediaUrl('javascript:alert(1)'), '');
+  assert.equal(mediaCtx.resolveApiMediaUrl('http://insecure.example/a.png'), '');
 
   const normStart = appSource.indexOf('function normalizeNovelCover(');
   const normEnd = appSource.indexOf('window._novelCovErr =', normStart);

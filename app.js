@@ -1,7 +1,7 @@
 /* ZY Player Web — 核心逻辑（Obsidian Cinema & Warm Amber 矢量设计版） */
 "use strict";
 
-const WEB_VERSION = "v2.5.4";
+const WEB_VERSION = "v2.5.5";
 
 /* ============ 本地存储（复用 APK 存储键，本地解锁 VIP/God） ============ */
 const K = {
@@ -177,6 +177,17 @@ async function migrateLegacySources(extra) {
 /* ============ 工具 ============ */
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function resolveApiMediaUrl(url) {
+  const s = String(url || "").trim();
+  if (!s) return "";
+  if (s.startsWith("/api/")) return ((typeof window !== "undefined" && window.__NH_API_BASE__) || "") + s;
+  try {
+    const u = new URL(s);
+    return u.protocol === "https:" ? s : "";
+  } catch {
+    return "";
+  }
+}
 function syncOverlayHost(el) {
   if (!el) return;
   const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
@@ -196,12 +207,24 @@ function modal(title, bodyHtml) {
     const m = $("#modal");
     syncOverlayHost(m);
     if (typeof _fsUiTimer !== "undefined" && _fsUiTimer) { clearTimeout(_fsUiTimer); _fsUiTimer = null; }
+    const okBtn = $("#modalOk");
+    const cancelBtn = $("#modalCancel");
+    if (okBtn) okBtn.textContent = "确定";
+    if (cancelBtn) {
+      cancelBtn.textContent = "取消";
+      cancelBtn.style.display = "";
+    }
     $("#modalTitle").textContent = title;
     $("#modalBody").innerHTML = bodyHtml;
     m.classList.remove("hidden");
-    const ok = () => { m.classList.add("hidden"); $("#modalOk").onclick = $("#modalCancel").onclick = null; resolve(true); };
-    const cancel = () => { m.classList.add("hidden"); $("#modalOk").onclick = $("#modalCancel").onclick = null; resolve(false); };
-    $("#modalOk").onclick = ok; $("#modalCancel").onclick = cancel;
+    const resetBtns = () => {
+      if (okBtn) { okBtn.textContent = "确定"; okBtn.onclick = null; }
+      if (cancelBtn) { cancelBtn.textContent = "取消"; cancelBtn.style.display = ""; cancelBtn.onclick = null; }
+    };
+    const ok = () => { m.classList.add("hidden"); resetBtns(); resolve(true); };
+    const cancel = () => { m.classList.add("hidden"); resetBtns(); resolve(false); };
+    if (okBtn) okBtn.onclick = ok;
+    if (cancelBtn) cancelBtn.onclick = cancel;
   });
 }
 const CORS_PROXIES = [
@@ -295,6 +318,7 @@ function closePlayer(fromPop = false) {
       history.back();
     }
   }
+  if (typeof flushPendingAdminPopup === "function") setTimeout(flushPendingAdminPopup, 260);
 }
 function closeReader() {
   stopNovelTts();
@@ -304,6 +328,7 @@ function closeReader() {
   $("#readerLayer").classList.add("hidden");
   document.body.style.overflow = "";
   syncModeFab();
+  if (typeof flushPendingAdminPopup === "function") setTimeout(flushPendingAdminPopup, 260);
 }
 function goBack(fromPop = false) {
   if (typeof cancelActiveSearch === "function") cancelActiveSearch(true);
@@ -1554,6 +1579,7 @@ function renderMusicDiscover() {
   const relArtists = mIsSearch ? extractArtistsFromSongs(filtered, 8) : [];
   $("#view").innerHTML = `
     ${typeof renderTrialBannerHtml === "function" ? renderTrialBannerHtml() : ""}
+    <div id="adminBannerSlot">${typeof renderAdminBannerHtml === "function" ? renderAdminBannerHtml(false) : ""}</div>
     <div class="m-chips">${MUSIC_CHARTS.map((c) => `<button class="m-chip ${!mIsSearch && curChart === c.id ? "active" : ""}" data-id="${c.id}">${c.name}</button>`).join("")}</div>
     ${mIsSearch ? `
       <div class="m-search-bar">
@@ -1571,6 +1597,7 @@ function renderMusicDiscover() {
     </div>
     <div id="mListWrap"></div>`;
   $("#mBrSel").onchange = (e) => changeBr(e.target.value);
+  if (typeof bindAdminBanners === "function") bindAdminBanners($("#view"));
   document.querySelectorAll(".m-chip[data-id]").forEach((el) => el.onclick = () => { mIsSearch = false; discoverList = []; loadChart(el.dataset.id); });
   if (mIsSearch) {
     $("#mBackChartBtn")?.addEventListener("click", () => { mIsSearch = false; discoverList = []; loadChart(curChart); });
@@ -1911,11 +1938,13 @@ function renderHome() {
   const hasCached = cachedItems.length > 0;
   $('#view').innerHTML=`
     ${typeof renderTrialBannerHtml === "function" ? renderTrialBannerHtml() : ""}
+    <div id="adminBannerSlot">${typeof renderAdminBannerHtml === "function" ? renderAdminBannerHtml(false) : ""}</div>
     ${rows.length?`<div class="section-title" style="justify-content:space-between"><span>${ico('clock')} 继续观看</span><div><button class="btn ghost" id="manageHistory">管理</button><button class="btn ghost" id="clearHistory">清空</button></div></div><div class="grid" id="histGrid"></div>`:''}
     ${renderAdSlotHtml('home')}
     ${likes.length?`<div class="section-title">${ico('heart')} 我的片单</div><div class="grid" id="likeGrid"></div>`:''}
     <div class="section-title" style="justify-content:space-between"><span>${ico('film')} 最近更新</span><button class="btn ghost" id="refreshHomeVod" type="button" style="padding:3px 9px;font-size:11.5px">刷新</button></div>
     <div class="grid" id="homeGrid">${hasCached ? '' : renderSkeletonHtml('grid', 12, true)}</div>`;
+  if (typeof bindAdminBanners === "function") bindAdminBanners($('#view'));
   if(rows.length) {
     paintGrid($('#histGrid'),rows.slice(0,12).map(x=>({...x,_fromHistory:true,remark:getProgress(NovaHistory.key(x))?`第${getProgress(NovaHistory.key(x)).idx+1}集 ${fmt(getProgress(NovaHistory.key(x)).time)}`:x.remark})));
     $('#manageHistory').onclick=()=>renderHistoryManager();
@@ -3941,6 +3970,7 @@ async function searchNovel(q) {
 function renderNovelStore(skipAutoLoad = false) {
   $("#view").innerHTML = `
     ${typeof renderTrialBannerHtml === "function" ? renderTrialBannerHtml() : ""}
+    <div id="adminBannerSlot">${typeof renderAdminBannerHtml === "function" ? renderAdminBannerHtml(false) : ""}</div>
     <div class="m-chips">${NOVEL_CATS.map((c) => `<button class="m-chip ${!novelIsSearch && curNovelCat === c.id ? "active" : ""}" data-cat="${esc(c.id)}">${esc(c.name)}</button>`).join("")}</div>
     ${renderAdSlotHtml('novel')}
     <div class="section-title" style="justify-content:space-between">
@@ -3948,6 +3978,7 @@ function renderNovelStore(skipAutoLoad = false) {
     </div>
     <div id="nStoreWrap"></div>`;
   bindAdSlots($("#view"));
+  if (typeof bindAdminBanners === "function") bindAdminBanners($("#view"));
   document.querySelectorAll(".m-chip[data-cat]").forEach((el) => {
     el.onclick = () => {
       const targetCat = el.dataset.cat;
@@ -4533,11 +4564,14 @@ let _lastCloudPullAt = 0;
 async function sendPresenceHeartbeat() {
   if (!NH.user || !NH.token) return;
   try {
-    await nhApi("/api/auth/heartbeat", "POST", {
+    const d = await nhApi("/api/auth/heartbeat", "POST", {
       device_id: getDeviceId(),
       client_type: isAppClient() ? "app" : "web",
       device_info: getDeviceInfo(),
     });
+    if (d && d.notif_digest && typeof applyNotifDigest === "function") {
+      applyNotifDigest(d.notif_digest);
+    }
   } catch {}
 }
 function sendPresenceLogout() {
@@ -4559,7 +4593,7 @@ setInterval(() => {
   if (typeof document !== "undefined" && document.visibilityState === "visible" && NH.user && NH.token) {
     sendPresenceHeartbeat();
   }
-}, 60000);
+}, 45000);
 
 function sanitizeDownloadName(name, fallback = "novahub-media") {
   const cleaned = String(name || "").replace(/[\\/:*?"<>|\r\n\x00-\x1f]+/g, "_").trim();
@@ -4745,7 +4779,16 @@ async function loadSiteConfig() {
     NH.cfg = cfg;
     NH.offline = false;
     set("nh_site_cfg", cfg);
+    if (typeof _publicAnnouncements !== "undefined") {
+      _publicAnnouncements = Array.isArray(cfg.public_announcements) ? cfg.public_announcements : [];
+    }
     if (typeof syncAccessGate === "function") syncAccessGate();
+    const gSlot = $("#gateNoticeSlot");
+    if (gSlot && typeof renderAdminBannerHtml === "function") {
+      gSlot.innerHTML = renderAdminBannerHtml(true);
+      if (typeof bindAdminBanners === "function") bindAdminBanners(gSlot);
+    }
+    if (typeof refreshHomeAdminBanner === "function") refreshHomeAdminBanner();
     if (!viewStack.length && hasActiveAccess() && (currentRoute === "home" || currentRoute === "n_store" || currentRoute === "m_discover")) {
       routes[currentRoute]();
     }
@@ -4867,6 +4910,7 @@ function renderAccessGate(layer) {
     const isReg = _gateTab === "register";
     layer.innerHTML = `
       <div class="gate-card">
+        <div id="gateNoticeSlot">${typeof renderAdminBannerHtml === "function" ? renderAdminBannerHtml(true) : ""}</div>
         <div class="gate-brand">
           <div class="gate-brand-ico">${ico("brand")}</div>
           <div>
@@ -4898,6 +4942,7 @@ function renderAccessGate(layer) {
     layer.querySelectorAll("[data-gtab]").forEach((btn) => {
       btn.onclick = () => { _gateTab = btn.dataset.gtab; renderAccessGate(layer); };
     });
+    if (typeof bindAdminBanners === "function") bindAdminBanners(layer);
     const doSubmit = async () => {
       const username = $("#gateAuthUser")?.value.trim();
       const password = $("#gateAuthPwd")?.value.trim();
@@ -4963,6 +5008,7 @@ function renderAccessGate(layer) {
 
   layer.innerHTML = `
     <div class="gate-card">
+      <div id="gateNoticeSlot">${typeof renderAdminBannerHtml === "function" ? renderAdminBannerHtml(true) : ""}</div>
       <div class="gate-brand">
         <div class="gate-brand-ico">${ico("crown")}</div>
         <div>
@@ -4987,10 +5033,15 @@ function renderAccessGate(layer) {
         ${qrImg ? `<img class="gate-qr-img" src="${esc(qrImg)}" alt="客服或领码二维码" loading="lazy">` : ""}
       </div>
       <div class="gate-foot-actions">
-        <button type="button" id="gateRefreshBtn" class="btn ghost" style="flex:1">刷新权限状态</button>
+        <button type="button" id="gateInboxBtn" class="btn ghost" style="flex:1">站内消息</button>
+        <button type="button" id="gateRefreshBtn" class="btn ghost" style="flex:1">刷新状态</button>
         <button type="button" id="gateLogoutBtn" class="btn ghost" style="flex:1">切换账号</button>
       </div>
     </div>`;
+  if (typeof bindAdminBanners === "function") bindAdminBanners(layer);
+  $("#gateInboxBtn")?.addEventListener("click", () => {
+    if (typeof openNotificationCenter === "function") openNotificationCenter();
+  });
 
   $("#gateRedeemBtn").onclick = async () => {
     const code = $("#gateRedeemIn")?.value.trim();
@@ -5513,6 +5564,235 @@ async function toggleWatchNotify(itemType, itemKey, nextEnabled, title = "", met
     toast("设置失败：" + (e.message || "网络异常"));
   }
 }
+const ADMIN_MSG_LABELS = { notice: "系统公告", activity: "活动福利", maintenance: "维护提醒", direct: "站长私信" };
+const ADMIN_ACT_DEFAULTS = { redeem: "立即兑换卡密", hotfix: "立即刷新热更新", route: "立即前往", url: "查看详情" };
+let _notifDigest = { unread_count: 0, latest_popup: null, banners: [] };
+let _publicAnnouncements = Array.isArray(NH.cfg?.public_announcements) ? NH.cfg.public_announcements : [];
+let _pendingAdminPopup = null;
+const _shownAdminPopupIds = new Set();
+
+function getAdminMsgDismissedPub() {
+  const arr = get("nh_dismissed_pub_msgs", []);
+  return Array.isArray(arr) ? arr.map(String) : [];
+}
+function dismissPubAnnouncement(id) {
+  const sid = String(id || "");
+  if (!sid) return;
+  const list = [sid, ...getAdminMsgDismissedPub().filter((x) => x !== sid)].slice(0, 30);
+  set("nh_dismissed_pub_msgs", list);
+}
+function markSingleNotifRead(item) {
+  if (!item || !item.id || item.read || !NH.user || !NH.token) return;
+  item.read = true;
+  if (_notifDigest && Array.isArray(_notifDigest.banners)) {
+    _notifDigest.banners = _notifDigest.banners.filter((b) => b.id !== item.id);
+  }
+  refreshHomeAdminBanner();
+  nhApi("/api/notifications/read", "POST", { id: item.id }).then((r) => {
+    const cnt = Number(r?.unread_count);
+    if (Number.isFinite(cnt)) {
+      _notifData.unread_count = cnt;
+      _notifDigest.unread_count = cnt;
+      updateNotifBadge(cnt);
+    }
+  }).catch(() => {});
+}
+function runAdminMessageAction(meta) {
+  if (!meta || !meta.action_type || meta.action_type === "none") return;
+  const act = meta.action_type;
+  const val = String(meta.action_value || "").trim();
+  if (act === "redeem") {
+    if (typeof openRedeemModal === "function") openRedeemModal();
+  } else if (act === "hotfix") {
+    toast("正在获取最新热更新…");
+    setTimeout(() => location.replace(location.pathname + "?t=" + Date.now()), 250);
+  } else if (act === "route") {
+    if (val === "me") {
+      go("me");
+    } else if (["vod", "music", "novel"].includes(val) && typeof switchMode === "function") {
+      switchMode(val);
+    }
+  } else if (act === "url") {
+    try {
+      const u = new URL(val);
+      if (u.protocol === "https:") window.open(val, "_blank", "noopener,noreferrer");
+    } catch {}
+  }
+}
+async function openAdminMessageDetail(item, opts = {}) {
+  if (!item) return;
+  const meta = item.meta || {};
+  const msgType = meta.msg_type || "notice";
+  const typeLbl = ADMIN_MSG_LABELS[msgType] || "官方消息";
+  const imgSrc = resolveApiMediaUrl(meta.image_url || "");
+  const actType = meta.action_type || "none";
+  const actLabel = meta.action_label || ADMIN_ACT_DEFAULTS[actType] || "立即前往";
+  const hasAction = actType !== "none";
+  const bodyHtml = `
+    <div style="margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <span class="admin-msg-tag type-${esc(msgType)}">${esc(typeLbl)}</span>
+      <span style="font-size:11.5px;color:var(--muted)">${item.created_at ? new Date(item.created_at * 1000).toLocaleString() : ""}</span>
+    </div>
+    <div class="admin-popup-body">${esc(item.message || "")}</div>
+    ${imgSrc ? `<img class="admin-msg-img" referrerpolicy="no-referrer" src="${esc(imgSrc)}" alt="推送配图" onclick="window.open(this.src,'_blank','noopener,noreferrer')" onerror="this.style.display='none'">` : ""}`;
+  const p = modal(item.title || typeLbl, bodyHtml);
+  if ($("#modalOk")) $("#modalOk").textContent = hasAction ? actLabel : "知道了";
+  if ($("#modalCancel")) {
+    if (hasAction) {
+      $("#modalCancel").textContent = "关闭";
+      $("#modalCancel").style.display = "";
+    } else {
+      $("#modalCancel").style.display = "none";
+    }
+  }
+  const confirmed = await p;
+  if (opts.markRead !== false) {
+    if (item._isPublicGuest) dismissPubAnnouncement(item.id);
+    else markSingleNotifRead(item);
+  }
+  if (confirmed && hasAction) runAdminMessageAction(meta);
+}
+function isBlockingOverlayOpen() {
+  const vis = (sel) => {
+    const el = $(sel);
+    return !!(el && !el.classList.contains("hidden"));
+  };
+  return vis("#playerLayer") || vis("#readerLayer") || vis("#accessGateLayer") || vis("#modal");
+}
+function maybeShowAdminPopup(item) {
+  if (!item || !item.id || _shownAdminPopupIds.has(item.id)) return;
+  if (isBlockingOverlayOpen()) {
+    _pendingAdminPopup = item;
+    return;
+  }
+  _pendingAdminPopup = null;
+  _shownAdminPopupIds.add(item.id);
+  openAdminMessageDetail(item, { markRead: true });
+}
+function flushPendingAdminPopup() {
+  if (!_pendingAdminPopup) return;
+  if (isBlockingOverlayOpen()) return;
+  const item = _pendingAdminPopup;
+  _pendingAdminPopup = null;
+  maybeShowAdminPopup(item);
+}
+function getActiveBanners(forGuest = false) {
+  const list = [];
+  const seenKey = new Set();
+  if (NH.user && Array.isArray(_notifDigest.banners)) {
+    for (const b of _notifDigest.banners) {
+      const m = b.meta || {};
+      const k = String(m.msg_id || b.id);
+      if (seenKey.has(k)) continue;
+      seenKey.add(k);
+      list.push(b);
+    }
+  }
+  if (forGuest || !NH.user) {
+    const dismissed = new Set(getAdminMsgDismissedPub());
+    for (const p of (_publicAnnouncements || [])) {
+      const k = String(p.id);
+      if (dismissed.has(k) || seenKey.has(k)) continue;
+      seenKey.add(k);
+      list.push({
+        id: p.id,
+        item_type: "admin",
+        title: p.title,
+        message: p.message,
+        created_at: p.created_at,
+        _isPublicGuest: true,
+        meta: {
+          msg_id: p.id,
+          msg_type: p.msg_type || "notice",
+          display_mode: p.display_mode || "banner",
+          image_url: p.image_url || "",
+          action_type: p.action_type || "none",
+          action_label: p.action_label || "",
+          action_value: p.action_value || "",
+        },
+      });
+    }
+  }
+  return list.slice(0, 2);
+}
+function renderAdminBannerHtml(forGuest = false) {
+  const list = getActiveBanners(forGuest);
+  if (!list.length) return "";
+  return list.map((b, idx) => {
+    const m = b.meta || {};
+    const t = m.msg_type || "notice";
+    const tName = ADMIN_MSG_LABELS[t] || "公告";
+    const imgSrc = resolveApiMediaUrl(m.image_url || "");
+    const hasAct = m.action_type && m.action_type !== "none";
+    const actLbl = m.action_label || ADMIN_ACT_DEFAULTS[m.action_type] || "查看";
+    return `<div class="admin-banner type-${esc(t)}" data-ab-idx="${idx}" data-ab-guest="${forGuest ? "1" : "0"}">
+      ${imgSrc ? `<img class="admin-banner-thumb" referrerpolicy="no-referrer" src="${esc(imgSrc)}" alt="公告图" onerror="this.style.display='none'">` : ""}
+      <div class="admin-banner-main">
+        <div class="admin-banner-title-row">
+          <span class="admin-msg-tag type-${esc(t)}">${esc(tName)}</span>
+          <span class="admin-banner-title">${esc(b.title || "通知")}</span>
+        </div>
+        <div class="admin-banner-desc">${esc(b.message || "")}</div>
+      </div>
+      <div class="admin-banner-actions">
+        ${hasAct ? `<button type="button" class="admin-banner-act" data-ab-act="1">${esc(actLbl)}</button>` : ""}
+        <button type="button" class="admin-banner-close" data-ab-close="1" aria-label="关闭通知">×</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+function bindAdminBanners(root) {
+  if (!root || !root.querySelectorAll) return;
+  root.querySelectorAll(".admin-banner[data-ab-idx]").forEach((el) => {
+    const forGuest = el.dataset.abGuest === "1";
+    const list = getActiveBanners(forGuest);
+    const item = list[Number(el.dataset.abIdx)];
+    if (!item) return;
+    const dismissOnly = () => {
+      if (item._isPublicGuest) dismissPubAnnouncement(item.id);
+      else markSingleNotifRead(item);
+      el.remove();
+    };
+    el.querySelector("[data-ab-close]")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      dismissOnly();
+    });
+    el.querySelector("[data-ab-act]")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      dismissOnly();
+      runAdminMessageAction(item.meta || {});
+    });
+    const openDetail = () => openAdminMessageDetail(item, { markRead: true });
+    el.querySelector(".admin-banner-main")?.addEventListener("click", openDetail);
+    el.querySelector(".admin-banner-thumb")?.addEventListener("click", openDetail);
+  });
+}
+function refreshHomeAdminBanner() {
+  const slot = $("#adminBannerSlot");
+  if (slot) {
+    slot.innerHTML = renderAdminBannerHtml(false);
+    bindAdminBanners(slot);
+  }
+}
+function applyNotifDigest(digest) {
+  if (!digest || typeof digest !== "object") return;
+  _notifDigest = {
+    unread_count: Math.max(0, Number(digest.unread_count) || 0),
+    latest_popup: digest.latest_popup || null,
+    banners: Array.isArray(digest.banners) ? digest.banners : [],
+  };
+  _notifData.unread_count = _notifDigest.unread_count;
+  updateNotifBadge(_notifDigest.unread_count);
+  refreshHomeAdminBanner();
+  const gSlot = $("#gateNoticeSlot");
+  if (gSlot) {
+    gSlot.innerHTML = renderAdminBannerHtml(true);
+    bindAdminBanners(gSlot);
+  }
+  if (_notifDigest.latest_popup) {
+    maybeShowAdminPopup(_notifDigest.latest_popup);
+  }
+}
 function updateNotifBadge(unreadCount) {
   const btn = $("#btnNotif"), badge = $("#notifBadge");
   if (!btn) return;
@@ -5526,12 +5806,14 @@ async function refreshNotifications(silent = true) {
   updateNotifBadge(_notifData.unread_count);
   if (!NH.user || !NH.token) {
     _notifData = { unread_count: 0, items: [] };
+    _notifDigest = { unread_count: 0, latest_popup: null, banners: [] };
     updateNotifBadge(0);
+    refreshHomeAdminBanner();
     return _notifData;
   }
   try {
     const [notifRes, prefsRes] = await Promise.all([
-      nhApi("/api/notifications?limit=40"),
+      nhApi("/api/notifications?limit=50"),
       nhApi("/api/notifications/prefs").catch(() => null),
     ]);
     _notifData = {
@@ -5542,7 +5824,11 @@ async function refreshNotifications(silent = true) {
       _watchPrefs.clear();
       prefsRes.items.forEach((x) => _watchPrefs.set(`${x.item_type}:${x.item_key}`, !!x.notify_enabled));
     }
-    updateNotifBadge(_notifData.unread_count);
+    if (notifRes && notifRes.digest) {
+      applyNotifDigest(notifRes.digest);
+    } else {
+      updateNotifBadge(_notifData.unread_count);
+    }
   } catch (e) {
     if (!silent) toast("获取通知失败：" + (e.message || "网络异常"));
   }
@@ -5550,40 +5836,65 @@ async function refreshNotifications(silent = true) {
 }
 async function openNotificationCenter() {
   if (!NH.user) {
-    toast("请先登录账号查看更新提醒");
+    toast("请先登录账号查看消息通知");
     if (typeof openAuthModal === "function") openAuthModal("login");
     return;
   }
   await refreshNotifications(true);
+  let curFilter = "all"; // all | admin | watch
   const renderModalHtml = () => {
-    const items = _notifData.items || [];
+    const rawItems = _notifData.items || [];
+    const items = rawItems.filter((n) => curFilter === "all" ? true : (curFilter === "admin" ? n.item_type === "admin" : n.item_type !== "admin"));
     const listHtml = items.length
-      ? items.map((n, idx) => `
-          <button type="button" class="notif-item ${n.read ? "" : "unread"}" data-nidx="${idx}">
+      ? items.map((n) => {
+          const origIdx = rawItems.indexOf(n);
+          const m = n.meta || {};
+          const isAdmin = n.item_type === "admin";
+          const tagCls = isAdmin ? `admin-msg-tag type-${esc(m.msg_type || "notice")}` : `badge ${n.item_type === "vod" ? "" : "gray"}`;
+          const tagText = isAdmin ? (ADMIN_MSG_LABELS[m.msg_type] || "官方消息") : (n.item_type === "vod" ? "影视" : "小说");
+          const imgSrc = isAdmin ? resolveApiMediaUrl(m.image_url || "") : "";
+          return `<button type="button" class="notif-item ${n.read ? "" : "unread"}" data-nidx="${origIdx}">
             <div class="notif-item-head">
-              <span>${esc(n.title || "收藏作品")}</span>
-              <span class="badge ${n.item_type === "vod" ? "" : "gray"}">${n.item_type === "vod" ? "影视" : "小说"}</span>
+              <span>${esc(n.title || "通知消息")}</span>
+              <span class="${tagCls}">${esc(tagText)}</span>
             </div>
-            <div class="notif-item-msg">${esc(n.message || "有新内容更新")}</div>
+            <div class="notif-item-msg" style="${isAdmin ? "color:var(--text-2);white-space:pre-line" : ""}">${esc(n.message || "有新内容更新")}</div>
+            ${imgSrc ? `<img class="notif-item-thumb" referrerpolicy="no-referrer" src="${esc(imgSrc)}" alt="配图" onerror="this.style.display='none'">` : ""}
             <div class="notif-item-sub">${n.created_at ? new Date(n.created_at * 1000).toLocaleString() : ""}${n.read ? " · 已读" : " · 未读"}</div>
-          </button>`).join("")
-      : `<div class="empty" style="padding:26px 10px">暂无更新提醒<br>收藏的剧集或书架小说有新更新时将在此显示</div>`;
+          </button>`;
+        }).join("")
+      : `<div class="empty" style="padding:26px 10px">暂无相关消息<br>站内公告、专属通知与追更提醒都会显示在这里</div>`;
     return `
-      <div style="display:flex;gap:8px;justify-content:space-between;margin-bottom:6px">
-        <button id="notifCheckNowBtn" class="btn primary" type="button" style="flex:1;padding:7px 10px;font-size:12.5px">立即检查更新</button>
+      <div style="display:flex;gap:8px;justify-content:space-between;margin-bottom:8px">
+        <button id="notifCheckNowBtn" class="btn primary" type="button" style="flex:1;padding:7px 10px;font-size:12.5px">检查追剧更新</button>
         <button id="notifReadAllBtn" class="btn ghost" type="button" style="padding:7px 10px;font-size:12.5px">全部已读</button>
+      </div>
+      <div class="notif-tabs">
+        <button type="button" class="notif-tab ${curFilter === "all" ? "active" : ""}" data-nfilter="all">全部 (${rawItems.length})</button>
+        <button type="button" class="notif-tab ${curFilter === "admin" ? "active" : ""}" data-nfilter="admin">官方消息 (${rawItems.filter((x) => x.item_type === "admin").length})</button>
+        <button type="button" class="notif-tab ${curFilter === "watch" ? "active" : ""}" data-nfilter="watch">追更提醒 (${rawItems.filter((x) => x.item_type !== "admin").length})</button>
       </div>
       <div id="notifModalList" class="notif-list">${listHtml}</div>`;
   };
 
-  const p = modal("更新提醒中心", renderModalHtml());
+  const p = modal("消息与更新中心", renderModalHtml());
   const bindEvents = () => {
+    document.querySelectorAll("[data-nfilter]").forEach((btn) => {
+      btn.onclick = () => {
+        curFilter = btn.dataset.nfilter || "all";
+        $("#modalBody").innerHTML = renderModalHtml();
+        bindEvents();
+      };
+    });
     $("#notifReadAllBtn")?.addEventListener("click", async () => {
       try {
         const res = await nhApi("/api/notifications/read", "POST", { id: 0 });
         _notifData.unread_count = Number(res.unread_count) || 0;
         _notifData.items = (_notifData.items || []).map((x) => ({ ...x, read: true }));
+        _notifDigest.unread_count = _notifData.unread_count;
+        _notifDigest.banners = [];
         updateNotifBadge(_notifData.unread_count);
+        refreshHomeAdminBanner();
         $("#modalBody").innerHTML = renderModalHtml();
         bindEvents();
         toast("已全部标记为已读");
@@ -5601,21 +5912,24 @@ async function openNotificationCenter() {
         toast(`已检查 ${res.checked || 0} 部作品，发现 ${res.updated || 0} 项更新`);
       } catch (e) {
         toast(e.message || "检查失败");
-        if (btn) { btn.disabled = false; btn.textContent = "立即检查更新"; }
+        if (btn) { btn.disabled = false; btn.textContent = "检查追剧更新"; }
       }
     });
     $("#notifModalList")?.querySelectorAll("[data-nidx]").forEach((el) => {
       el.onclick = () => {
         const item = _notifData.items[+el.dataset.nidx];
         if (!item) return;
-        if (!item.read) {
-          nhApi("/api/notifications/read", "POST", { id: item.id }).then((r) => {
-            item.read = true;
-            updateNotifBadge(r.unread_count);
-          }).catch(() => {});
-        }
+        markSingleNotifRead(item);
         $("#modalOk")?.click();
         const meta = item.meta || {};
+        if (item.item_type === "admin") {
+          setTimeout(() => openAdminMessageDetail(item, { markRead: false }), 35);
+          return;
+        }
+        if (!hasActiveAccess()) {
+          toast("体验已到期，请先兑换卡密解锁后再观看", 2400);
+          return;
+        }
         if (item.item_type === "vod" && meta.srcId && meta.id) {
           if (appMode !== "vod") switchMode("vod", "home");
           openDetail({ srcId: meta.srcId, id: meta.id, name: meta.name || item.title, pic: meta.pic || "" });

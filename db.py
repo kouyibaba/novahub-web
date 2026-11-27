@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -125,8 +126,38 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_trial_grants_dev ON trial_grants(device_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_trial_grants_ip ON trial_grants(ip, created_at);
+            CREATE TABLE IF NOT EXISTS admin_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                msg_type TEXT NOT NULL DEFAULT 'notice',
+                display_mode TEXT NOT NULL DEFAULT 'inbox',
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                image_url TEXT NOT NULL DEFAULT '',
+                action_type TEXT NOT NULL DEFAULT 'none',
+                action_label TEXT NOT NULL DEFAULT '',
+                action_value TEXT NOT NULL DEFAULT '',
+                audience TEXT NOT NULL DEFAULT 'all',
+                target_usernames TEXT NOT NULL DEFAULT '',
+                show_on_guest INTEGER NOT NULL DEFAULT 0,
+                include_new_users INTEGER NOT NULL DEFAULT 1,
+                expire_at INTEGER NOT NULL DEFAULT 0,
+                revoked_at INTEGER NOT NULL DEFAULT 0,
+                sent_count INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_admin_msg_active ON admin_messages(revoked_at, expire_at, created_at);
+            CREATE TABLE IF NOT EXISTS admin_message_images (
+                id TEXT PRIMARY KEY,
+                mime TEXT NOT NULL,
+                data BLOB NOT NULL,
+                size INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
             """
         )
+        am_cols = {r["name"] for r in c.execute("PRAGMA table_info(admin_messages)").fetchall()}
+        if "image_url" not in am_cols:
+            c.execute("ALTER TABLE admin_messages ADD COLUMN image_url TEXT NOT NULL DEFAULT ''")
         cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
         if "trial_expire_at" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN trial_expire_at INTEGER NOT NULL DEFAULT 0")
@@ -331,6 +362,7 @@ def register_user(username, password, device_id="", ip=""):
                 "INSERT INTO trial_grants(user_id, device_id, ip, days, created_at) VALUES(?, ?, ?, ?, ?)",
                 (uid, dev, cip, t_days, now),
             )
+        deliver_active_broadcasts_to_user(uid, conn=c)
         row = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     user = _format_user(row, gate_enabled=gate_enabled)
     user["trial_granted"] = trial_granted
@@ -677,22 +709,32 @@ def record_watch_check(item_type, item_key, new_count, new_marker=""):
 
 
 def list_notifications(user_id, unread_only=False, limit=50):
-    """查询用户站内更新通知列表与未读数量。"""
+    """查询用户站内更新通知与管理员推送列表，自动过滤已撤回推送。"""
     uid = int(user_id)
     lim = max(1, min(100, int(limit or 50)))
+    now = int(time.time())
+    valid_cond = "(n.item_type != 'admin' OR (am.id IS NOT NULL AND am.revoked_at = 0))"
     with _DB_LOCK, _conn() as c:
         unread_count = c.execute(
-            "SELECT COUNT(*) FROM user_notifications WHERE user_id=? AND read_at=0",
+            f"""
+            SELECT COUNT(*)
+            FROM user_notifications n
+            LEFT JOIN admin_messages am ON n.item_type='admin' AND n.item_key=CAST(am.id AS TEXT)
+            WHERE n.user_id=? AND n.read_at=0 AND {valid_cond}
+            """,
             (uid,),
         ).fetchone()[0]
-        where = "user_id=? AND read_at=0" if unread_only else "user_id=?"
+        read_cond = "n.user_id=? AND n.read_at=0" if unread_only else "n.user_id=?"
         rows = c.execute(
             f"""
             SELECT n.id, n.item_type, n.item_key, n.title, n.message, n.delta_count, n.read_at, n.created_at,
-                   w.meta_json
+                   w.meta_json,
+                   am.id AS am_id, am.msg_type, am.display_mode, am.image_url,
+                   am.action_type, am.action_label, am.action_value, am.expire_at
             FROM user_notifications n
             LEFT JOIN user_watch_items w ON w.user_id=n.user_id AND w.item_type=n.item_type AND w.item_key=n.item_key
-            WHERE n.{where}
+            LEFT JOIN admin_messages am ON n.item_type='admin' AND n.item_key=CAST(am.id AS TEXT)
+            WHERE {read_cond} AND {valid_cond}
             ORDER BY n.read_at ASC, n.created_at DESC, n.id DESC
             LIMIT ?
             """,
@@ -704,6 +746,19 @@ def list_notifications(user_id, unread_only=False, limit=50):
             meta = json.loads(r["meta_json"] or "{}")
         except Exception:
             meta = {}
+        if r["item_type"] == "admin":
+            exp_at = int(r["expire_at"] or 0)
+            meta = {
+                "msg_id": r["am_id"],
+                "msg_type": r["msg_type"] or "notice",
+                "display_mode": r["display_mode"] or "inbox",
+                "image_url": r["image_url"] or "",
+                "action_type": r["action_type"] or "none",
+                "action_label": r["action_label"] or "",
+                "action_value": r["action_value"] or "",
+                "expire_at": exp_at,
+                "is_expired": bool(exp_at and exp_at <= now),
+            }
         items.append({
             "id": r["id"],
             "item_type": r["item_type"],
@@ -729,7 +784,16 @@ def mark_notifications_read(user_id, notif_id=0):
             c.execute("UPDATE user_notifications SET read_at=? WHERE id=? AND user_id=? AND read_at=0", (now, nid, uid))
         else:
             c.execute("UPDATE user_notifications SET read_at=? WHERE user_id=? AND read_at=0", (now, uid))
-        unread_count = c.execute("SELECT COUNT(*) FROM user_notifications WHERE user_id=? AND read_at=0", (uid,)).fetchone()[0]
+        unread_count = c.execute(
+            """
+            SELECT COUNT(*)
+            FROM user_notifications n
+            LEFT JOIN admin_messages am ON n.item_type='admin' AND n.item_key=CAST(am.id AS TEXT)
+            WHERE n.user_id=? AND n.read_at=0
+              AND (n.item_type != 'admin' OR (am.id IS NOT NULL AND am.revoked_at = 0))
+            """,
+            (uid,),
+        ).fetchone()[0]
     return unread_count
 
 
@@ -781,6 +845,7 @@ def get_public_config():
         "redeem_guide_tip": cfg.get("redeem_guide_tip", DEFAULT_SITE_CONFIG["redeem_guide_tip"]),
         "redeem_buy_url": cfg.get("redeem_buy_url", ""),
         "redeem_qr_image": cfg.get("redeem_qr_image", ""),
+        "public_announcements": list_public_announcements(3),
     }
 
 
@@ -1204,3 +1269,451 @@ def delete_unused_code(code_str):
         if row["used_by"] is not None:
             raise ValueError("已核销的卡密不可删除")
         c.execute("DELETE FROM redeem_codes WHERE code=?", (code,))
+
+
+# ---------- 管理后台客户端消息推送与配图存储 ----------
+ADMIN_MSG_TYPES = ("notice", "activity", "maintenance", "direct")
+ADMIN_DISPLAY_MODES = ("inbox", "banner", "popup")
+ADMIN_ACTION_TYPES = ("none", "redeem", "hotfix", "route", "url")
+ADMIN_AUDIENCES = ("all", "trial", "expired", "pro", "online", "users")
+ADMIN_ACTION_ROUTES = ("vod", "music", "novel", "me")
+MAX_ADMIN_IMAGE_BYTES = 1_572_864
+
+
+def detect_image_mime(raw: bytes) -> str:
+    """按文件二进制魔数识别安全图片格式（仅允许 JPEG/PNG/WebP/GIF）。"""
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) < 12:
+        return ""
+    head = bytes(raw[:16])
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def admin_save_message_image(raw: bytes) -> dict:
+    """校验并持久化管理员上传的推送配图，返回站内图片访问路径。"""
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) == 0:
+        raise ValueError("图片内容不能为空")
+    data = bytes(raw)
+    if len(data) > MAX_ADMIN_IMAGE_BYTES:
+        raise ValueError("图片体积不能超过 1.5MB")
+    mime = detect_image_mime(data)
+    if not mime:
+        raise ValueError("仅支持 PNG、JPG、WebP、GIF 格式图片")
+    img_id = secrets.token_hex(10)
+    now = int(time.time())
+    with _DB_LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO admin_message_images(id, mime, data, size, created_at) VALUES(?, ?, ?, ?, ?)",
+            (img_id, mime, sqlite3.Binary(data), len(data), now),
+        )
+    return {
+        "id": img_id,
+        "url": f"/api/messages/image/{img_id}",
+        "mime": mime,
+        "size": len(data),
+    }
+
+
+def get_message_image(img_id: str):
+    """按 ID 查询站内推送配图二进制数据与 MIME。"""
+    clean_id = str(img_id or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{16,32}", clean_id):
+        return None
+    with _DB_LOCK, _conn() as c:
+        row = c.execute(
+            "SELECT mime, data FROM admin_message_images WHERE id=?",
+            (clean_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return row["mime"], bytes(row["data"])
+
+
+def _validate_admin_image_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    if len(raw) > 600:
+        raise ValueError("图片链接过长（最多 600 字符）")
+    if re.fullmatch(r"/api/messages/image/[a-f0-9]{16,32}", raw):
+        return raw
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("图片地址仅支持本后台上传或合法 HTTPS 图片链接")
+    return raw
+
+
+def _validate_admin_message_payload(payload: dict) -> dict:
+    p = payload if isinstance(payload, dict) else {}
+    msg_type = str(p.get("msg_type") or "notice").strip().lower()
+    if msg_type not in ADMIN_MSG_TYPES:
+        raise ValueError("无效的消息类型")
+    display_mode = str(p.get("display_mode") or "inbox").strip().lower()
+    if display_mode not in ADMIN_DISPLAY_MODES:
+        raise ValueError("无效的展示方式")
+    action_type = str(p.get("action_type") or "none").strip().lower()
+    if action_type not in ADMIN_ACTION_TYPES:
+        raise ValueError("无效的跳转动作")
+    audience = str(p.get("audience") or "all").strip().lower()
+    if audience not in ADMIN_AUDIENCES:
+        raise ValueError("无效的推送对象")
+
+    title = str(p.get("title") or "").strip()
+    if not title or len(title) > 40:
+        raise ValueError("消息标题长度需在 1 ~ 40 字之间")
+    content = str(p.get("content") or "").strip()
+    if not content or len(content) > 500:
+        raise ValueError("消息正文长度需在 1 ~ 500 字之间")
+
+    image_url = _validate_admin_image_url(p.get("image_url") or "")
+    action_label = str(p.get("action_label") or "").strip()[:24]
+    action_value = str(p.get("action_value") or "").strip()
+    if action_type == "url":
+        parsed = urllib.parse.urlparse(action_value)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("外链动作必须为合法的 https:// 地址")
+        if len(action_value) > 500:
+            raise ValueError("跳转链接过长")
+    elif action_type == "route":
+        if action_value not in ADMIN_ACTION_ROUTES:
+            raise ValueError("站内跳转模块无效")
+    elif action_type == "none":
+        action_label = ""
+        action_value = ""
+    else:
+        action_value = ""
+
+    try:
+        ttl_hours = int(p.get("ttl_hours") if p.get("ttl_hours") is not None else 72)
+    except (TypeError, ValueError):
+        raise ValueError("有效期格式无效")
+    if ttl_hours < 0 or ttl_hours > 8760:
+        raise ValueError("有效期范围需在 0（长期）~ 8760 小时之间")
+
+    targets = [x.strip() for x in re.split(r"[\s,，;；]+", str(p.get("target_usernames") or "")) if x.strip()]
+    if audience == "users" and not targets:
+        raise ValueError("定向推送请至少填写 1 个目标用户名")
+
+    now = int(time.time())
+    expire_at = (now + ttl_hours * 3600) if ttl_hours > 0 else 0
+    return {
+        "msg_type": msg_type,
+        "display_mode": display_mode,
+        "title": title,
+        "content": content,
+        "image_url": image_url,
+        "action_type": action_type,
+        "action_label": action_label,
+        "action_value": action_value,
+        "audience": audience,
+        "target_usernames": ",".join(targets),
+        "target_list": targets,
+        "show_on_guest": 1 if (audience == "all" and p.get("show_on_guest")) else 0,
+        "include_new_users": 1 if (audience == "all" and p.get("include_new_users", True)) else 0,
+        "expire_at": expire_at,
+        "now": now,
+    }
+
+
+def _resolve_audience_user_ids(conn, audience: str, target_list: list, now: int) -> list:
+    if audience == "all":
+        rows = conn.execute("SELECT id FROM users ORDER BY id ASC").fetchall()
+        return [int(r["id"]) for r in rows]
+    if audience == "pro":
+        rows = conn.execute("SELECT id FROM users WHERE vip_expire_at > ? ORDER BY id ASC", (now,)).fetchall()
+        return [int(r["id"]) for r in rows]
+    if audience == "trial":
+        rows = conn.execute(
+            "SELECT id FROM users WHERE vip_expire_at <= ? AND access_exempt = 0 AND trial_expire_at > ? ORDER BY id ASC",
+            (now, now),
+        ).fetchall()
+        return [int(r["id"]) for r in rows]
+    if audience == "expired":
+        rows = conn.execute(
+            "SELECT id FROM users WHERE vip_expire_at <= ? AND access_exempt = 0 AND trial_expire_at <= ? ORDER BY id ASC",
+            (now, now),
+        ).fetchall()
+        return [int(r["id"]) for r in rows]
+    if audience == "online":
+        cutoff = now - 180
+        rows = conn.execute(
+            "SELECT DISTINCT user_id AS id FROM user_presence WHERE logged_in=1 AND last_seen_at>=? ORDER BY user_id ASC",
+            (cutoff,),
+        ).fetchall()
+        return [int(r["id"]) for r in rows]
+    if audience == "users":
+        placeholders = ",".join("?" for _ in target_list)
+        rows = conn.execute(
+            f"SELECT id FROM users WHERE username IN ({placeholders}) ORDER BY id ASC",
+            tuple(target_list),
+        ).fetchall()
+        uids = [int(r["id"]) for r in rows]
+        if not uids:
+            raise ValueError("未找到匹配的目标用户")
+        return uids
+    return []
+
+
+def _format_admin_message_row(r, now=None, delivered_count=None, read_count=None) -> dict:
+    ts = int(now or time.time())
+    exp = int(r["expire_at"] or 0)
+    rev = int(r["revoked_at"] or 0)
+    if rev > 0:
+        status = "revoked"
+    elif exp > 0 and exp <= ts:
+        status = "expired"
+    else:
+        status = "active"
+    return {
+        "id": r["id"],
+        "msg_type": r["msg_type"],
+        "display_mode": r["display_mode"],
+        "title": r["title"],
+        "content": r["content"],
+        "image_url": r["image_url"] or "",
+        "action_type": r["action_type"],
+        "action_label": r["action_label"],
+        "action_value": r["action_value"],
+        "audience": r["audience"],
+        "target_usernames": r["target_usernames"],
+        "show_on_guest": bool(r["show_on_guest"]),
+        "include_new_users": bool(r["include_new_users"]),
+        "expire_at": exp,
+        "revoked_at": rev,
+        "sent_count": int(r["sent_count"] or 0),
+        "delivered_count": int(delivered_count if delivered_count is not None else (r["sent_count"] or 0)),
+        "read_count": int(read_count or 0),
+        "status": status,
+        "created_at": r["created_at"],
+    }
+
+
+def admin_create_message(payload: dict) -> dict:
+    """站长发布全员/分组/定向推送消息，并写入目标用户站内通知。"""
+    v = _validate_admin_message_payload(payload)
+    now = v["now"]
+    with _DB_LOCK, _conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        target_ids = _resolve_audience_user_ids(c, v["audience"], v["target_list"], now)
+        cur = c.execute(
+            """
+            INSERT INTO admin_messages(
+                msg_type, display_mode, title, content, image_url,
+                action_type, action_label, action_value,
+                audience, target_usernames, show_on_guest, include_new_users,
+                expire_at, revoked_at, sent_count, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            """,
+            (
+                v["msg_type"], v["display_mode"], v["title"], v["content"], v["image_url"],
+                v["action_type"], v["action_label"], v["action_value"],
+                v["audience"], v["target_usernames"], v["show_on_guest"], v["include_new_users"],
+                v["expire_at"], len(target_ids), now,
+            ),
+        )
+        msg_id = int(cur.lastrowid)
+        if target_ids:
+            key = str(msg_id)
+            c.executemany(
+                """
+                INSERT INTO user_notifications(user_id, item_type, item_key, title, message, delta_count, read_at, created_at)
+                VALUES(?, 'admin', ?, ?, ?, 1, 0, ?)
+                """,
+                [(uid, key, v["title"], v["content"], now) for uid in target_ids],
+            )
+        row = c.execute("SELECT * FROM admin_messages WHERE id=?", (msg_id,)).fetchone()
+    return _format_admin_message_row(row, now=now, delivered_count=len(target_ids), read_count=0)
+
+
+def deliver_active_broadcasts_to_user(user_id: int, conn=None) -> int:
+    """将当前生效且勾选覆盖新用户的全员广播补发给新注册用户。"""
+    uid = int(user_id)
+    now = int(time.time())
+
+    def _run(c):
+        rows = c.execute(
+            """
+            SELECT id, title, content
+            FROM admin_messages
+            WHERE revoked_at=0 AND (expire_at=0 OR expire_at>?) AND audience='all' AND include_new_users=1
+            ORDER BY id DESC
+            LIMIT 5
+            """,
+            (now,),
+        ).fetchall()
+        delivered = 0
+        for r in rows:
+            key = str(r["id"])
+            exists = c.execute(
+                "SELECT 1 FROM user_notifications WHERE user_id=? AND item_type='admin' AND item_key=? LIMIT 1",
+                (uid, key),
+            ).fetchone()
+            if exists:
+                continue
+            c.execute(
+                """
+                INSERT INTO user_notifications(user_id, item_type, item_key, title, message, delta_count, read_at, created_at)
+                VALUES(?, 'admin', ?, ?, ?, 1, 0, ?)
+                """,
+                (uid, key, r["title"], r["content"], now),
+            )
+            c.execute("UPDATE admin_messages SET sent_count=sent_count+1 WHERE id=?", (r["id"],))
+            delivered += 1
+        return delivered
+
+    if conn is not None:
+        return _run(conn)
+    with _DB_LOCK, _conn() as c:
+        return _run(c)
+
+
+def admin_list_messages(limit: int = 80) -> list:
+    """查询站长历史推送消息与送达/已读效果统计。"""
+    lim = max(1, min(200, int(limit or 80)))
+    now = int(time.time())
+    with _DB_LOCK, _conn() as c:
+        rows = c.execute(
+            """
+            SELECT m.*,
+                   COALESCE(s.delivered_cnt, 0) AS delivered_cnt,
+                   COALESCE(s.read_cnt, 0) AS read_cnt
+            FROM admin_messages m
+            LEFT JOIN (
+                SELECT item_key,
+                       COUNT(*) AS delivered_cnt,
+                       SUM(CASE WHEN read_at > 0 THEN 1 ELSE 0 END) AS read_cnt
+                FROM user_notifications
+                WHERE item_type = 'admin'
+                GROUP BY item_key
+            ) s ON s.item_key = CAST(m.id AS TEXT)
+            ORDER BY m.id DESC
+            LIMIT ?
+            """,
+            (lim,),
+        ).fetchall()
+    return [
+        _format_admin_message_row(r, now=now, delivered_count=r["delivered_cnt"], read_count=r["read_cnt"])
+        for r in rows
+    ]
+
+
+def admin_revoke_message(msg_id) -> dict:
+    """撤回指定管理员推送并同步清理所有用户尚未读取或已收到的站内投递。"""
+    try:
+        mid = int(msg_id)
+    except (TypeError, ValueError):
+        raise ValueError("无效的消息 ID")
+    if mid <= 0:
+        raise ValueError("无效的消息 ID")
+    now = int(time.time())
+    with _DB_LOCK, _conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT * FROM admin_messages WHERE id=?", (mid,)).fetchone()
+        if not row:
+            raise ValueError("消息不存在")
+        if int(row["revoked_at"] or 0) == 0:
+            c.execute("UPDATE admin_messages SET revoked_at=? WHERE id=?", (now, mid))
+        c.execute("DELETE FROM user_notifications WHERE item_type='admin' AND item_key=?", (str(mid),))
+        updated = c.execute("SELECT * FROM admin_messages WHERE id=?", (mid,)).fetchone()
+    return _format_admin_message_row(updated, now=now, delivered_count=0, read_count=0)
+
+
+def list_public_announcements(limit: int = 3) -> list:
+    """读取当前对未登录访客展示的全员公告列表。"""
+    lim = max(1, min(10, int(limit or 3)))
+    now = int(time.time())
+    with _DB_LOCK, _conn() as c:
+        rows = c.execute(
+            """
+            SELECT id, msg_type, display_mode, title, content, image_url,
+                   action_type, action_label, action_value, created_at
+            FROM admin_messages
+            WHERE revoked_at=0 AND (expire_at=0 OR expire_at>?) AND audience='all' AND show_on_guest=1
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (now, lim),
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "msg_type": r["msg_type"],
+            "display_mode": r["display_mode"],
+            "title": r["title"],
+            "message": r["content"],
+            "image_url": r["image_url"] or "",
+            "action_type": r["action_type"],
+            "action_label": r["action_label"],
+            "action_value": r["action_value"],
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
+
+
+def get_user_message_digest(user_id: int) -> dict:
+    """获取当前用户未读计数及待触发的强弹窗、首页公告横幅摘要。"""
+    uid = int(user_id)
+    now = int(time.time())
+    with _DB_LOCK, _conn() as c:
+        unread_count = c.execute(
+            """
+            SELECT COUNT(*)
+            FROM user_notifications n
+            LEFT JOIN admin_messages am ON n.item_type='admin' AND n.item_key=CAST(am.id AS TEXT)
+            WHERE n.user_id=? AND n.read_at=0
+              AND (n.item_type != 'admin' OR (am.id IS NOT NULL AND am.revoked_at = 0))
+            """,
+            (uid,),
+        ).fetchone()[0]
+        rows = c.execute(
+            """
+            SELECT n.id, n.title, n.message, n.created_at,
+                   am.id AS am_id, am.msg_type, am.display_mode, am.image_url,
+                   am.action_type, am.action_label, am.action_value, am.expire_at
+            FROM user_notifications n
+            JOIN admin_messages am ON n.item_type='admin' AND n.item_key=CAST(am.id AS TEXT)
+            WHERE n.user_id=? AND n.read_at=0 AND am.revoked_at=0 AND (am.expire_at=0 OR am.expire_at>?)
+              AND am.display_mode IN ('popup', 'banner')
+            ORDER BY n.created_at DESC, n.id DESC
+            LIMIT 10
+            """,
+            (uid, now),
+        ).fetchall()
+    latest_popup = None
+    banners = []
+    for r in rows:
+        item = {
+            "id": r["id"],
+            "item_type": "admin",
+            "title": r["title"],
+            "message": r["message"],
+            "created_at": r["created_at"],
+            "meta": {
+                "msg_id": r["am_id"],
+                "msg_type": r["msg_type"] or "notice",
+                "display_mode": r["display_mode"] or "inbox",
+                "image_url": r["image_url"] or "",
+                "action_type": r["action_type"] or "none",
+                "action_label": r["action_label"] or "",
+                "action_value": r["action_value"] or "",
+                "expire_at": int(r["expire_at"] or 0),
+                "is_expired": False,
+            },
+        }
+        if r["display_mode"] == "popup" and latest_popup is None:
+            latest_popup = item
+        elif r["display_mode"] == "banner" and len(banners) < 2:
+            banners.append(item)
+    return {
+        "unread_count": int(unread_count or 0),
+        "latest_popup": latest_popup,
+        "banners": banners,
+    }

@@ -527,9 +527,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return False
 
     def end_headers(self):
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
+        if getattr(self, "_public_cache_hdr", False):
+            self.send_header("Cache-Control", "public, max-age=86400")
+        else:
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
         self.send_header("Access-Control-Allow-Origin", "*")
         super().end_headers()
 
@@ -686,7 +689,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             body = {}
         self._touch_presence(user["id"], body, logged_in=True)
-        self.send_json({"ok": True, "server_time": int(time.time())})
+        self.send_json({
+            "ok": True,
+            "server_time": int(time.time()),
+            "notif_digest": db.get_user_message_digest(user["id"]),
+        })
 
     def handle_auth_logout(self):
         user = self._current_user()
@@ -909,6 +916,82 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({"error": str(e)}, 400)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
+
+    def handle_admin_messages_get(self):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        self.send_json({"messages": db.admin_list_messages(80)})
+
+    def handle_admin_messages_create(self):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        try:
+            body = self._read_json_body(32768)
+            msg = db.admin_create_message(body)
+            self.send_json({"ok": True, "message": msg})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    def handle_admin_messages_revoke(self):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        try:
+            body = self._read_json_body(4096)
+            msg = db.admin_revoke_message(body.get("id"))
+            self.send_json({"ok": True, "message": msg})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    def handle_admin_message_image_upload(self):
+        if not self._is_admin():
+            return self.send_json({"error": "未授权"}, 401)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self.send_json({"error": "无效的 Content-Length"}, 400)
+        if n <= 0:
+            return self.send_json({"error": "图片内容不能为空"}, 400)
+        if n > 2_200_000:
+            return self.send_json({"error": "图片请求体过大（上限 1.5MB）"}, 413)
+        raw_body = self.rfile.read(n)
+        ctype = (self.headers.get("Content-Type") or "").lower()
+        try:
+            if "application/json" in ctype:
+                obj = json.loads(raw_body.decode("utf-8", "ignore") or "{}")
+                b64 = str(obj.get("data_base64") or "").strip()
+                if "," in b64 and b64.lower().startswith("data:image/"):
+                    b64 = b64.split(",", 1)[1]
+                img_bytes = base64.b64decode(b64, validate=True)
+            else:
+                img_bytes = raw_body
+            if len(img_bytes) > db.MAX_ADMIN_IMAGE_BYTES:
+                return self.send_json({"error": "图片体积不能超过 1.5MB"}, 413)
+            res = db.admin_save_message_image(img_bytes)
+            self.send_json({"ok": True, **res})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+        except Exception:
+            self.send_json({"error": "图片解析失败，请重新选择图片"}, 400)
+
+    def handle_message_image_get(self, img_id):
+        found = db.get_message_image(img_id)
+        if not found:
+            return self.send_json({"error": "图片不存在"}, 404)
+        mime, data = found
+        self._public_cache_hdr = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(data)
+        finally:
+            self._public_cache_hdr = False
 
     # ---------- 音乐曲库网关 ----------
     def handle_kuwo(self, qs):
@@ -1440,6 +1523,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.handle_admin_user_vip()
         if p == "/api/admin/user/reset-pwd":
             return self.handle_admin_user_reset_pwd()
+        if p == "/api/admin/messages":
+            return self.handle_admin_messages_create()
+        if p == "/api/admin/messages/revoke":
+            return self.handle_admin_messages_revoke()
+        if p == "/api/admin/messages/image":
+            return self.handle_admin_message_image_upload()
         if p.startswith("/api/ops/"):
             return self.handle_ops(p)
         self.send_json({"error": "Not found"}, 404)
@@ -1451,6 +1540,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         if p == "/api/config":
             return self.send_json(db.get_public_config())
+        if p.startswith("/api/messages/image/"):
+            return self.handle_message_image_get(p[len("/api/messages/image/"):])
         if p == "/api/sources/live":
             return self.send_json({'items': [], 'managed': True})
         if p in ('/api/admin/sources', '/api/admin/subscriptions', '/api/vod/home', '/api/vod/search', '/api/vod/detail'):
@@ -1474,6 +1565,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.handle_admin_users(qs)
         if p == "/api/admin/online":
             return self.handle_admin_online(qs)
+        if p == "/api/admin/messages":
+            return self.handle_admin_messages_get()
         if p == "/api/notifications":
             return self.handle_notifications_get(qs)
         if p == "/api/notifications/prefs":
@@ -1558,15 +1651,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
     def handle_notifications_get(self, qs):
-        user = self._require_active_access()
+        user = self._current_user()
         if not user:
-            return
+            return self.send_json({"error": "请先登录账号", "code": "AUTH_REQUIRED"}, 401)
         unread_only = (qs.get("unread") or ["0"])[0] == "1"
         try:
             limit = int((qs.get("limit") or ["50"])[0])
         except ValueError:
             limit = 50
-        self.send_json(db.list_notifications(user["id"], unread_only=unread_only, limit=limit))
+        res = db.list_notifications(user["id"], unread_only=unread_only, limit=limit)
+        res["digest"] = db.get_user_message_digest(user["id"])
+        self.send_json(res)
 
     def handle_notifications_read(self):
         user = self._current_user()

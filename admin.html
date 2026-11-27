@@ -383,6 +383,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v3m0 12v3M4.9 4.9l2.1 2.1m10 10 2.1 2.1M3 12h3m12 0h3M4.9 19.1 7 17m10-10 2.1-2.1"/><circle cx="12" cy="12" r="4"/></svg>
           <span>广告位配置</span>
         </button>
+        <button type="button" class="nav-tab" role="tab" data-panel="messages" aria-selected="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-5 3V6Z"/></svg>
+          <span>消息推送</span>
+        </button>
         <button type="button" class="nav-tab" role="tab" data-panel="security" aria-selected="false">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 5 6v6c0 4.5 3 7.8 7 9 4-1.2 7-4.5 7-9V6l-7-3Z"/></svg>
           <span>安全与设置</span>
@@ -421,6 +425,7 @@
       <button type="button" class="nav-tab" role="tab" data-panel="codes" aria-selected="false">发卡与台账</button>
       <button type="button" class="nav-tab" role="tab" data-panel="catalog" aria-selected="false">片库与订阅</button>
       <button type="button" class="nav-tab" role="tab" data-panel="config" aria-selected="false">广告配置</button>
+      <button type="button" class="nav-tab" role="tab" data-panel="messages" aria-selected="false">消息推送</button>
       <button type="button" class="nav-tab" role="tab" data-panel="security" aria-selected="false">安全设置</button>
     </div>
   </header>
@@ -702,7 +707,164 @@
       </div>
     </section>
 
-    <!-- 模块 5：安全与设置 -->
+    <!-- 模块 5：客户端消息推送 -->
+    <section id="panel-messages" role="tabpanel" hidden>
+      <div class="page-head">
+        <div>
+          <h1>客户端消息推送</h1>
+          <p>支持全员广播、按会员状态分组与定向发送，支持图片海报/二维码与即时强弹窗</p>
+        </div>
+        <button id="btnRefreshMsgs" type="button" class="btn ghost sm">刷新记录</button>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-hd"><h2>发送新消息</h2></div>
+          <div style="margin-bottom:10px">
+            <div style="font-size:12px;color:var(--muted);margin-bottom:6px">一键快捷模板：</div>
+            <div class="chips" id="msgTplChips">
+              <button type="button" class="chip" data-msgtpl="hotfix">热更新上线通知</button>
+              <button type="button" class="chip" data-msgtpl="trial">体验到期促兑换</button>
+              <button type="button" class="chip" data-msgtpl="maint">节点维护通告</button>
+              <button type="button" class="chip" data-msgtpl="direct">定向卡密发放</button>
+            </div>
+          </div>
+
+          <div class="row">
+            <div>
+              <label class="fld" for="msgAudience">推送对象</label>
+              <select id="msgAudience">
+                <option value="all">全部注册用户</option>
+                <option value="trial">仅体验中用户</option>
+                <option value="expired">仅已到期未解锁用户</option>
+                <option value="pro">仅 Pro 会员</option>
+                <option value="online">当前在线用户</option>
+                <option value="users">指定用户名</option>
+              </select>
+            </div>
+            <div>
+              <label class="fld" for="msgType">消息类型</label>
+              <select id="msgType">
+                <option value="notice">系统公告</option>
+                <option value="activity">活动 / 福利</option>
+                <option value="maintenance">维护 / 紧急提醒</option>
+                <option value="direct">定向私信</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="msgTargetsWrap" hidden>
+            <label class="fld" for="msgTargets">目标用户名（多个可用逗号或空格分隔）</label>
+            <input id="msgTargets" placeholder="例如：user01, user02">
+          </div>
+
+          <div id="msgBroadcastOpts" style="margin-top:10px">
+            <label class="switch-row" style="margin-bottom:6px">
+              <input id="msgIncludeNew" type="checkbox" checked>
+              <span>同步向有效期内新注册的用户自动补发此公告</span>
+            </label>
+            <label class="switch-row" style="margin-bottom:4px">
+              <input id="msgShowGuest" type="checkbox">
+              <span>在未登录门禁页顶部也展示（适合全站维护或福利预告）</span>
+            </label>
+          </div>
+
+          <div class="row">
+            <div>
+              <label class="fld" for="msgDisplay">触达 / 展示方式</label>
+              <select id="msgDisplay">
+                <option value="popup">强提醒弹窗（上线即弹）</option>
+                <option value="banner">首页顶部公告横幅</option>
+                <option value="inbox">仅站内消息中心（红点）</option>
+              </select>
+            </div>
+            <div>
+              <label class="fld" for="msgTtl">有效期</label>
+              <select id="msgTtl">
+                <option value="24">24 小时</option>
+                <option value="72" selected>3 天</option>
+                <option value="168">7 天</option>
+                <option value="720">30 天</option>
+                <option value="0">长期有效（直至撤回）</option>
+              </select>
+            </div>
+          </div>
+
+          <label class="fld" for="msgTitle">消息标题（1 ~ 40 字）</label>
+          <input id="msgTitle" maxlength="40" placeholder="例如：v2.5.5 网页热更新已上线">
+
+          <label class="fld" for="msgContent">消息正文（支持换行，1 ~ 500 字）</label>
+          <textarea id="msgContent" rows="4" maxlength="500" placeholder="输入推送给用户的详细说明…"></textarea>
+
+          <label class="fld" for="msgImageUrl">消息配图（可选：直接上传本地图片或填 HTTPS 链接）</label>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input id="msgImageUrl" style="flex:1;min-width:180px" placeholder="上传后自动填充 /api/messages/image/... 或填 https://...">
+            <label class="btn ghost sm" style="margin:0;cursor:pointer">
+              上传图片
+              <input id="msgImageFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+            </label>
+            <button id="btnClearMsgImg" type="button" class="btn ghost sm" hidden>清除</button>
+          </div>
+          <div id="msgImagePrevWrap" hidden style="margin-top:8px;padding:8px;border-radius:10px;background:var(--bg);border:1px solid var(--line)">
+            <img id="msgImagePreview" alt="推送配图预览" style="max-width:100%;max-height:150px;object-fit:contain;display:block;border-radius:6px">
+          </div>
+
+          <div class="row">
+            <div>
+              <label class="fld" for="msgActionType">附加跳转动作（可选）</label>
+              <select id="msgActionType">
+                <option value="none">无动作（仅阅读）</option>
+                <option value="redeem">打开卡密兑换弹窗</option>
+                <option value="hotfix">一键刷新最新热更新</option>
+                <option value="route">跳转指定模块</option>
+                <option value="url">打开外部 HTTPS 链接</option>
+              </select>
+            </div>
+            <div id="msgActionLabelWrap" hidden>
+              <label class="fld" for="msgActionLabel">按钮文案</label>
+              <input id="msgActionLabel" maxlength="24" placeholder="例如：立即前往">
+            </div>
+          </div>
+
+          <div id="msgActionRouteWrap" hidden>
+            <label class="fld" for="msgActionRoute">目标模块</label>
+            <select id="msgActionRoute">
+              <option value="vod">影视首页</option>
+              <option value="music">音乐曲库</option>
+              <option value="novel">小说书城</option>
+              <option value="me">我的 / 会员中心</option>
+            </select>
+          </div>
+          <div id="msgActionUrlWrap" hidden>
+            <label class="fld" for="msgActionUrl">目标 HTTPS 链接</label>
+            <input id="msgActionUrl" placeholder="https://...">
+          </div>
+
+          <button id="btnSendAdminMsg" type="button" class="btn primary" style="width:100%;margin-top:14px">立即发送推送</button>
+        </div>
+
+        <div class="card">
+          <div class="card-hd"><h2>历史推送与触达效果</h2></div>
+          <div class="table-wrap" style="max-block-size:640px">
+            <table class="data-tbl">
+              <thead>
+                <tr>
+                  <th>时间 / 标题</th>
+                  <th>对象 / 方式</th>
+                  <th>送达 / 已读</th>
+                  <th>状态 / 操作</th>
+                </tr>
+              </thead>
+              <tbody id="adminMsgTbody">
+                <tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">点击「消息推送」自动加载历史记录</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 模块 6：安全与设置 -->
     <section id="panel-security" role="tabpanel" hidden>
       <div class="page-head">
         <div>
@@ -878,6 +1040,7 @@ function switchPanel(name) {
   });
   if (name === "users" && !allUsers.length) loadUsers();
   if (name === "catalog") loadCatalog();
+  if (name === "messages") loadAdminMessages();
 }
 $$("[role='tab'][data-panel]").forEach((btn) => {
   btn.addEventListener("click", () => switchPanel(btn.dataset.panel));
@@ -1008,6 +1171,7 @@ function renderUsers() {
     <td data-label="操作">
       <div class="tbl-actions">
         <button type="button" class="btn ghost sm" data-vip-uid="${u.id}">管理 Pro</button>
+        <button type="button" class="btn ghost sm" data-msg-uname="${esc(u.username)}">发消息</button>
         <button type="button" class="btn ghost sm" data-pwd-uid="${u.id}">重置密码</button>
       </div>
     </td>
@@ -1016,6 +1180,9 @@ function renderUsers() {
 
   tb.querySelectorAll("[data-vip-uid]").forEach((btn) => {
     btn.onclick = () => openVipDialog(Number(btn.dataset.vipUid));
+  });
+  tb.querySelectorAll("[data-msg-uname]").forEach((btn) => {
+    btn.onclick = () => openDirectMessageFor(btn.dataset.msgUname || "");
   });
   tb.querySelectorAll("[data-pwd-uid]").forEach((btn) => {
     btn.onclick = () => openPwdDialog(Number(btn.dataset.pwdUid));
@@ -1412,6 +1579,258 @@ if (!("closedBy" in HTMLDialogElement.prototype)) {
   }
 }
 
+/* ============ 客户端消息推送与图片上传 ============ */
+const MSG_TYPE_NAMES = { notice: "系统公告", activity: "活动福利", maintenance: "维护提醒", direct: "定向私信" };
+const MSG_DISP_NAMES = { popup: "强弹窗", banner: "首页横幅", inbox: "站内信" };
+const MSG_AUD_NAMES = { all: "全员", trial: "体验中", expired: "已到期", pro: "Pro会员", online: "当前在线", users: "指定用户" };
+const MSG_TPLS = {
+  hotfix: {
+    audience: "all", msg_type: "notice", display_mode: "popup", ttl_hours: "72",
+    include_new_users: true, show_on_guest: false,
+    title: "星隅网页热更新已上线",
+    content: "本次已优化小说封面加载与横屏设置体验。\n点击下方按钮即可一键同步最新界面，无需重新下载安装包。",
+    action_type: "hotfix", action_label: "立即刷新热更新",
+  },
+  trial: {
+    audience: "trial", msg_type: "activity", display_mode: "banner", ttl_hours: "72",
+    include_new_users: false, show_on_guest: false,
+    title: "新用户专享体验福利提醒",
+    content: "您的全功能免费体验正在进行中！开通卡密可享不限时畅看与全局免广告，体验期剩余天数将直接叠加保留。",
+    action_type: "redeem", action_label: "立即兑换卡密",
+  },
+  maint: {
+    audience: "all", msg_type: "maintenance", display_mode: "banner", ttl_hours: "24",
+    include_new_users: true, show_on_guest: true,
+    title: "服务器节点维护与线路通知",
+    content: "若偶遇片源加载较慢，请稍候 1 分钟或在播放页切换备用线路，我们将尽快恢复全部高速节点。",
+    action_type: "none", action_label: "",
+  },
+  direct: {
+    audience: "users", msg_type: "direct", display_mode: "popup", ttl_hours: "168",
+    include_new_users: false, show_on_guest: false,
+    title: "您的专属卡密与权益通知",
+    content: "感谢支持 NovaHub · 星隅！请在下方点击按钮输入您的兑换卡密激活权限，如有问题可随时联系站长。",
+    action_type: "redeem", action_label: "去兑换卡密",
+  },
+};
+
+function resolveImgUrl(u) {
+  const s = String(u || "").trim();
+  if (!s) return "";
+  if (s.startsWith("/api/")) return (window.__NH_API_BASE__ || "") + s;
+  return s;
+}
+
+function syncMsgFormUi() {
+  const aud = $("#msgAudience")?.value || "all";
+  const act = $("#msgActionType")?.value || "none";
+  const imgUrl = $("#msgImageUrl")?.value.trim() || "";
+  if ($("#msgTargetsWrap")) $("#msgTargetsWrap").hidden = aud !== "users";
+  if ($("#msgBroadcastOpts")) $("#msgBroadcastOpts").hidden = aud !== "all";
+  if ($("#msgActionLabelWrap")) $("#msgActionLabelWrap").hidden = act === "none";
+  if ($("#msgActionRouteWrap")) $("#msgActionRouteWrap").hidden = act !== "route";
+  if ($("#msgActionUrlWrap")) $("#msgActionUrlWrap").hidden = act !== "url";
+
+  const resolved = resolveImgUrl(imgUrl);
+  const validPreview = resolved.startsWith("https://") || resolved.startsWith("http://") || resolved.startsWith("/api/");
+  if ($("#msgImagePrevWrap")) $("#msgImagePrevWrap").hidden = !validPreview;
+  if ($("#btnClearMsgImg")) $("#btnClearMsgImg").hidden = !imgUrl;
+  const pv = $("#msgImagePreview");
+  if (pv) {
+    if (validPreview) pv.src = resolved;
+    else pv.removeAttribute("src");
+  }
+}
+
+function openDirectMessageFor(username) {
+  switchPanel("messages");
+  if ($("#msgAudience")) $("#msgAudience").value = "users";
+  if ($("#msgType")) $("#msgType").value = "direct";
+  if ($("#msgDisplay")) $("#msgDisplay").value = "popup";
+  if ($("#msgTargets")) $("#msgTargets").value = username;
+  syncMsgFormUi();
+  $("#msgTitle")?.focus();
+}
+
+$("#msgTplChips")?.querySelectorAll("[data-msgtpl]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const t = MSG_TPLS[btn.dataset.msgtpl];
+    if (!t) return;
+    $("#msgAudience").value = t.audience;
+    $("#msgType").value = t.msg_type;
+    $("#msgDisplay").value = t.display_mode;
+    $("#msgTtl").value = t.ttl_hours;
+    $("#msgIncludeNew").checked = !!t.include_new_users;
+    $("#msgShowGuest").checked = !!t.show_on_guest;
+    $("#msgTitle").value = t.title;
+    $("#msgContent").value = t.content;
+    $("#msgActionType").value = t.action_type;
+    $("#msgActionLabel").value = t.action_label || "";
+    syncMsgFormUi();
+    toast("已填充快捷模板，可直接编辑后发送");
+  });
+});
+
+["msgAudience", "msgActionType", "msgImageUrl"].forEach((id) => {
+  $("#" + id)?.addEventListener("change", syncMsgFormUi);
+  $("#" + id)?.addEventListener("input", syncMsgFormUi);
+});
+$("#btnClearMsgImg")?.addEventListener("click", () => {
+  if ($("#msgImageUrl")) $("#msgImageUrl").value = "";
+  if ($("#msgImageFile")) $("#msgImageFile").value = "";
+  syncMsgFormUi();
+});
+
+async function compressMsgImageIfNeeded(file) {
+  if (!file) return null;
+  if ((file.type === "image/gif" || file.size <= 350 * 1024) && file.size <= 1_500_000) {
+    return { bytes: new Uint8Array(await file.arrayBuffer()), mime: file.type || "image/png" };
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = reject;
+      i.src = url;
+    });
+    const maxW = 960;
+    const scale = img.width > maxW ? (maxW / img.width) : 1;
+    const w = Math.max(1, Math.round(img.width * scale));
+    const h = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+    const outType = file.type === "image/png" && file.size <= 700 * 1024 ? "image/png" : "image/jpeg";
+    const blob = await new Promise((res) => canvas.toBlob(res, outType, 0.85));
+    return { bytes: new Uint8Array(await blob.arrayBuffer()), mime: outType };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+$("#msgImageFile")?.addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  try {
+    toast("正在处理并上传图片…");
+    const prepared = await compressMsgImageIfNeeded(file);
+    if (!prepared || !prepared.bytes?.length) throw new Error("读取图片失败");
+    if (prepared.bytes.length > 1_572_864) throw new Error("压缩后仍超过 1.5MB，请换一张小图");
+    const r = await fetch("/api/admin/messages/image", {
+      method: "POST",
+      headers: {
+        "Content-Type": prepared.mime,
+        ...(token ? { Authorization: "Bearer " + token } : {}),
+      },
+      body: prepared.bytes,
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.url) throw new Error(d.error || ("HTTP " + r.status));
+    $("#msgImageUrl").value = d.url;
+    syncMsgFormUi();
+    toast("图片已上传并预览");
+  } catch (err) {
+    toast(err.message || "图片上传失败", true);
+  } finally {
+    e.target.value = "";
+  }
+});
+
+async function loadAdminMessages() {
+  try {
+    const d = await api("/api/admin/messages");
+    renderAdminMessages(d.messages || []);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function renderAdminMessages(list) {
+  const tb = $("#adminMsgTbody");
+  if (!tb) return;
+  if (!list.length) {
+    tb.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px">暂无推送记录</td></tr>`;
+    return;
+  }
+  tb.innerHTML = list.map((m) => {
+    const stTag = m.status === "revoked"
+      ? `<span class="tag muted">已撤回</span>`
+      : (m.status === "expired" ? `<span class="tag warn">已过期</span>` : `<span class="tag ok">生效中</span>`);
+    const typeLbl = MSG_TYPE_NAMES[m.msg_type] || m.msg_type;
+    const audLbl = MSG_AUD_NAMES[m.audience] || m.audience;
+    const dispLbl = MSG_DISP_NAMES[m.display_mode] || m.display_mode;
+    const targetSub = m.audience === "users" && m.target_usernames ? ` (${m.target_usernames})` : "";
+    return `<tr>
+      <th>
+        <div>${esc(m.title)} ${m.image_url ? `<span class="tag" style="margin-left:4px">含图</span>` : ""}</div>
+        <div class="mini-sub">${fmtTime(m.created_at)} · ${esc(typeLbl)}</div>
+      </th>
+      <td data-label="对象 / 方式">
+        <div>${esc(audLbl + targetSub)}</div>
+        <div class="mini-sub">${esc(dispLbl)}${m.show_on_guest ? " · 访客可见" : ""}</div>
+      </td>
+      <td data-label="送达 / 已读" class="num">
+        <div>送达：${m.delivered_count}</div>
+        <div class="mini-sub">已读：${m.read_count}</div>
+      </td>
+      <td data-label="状态 / 操作">
+        <div class="tbl-actions">
+          ${stTag}
+          ${m.status === "active" ? `<button type="button" class="btn danger sm" data-revoke-mid="${m.id}">撤回</button>` : ""}
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+  tb.querySelectorAll("[data-revoke-mid]").forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        await api("/api/admin/messages/revoke", "POST", { id: Number(btn.dataset.revokeMid) });
+        toast("已撤回该条推送并从客户端清理");
+        loadAdminMessages();
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+}
+
+$("#btnRefreshMsgs")?.addEventListener("click", loadAdminMessages);
+$("#btnSendAdminMsg")?.addEventListener("click", async () => {
+  const btn = $("#btnSendAdminMsg");
+  const actType = $("#msgActionType")?.value || "none";
+  const payload = {
+    audience: $("#msgAudience")?.value || "all",
+    target_usernames: $("#msgTargets")?.value.trim() || "",
+    include_new_users: !!$("#msgIncludeNew")?.checked,
+    show_on_guest: !!$("#msgShowGuest")?.checked,
+    msg_type: $("#msgType")?.value || "notice",
+    display_mode: $("#msgDisplay")?.value || "inbox",
+    ttl_hours: Number($("#msgTtl")?.value ?? 72),
+    title: $("#msgTitle")?.value.trim() || "",
+    content: $("#msgContent")?.value.trim() || "",
+    image_url: $("#msgImageUrl")?.value.trim() || "",
+    action_type: actType,
+    action_label: $("#msgActionLabel")?.value.trim() || "",
+    action_value: actType === "route" ? ($("#msgActionRoute")?.value || "vod") : (actType === "url" ? ($("#msgActionUrl")?.value.trim() || "") : ""),
+  };
+  if (btn) { btn.disabled = true; btn.textContent = "发送中…"; }
+  try {
+    const res = await api("/api/admin/messages", "POST", payload);
+    const sent = res.message?.sent_count ?? 0;
+    toast(`推送成功！已立即送达 ${sent} 位用户`);
+    if ($("#msgTitle")) $("#msgTitle").value = "";
+    if ($("#msgContent")) $("#msgContent").value = "";
+    if ($("#msgImageUrl")) $("#msgImageUrl").value = "";
+    syncMsgFormUi();
+    loadAdminMessages();
+  } catch (e) {
+    toast(e.message || "发送失败", true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "立即发送推送"; }
+  }
+});
+
+syncMsgFormUi();
 if (token) loadDash(true);
 </script>
 </body>
