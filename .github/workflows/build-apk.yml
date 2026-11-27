@@ -21,18 +21,18 @@ jobs:
 
       # Browser publication path: apply only the exact reviewed release patch.
       # Once applied, the patch is removed; ordinary builds skip this step.
-      - name: Apply reviewed v2.4.8 release bundle
+      - name: Apply reviewed v2.4.9 release bundle
         run: |
           set -euo pipefail
-          patch=reviewed-v2.4.8.patch
+          patch=reviewed-v2.4.9.patch
           if [ -f "$patch" ]; then
-            echo "7b3a31b7d78f2a858c6e47e9f138d2fc206d1ac68b88f17cb6292c0ea63f7b29  $patch" | sha256sum --check --strict
+            echo "8bb12c71dceca832caedf0806f7a6cb39a9ec82b3f9d5eae62ee0a5d4950460a  $patch" | sha256sum --check --strict
             git apply --check "$patch"
             git apply --index "$patch"
             git rm -- "$patch"
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "fix: release v2.4.8 vod detail fallback recovery and Android download thread fix"
+            git commit -m "feat: release v2.4.9 multi-mode casting, search cancel & lyric fallback"
             git pull --rebase origin main
             git push origin HEAD:main
           fi
