@@ -113,11 +113,11 @@ test('admin.html inline script parses cleanly and exposes online presence UI', (
   assert.ok(adminSource.includes('id="btnSaveGate"'));
 });
 
-test('v2.5.3 fixes novel covers, adds home horizontal swipe mode switching, and makes landscape skip modal sticky', () => {
+test('v2.5.4 fixes novel covers, adds home horizontal swipe mode switching, and makes landscape skip modal sticky', () => {
   const cssSource = fs.readFileSync('style.css', 'utf8');
   const htmlIdx = fs.readFileSync('index.html', 'utf8');
-  assert.ok(appSource.includes('const WEB_VERSION = "v2.5.3"'));
-  assert.ok(htmlIdx.includes('?v=20261127-v253'));
+  assert.ok(appSource.includes('const WEB_VERSION = "v2.5.4"'));
+  assert.ok(htmlIdx.includes('?v=20261127-v254'));
   assert.ok(appSource.includes('function syncOverlayHost('));
   assert.ok(appSource.includes('function bindHomeSwipeNavigation('));
   assert.ok(appSource.includes('referrerpolicy="no-referrer"'));
@@ -156,4 +156,86 @@ test('v2.5.3 fixes novel covers, adds home horizontal swipe mode switching, and 
   assert.equal(swCtx.resolveHomeSwipeMode('vod', -40, 2, 180), '');
   assert.equal(swCtx.resolveHomeSwipeMode('vod', -100, 90, 200), '');
   assert.equal(swCtx.resolveHomeSwipeMode('vod', -120, 5, 1200), '');
+});
+
+test('novel category switches on a single tap and ignores stale category responses', async () => {
+  const start = appSource.indexOf('let _novelCatReq = 0;');
+  const end = appSource.indexOf('function renderNovelShelf()', start);
+  assert.ok(start >= 0 && end > start);
+  const store = { novel_cat_悬疑脑洞: [{ book_id: '1', title: 'OldCached' }] };
+  const fetches = [];
+  let chips = [];
+  const viewEl = { innerHTML: '' };
+  const wrapEl = { innerHTML: '' };
+  const searchEl = { value: '' };
+  const ctx = {
+    NOVEL_CATS: [{ id: '悬疑脑洞', name: '悬疑脑洞' }, { id: '玄幻', name: '玄幻' }],
+    curNovelCat: '悬疑脑洞',
+    novelStoreList: store.novel_cat_悬疑脑洞,
+    novelIsSearch: false,
+    novelSearchKw: '',
+    currentRoute: 'n_store',
+    viewRequest: 0,
+    _searchAbort: null,
+    viewStack: [],
+    AbortController,
+    get: (k, d) => (k in store ? store[k] : d),
+    set: (k, v) => { store[k] = v; },
+    esc: String,
+    ico: () => '',
+    renderTrialBannerHtml: () => '',
+    renderAdSlotHtml: () => '',
+    bindAdSlots() {},
+    paintNovelList(el, list) { el.painted = list.map((x) => x.title); },
+    setSearchLoading() {},
+    renderTabbar() {},
+    cancelActiveSearch() {},
+    sortByExactMatch: (xs) => xs,
+    renderSearchLoadingHtml: () => '',
+    $: (sel) => (sel === '#view' ? viewEl : sel === '#nStoreWrap' ? wrapEl : sel === '#searchInput' ? searchEl : null),
+    document: {
+      querySelectorAll: (sel) => (sel === '.m-chip[data-cat]' ? chips : []),
+    },
+    fetch: (url) => {
+      fetches.push(url);
+      return new Promise((resolve) => {
+        const isFirst = fetches.length === 1;
+        setTimeout(() => {
+          resolve({
+            json: async () => ({
+              items: isFirst
+                ? [{ book_id: '2', title: 'XuanhuanBook' }]
+                : [{ book_id: '9', title: 'ShouldNotHappen' }],
+            }),
+          });
+        }, isFirst ? 20 : 5);
+      });
+    },
+  };
+  const rebuildChips = () => {
+    chips = [{ dataset: { cat: '悬疑脑洞' } }, { dataset: { cat: '玄幻' } }];
+  };
+  ctx.$ = (sel) => {
+    if (sel === '#view') {
+      rebuildChips();
+      return viewEl;
+    }
+    if (sel === '#nStoreWrap') return wrapEl;
+    if (sel === '#searchInput') return searchEl;
+    return null;
+  };
+  vm.createContext(ctx);
+  vm.runInContext(appSource.slice(start, end), ctx);
+
+  ctx.renderNovelStore();
+  assert.equal(fetches.length, 0);
+  // Single tap on the second category chip ("玄幻")
+  chips[1].onclick();
+  assert.equal(ctx.curNovelCat, '玄幻');
+  assert.equal(fetches.length, 1);
+  assert.equal(decodeURIComponent(fetches[0]).includes('q=玄幻'), true);
+
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(wrapEl.painted, ['XuanhuanBook']);
+  assert.equal(fetches.length, 1);
 });

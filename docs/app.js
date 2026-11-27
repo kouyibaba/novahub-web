@@ -1,7 +1,7 @@
 /* ZY Player Web — 核心逻辑（Obsidian Cinema & Warm Amber 矢量设计版） */
 "use strict";
 
-const WEB_VERSION = "v2.5.3";
+const WEB_VERSION = "v2.5.4";
 
 /* ============ 本地存储（复用 APK 存储键，本地解锁 VIP/God） ============ */
 const K = {
@@ -3882,25 +3882,26 @@ function paintNovelList(container, list, opts = {}) {
   applyStagger(container);
 }
 
+let _novelCatReq = 0;
 async function loadNovelCategory(cat = curNovelCat) {
+  const reqId = ++_novelCatReq;
   curNovelCat = cat;
   novelIsSearch = false;
   const cached = get("novel_cat_" + cat, null);
-  if (cached && cached.length && !novelStoreList.length) {
-    novelStoreList = cached;
-    if (currentRoute === "n_store") renderNovelStore();
-  }
+  novelStoreList = Array.isArray(cached) && cached.length ? cached : [];
+  if (currentRoute === "n_store") renderNovelStore(true);
   try {
     const r = await fetch(`/api/novel/search?q=${encodeURIComponent(cat)}`);
     const d = await r.json();
+    if (reqId !== _novelCatReq || novelIsSearch || curNovelCat !== cat) return;
     if (Array.isArray(d.items) && d.items.length) {
       novelStoreList = d.items;
       set("novel_cat_" + cat, d.items);
-      if (currentRoute === "n_store") renderNovelStore();
+      if (currentRoute === "n_store") renderNovelStore(true);
       return;
     }
   } catch {}
-  if (!novelStoreList.length && currentRoute === "n_store") {
+  if (reqId === _novelCatReq && !novelStoreList.length && currentRoute === "n_store") {
     const wrap = $("#nStoreWrap");
     if (wrap) wrap.innerHTML = `<div class="empty">书城连接超时，请使用顶部搜索框直接检索书名</div>`;
   }
@@ -3908,6 +3909,7 @@ async function loadNovelCategory(cat = curNovelCat) {
 
 async function searchNovel(q) {
   if (!q) return;
+  _novelCatReq++;
   cancelActiveSearch(true);
   const mine = ++viewRequest;
   const ac = new AbortController();
@@ -3936,7 +3938,7 @@ async function searchNovel(q) {
   }
 }
 
-function renderNovelStore() {
+function renderNovelStore(skipAutoLoad = false) {
   $("#view").innerHTML = `
     ${typeof renderTrialBannerHtml === "function" ? renderTrialBannerHtml() : ""}
     <div class="m-chips">${NOVEL_CATS.map((c) => `<button class="m-chip ${!novelIsSearch && curNovelCat === c.id ? "active" : ""}" data-cat="${esc(c.id)}">${esc(c.name)}</button>`).join("")}</div>
@@ -3948,16 +3950,18 @@ function renderNovelStore() {
   bindAdSlots($("#view"));
   document.querySelectorAll(".m-chip[data-cat]").forEach((el) => {
     el.onclick = () => {
-      $("#searchInput").value = "";
-      novelStoreList = [];
-      renderNovelStore();
-      loadNovelCategory(el.dataset.cat);
+      const targetCat = el.dataset.cat;
+      if (!targetCat) return;
+      const inp = $("#searchInput");
+      if (inp) inp.value = "";
+      if (!novelIsSearch && curNovelCat === targetCat && novelStoreList.length) return;
+      loadNovelCategory(targetCat);
     };
   });
   const wrap = $("#nStoreWrap");
   if (!novelStoreList.length && !novelIsSearch) {
     wrap.innerHTML = `<div class="empty">正在加载精选书单…</div>`;
-    loadNovelCategory(curNovelCat);
+    if (!skipAutoLoad) loadNovelCategory(curNovelCat);
     return;
   }
   paintNovelList(wrap, novelStoreList, { emptyText: "未找到匹配小说，可尝试输入完整书名、作者或 19 位 Book ID" });
