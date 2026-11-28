@@ -12,40 +12,99 @@
 (function(){
   const origFetch = window.fetch.bind(window);
   window.__NH_API_BASE__ = '';
+  window.__NH_API_NODES__ = [];
+  window.__NH_ACTIVE_NODE__ = '';
+
+  async function fetchEp(file, tag) {
+    try {
+      const r = await origFetch('./' + file + '?t=' + Date.now(), { cache: 'no-store' });
+      const d = await r.json();
+      const u = ((d && d.url) || '').replace(/\/+$/, '');
+      return u ? { url: u, tag: tag } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function probeNode(url) {
+    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 3500) : null;
+    try {
+      const r = await origFetch(url + '/api/config?_p=' + Date.now(), {
+        cache: 'no-store',
+        signal: ctrl ? ctrl.signal : undefined,
+      });
+      return r.status === 200;
+    } catch {
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   window.__NH_REFRESH_ENDPOINT__ = async function() {
     if (!location.hostname.endsWith('github.io')) return '';
-    try {
-      const r = await origFetch('./endpoint.json?t=' + Date.now(), { cache: 'no-store' });
-      const d = await r.json();
-      window.__NH_API_BASE__ = ((d && d.url) || '').replace(/\/+$/, '');
-      return window.__NH_API_BASE__;
-    } catch {
-      return window.__NH_API_BASE__;
+    const [tabNode, s43Node] = await Promise.all([
+      fetchEp('endpoint.json', 'tablet'),
+      fetchEp('endpoint-43.json', 'server43'),
+    ]);
+    const list = [];
+    const seen = new Set();
+    for (const item of [tabNode, s43Node]) {
+      if (item && !seen.has(item.url)) {
+        seen.add(item.url);
+        list.push(item);
+      }
     }
+    window.__NH_API_NODES__ = list;
+    for (const item of list) {
+      if (await probeNode(item.url)) {
+        window.__NH_API_BASE__ = item.url;
+        window.__NH_ACTIVE_NODE__ = item.tag;
+        return item.url;
+      }
+    }
+    if (list.length && !window.__NH_API_BASE__) {
+      window.__NH_API_BASE__ = list[0].url;
+      window.__NH_ACTIVE_NODE__ = list[0].tag;
+    }
+    return window.__NH_API_BASE__;
   };
+
+  async function switchAltNode(failedBase) {
+    const nodes = window.__NH_API_NODES__ || [];
+    for (const item of nodes) {
+      if (item.url !== failedBase && await probeNode(item.url)) {
+        window.__NH_API_BASE__ = item.url;
+        window.__NH_ACTIVE_NODE__ = item.tag;
+        return item.url;
+      }
+    }
+    const refreshed = await window.__NH_REFRESH_ENDPOINT__();
+    return refreshed && refreshed !== failedBase ? refreshed : '';
+  }
+
   if (!location.hostname.endsWith('github.io')) return;
   let ready = window.__NH_REFRESH_ENDPOINT__();
   window.fetch = async function(input, init) {
     await ready;
     const isRel = typeof input === 'string' && /^\/(api|kw|proxy)(\/|\?|$)/.test(input);
     const buildUrl = (base) => isRel && base ? base + input : input;
-    const target = buildUrl(window.__NH_API_BASE__);
+    const usedBase = window.__NH_API_BASE__;
     try {
-      const resp = await origFetch(target, init);
+      const resp = await origFetch(buildUrl(usedBase), init);
       if (isRel && (resp.status === 502 || resp.status === 503 || resp.status === 530)) {
-        const oldBase = window.__NH_API_BASE__;
-        const newBase = await window.__NH_REFRESH_ENDPOINT__();
-        if (newBase && newBase !== oldBase) {
-          return origFetch(buildUrl(newBase), init);
+        const nextBase = await switchAltNode(usedBase);
+        if (nextBase) {
+          return origFetch(buildUrl(nextBase), init);
         }
       }
       return resp;
     } catch (err) {
       if (isRel) {
-        const oldBase = window.__NH_API_BASE__;
-        const newBase = await window.__NH_REFRESH_ENDPOINT__();
-        if (newBase && newBase !== oldBase) {
-          return origFetch(buildUrl(newBase), init);
+        const nextBase = await switchAltNode(usedBase);
+        if (nextBase) {
+          return origFetch(buildUrl(nextBase), init);
         }
       }
       throw err;
